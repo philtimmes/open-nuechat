@@ -15,7 +15,7 @@ export default function Layout({ children }: LayoutProps) {
   const { isMobile } = useMobile();
   const [sidebarOpen, setSidebarOpen] = useState(!isMobile);
   const { user, logout } = useAuthStore();
-  const { fetchChats, createChat, setShowArtifacts } = useChatStore();
+  const { fetchChats, createChat, setShowArtifacts, showArtifacts } = useChatStore();
   const { config } = useBrandingStore();
   const features = useFeatureFlags();
   const navigate = useNavigate();
@@ -36,8 +36,8 @@ export default function Layout({ children }: LayoutProps) {
   }, []);
   
   const handleToggleArtifacts = useCallback(() => {
-    setShowArtifacts((prev: boolean) => !prev);
-  }, [setShowArtifacts]);
+    setShowArtifacts(!showArtifacts);
+  }, [setShowArtifacts, showArtifacts]);
   
   const handleFocusInput = useCallback(() => {
     // Find and focus the chat input

@@ -770,7 +770,11 @@ async def _get_user_chat(db: AsyncSession, user: User, chat_id: str) -> Chat:
 # ============ Zip Upload ============
 
 from fastapi import UploadFile, File
-from app.services.zip_processor import ZipProcessor, format_signature_summary, format_llm_manifest, format_file_content_for_llm
+from app.services.zip_processor import ZipProcessor, ZipSecurityError, format_signature_summary, format_llm_manifest, format_file_content_for_llm
+from app.services.validators import (
+    validate_file_extension, validate_file_size, is_dangerous_file,
+    ALLOWED_ARCHIVE_EXTENSIONS, MAX_ZIP_SIZE, FileValidationError
+)
 from app.models.models import UploadedFile, UploadedArchive
 import logging
 from datetime import datetime, timezone
@@ -869,25 +873,30 @@ async def upload_zip(
     # Verify chat ownership
     await _get_user_chat(db, user, chat_id)
     
-    # Validate file type
-    if not file.filename.lower().endswith('.zip'):
+    # Validate file using shared validators
+    try:
+        validate_file_extension(file.filename or "", ALLOWED_ARCHIVE_EXTENSIONS, "archive")
+    except FileValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.message)
+    
+    # Check for dangerous file patterns
+    if is_dangerous_file(file.filename or ""):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only .zip files are supported",
+            detail="File type not allowed for security reasons"
         )
     
     # Read file content
     zip_data = await file.read()
     
-    # Limit zip size to 100MB
-    if len(zip_data) > 100 * 1024 * 1024:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Zip file too large. Maximum size is 100MB.",
-        )
+    # Validate file size using shared validators
+    try:
+        validate_file_size(len(zip_data), MAX_ZIP_SIZE, "archive")
+    except FileValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.message)
     
     try:
-        # Process the zip file
+        # Process the zip file (includes security validation)
         processor = ZipProcessor()
         manifest = processor.process(zip_data)
         
@@ -954,6 +963,14 @@ async def upload_zip(
             "summary": summary,  # Human-readable summary
             "llm_manifest": llm_manifest,  # LLM context injection format
         }
+    
+    except ZipSecurityError as e:
+        zip_logger.warning(f"Security violation in zip file: {e}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Security check failed: {str(e)}",
+        )
         
     except Exception as e:
         zip_logger.error(f"Error processing zip file: {e}")

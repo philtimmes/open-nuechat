@@ -73,9 +73,11 @@ async def upload_document(
             detail=f"File too large. Max size: {settings.MAX_UPLOAD_SIZE_MB}MB",
         )
     
-    # Save file
+    # Save file with UUID name (prevents path traversal)
     file_id = str(uuid.uuid4())
-    file_ext = Path(file.filename).suffix
+    # Safely extract extension - only allow alphanumeric extensions
+    raw_ext = Path(file.filename).suffix if file.filename else ""
+    file_ext = raw_ext if raw_ext.replace(".", "").isalnum() else ""
     file_path = os.path.join(settings.UPLOAD_DIR, user.id, f"{file_id}{file_ext}")
     
     os.makedirs(os.path.dirname(file_path), exist_ok=True)

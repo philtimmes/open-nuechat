@@ -598,19 +598,21 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       };
       
       ws.onmessage = (event) => {
-        try {
-          const data: WSMessage = JSON.parse(event.data);
-          // Debug: log ALL incoming messages except pong
-          if (data.type !== 'pong') {
-            console.log('%c[WS]', 'color: green; font-weight: bold', data.type, data.payload ? Object.keys(data.payload) : 'no payload');
-          }
-          if (data.type === 'image_generated') {
-            console.log('%c[IMAGE]', 'color: blue; font-weight: bold; font-size: 16px', 'Got image!', (data.payload as any)?.message_id);
-          }
-          handleMessage(data);
-        } catch (err) {
-          console.error('Failed to parse WebSocket message:', err);
+        // Use type-safe parser from wsTypes
+        const data = parseServerEvent(event.data);
+        if (!data) {
+          console.warn('Received invalid WebSocket message');
+          return;
         }
+        
+        // Debug: log ALL incoming messages except pong
+        if (data.type !== 'pong') {
+          console.log('%c[WS]', 'color: green; font-weight: bold', data.type, data.payload ? Object.keys(data.payload) : 'no payload');
+        }
+        if (data.type === 'image_generated') {
+          console.log('%c[IMAGE]', 'color: blue; font-weight: bold; font-size: 16px', 'Got image!', (data.payload as any)?.message_id);
+        }
+        handleMessage(data as WSMessage);
       };
       
       ws.onerror = (error) => {

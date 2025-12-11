@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type { Artifact } from '../types';
 import { groupArtifactsByFilename, type ArtifactGroup } from '../lib/artifacts';
+import { formatFileSize, formatMessageTime } from '../lib/formatters';
 
 interface ArtifactsPanelProps {
   artifacts: Artifact[];
@@ -365,22 +366,8 @@ export default function ArtifactsPanel({
     }
   };
   
-  const formatTimestamp = (dateStr: string): string => {
-    const date = new Date(dateStr);
-    const month = date.getMonth() + 1;
-    const day = date.getDate();
-    const year = date.getFullYear();
-    const hours = date.getHours().toString().padStart(2, '0');
-    const minutes = date.getMinutes().toString().padStart(2, '0');
-    const seconds = date.getSeconds().toString().padStart(2, '0');
-    return `${month}/${day}/${year}::${hours}:${minutes}:${seconds}`;
-  };
-  
-  const formatFileSize = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
+  // Use shared formatters from lib/formatters.ts
+  // formatFileSize and formatMessageTime are imported
   
   const handleFileClick = (group: ArtifactGroup) => {
     setSelectedGroup(group);
@@ -558,7 +545,7 @@ export default function ArtifactsPanel({
                   <div className="flex items-center gap-3">
                     <span className="text-sm font-mono text-[var(--color-primary)] w-8">v{versionNum}</span>
                     <div className="flex-1">
-                      <p className="text-sm text-[var(--color-text)]">{formatTimestamp(version.created_at)}</p>
+                      <p className="text-sm text-[var(--color-text)]">{formatMessageTime(version.created_at)}</p>
                     </div>
                     {isLatest && (
                       <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--color-success)]/10 text-[var(--color-success)]">
@@ -707,7 +694,7 @@ export default function ArtifactsPanel({
                   </span>
                 </div>
                 <p className="text-xs text-[var(--color-text-secondary)]">
-                  {getLanguageLabel(selectedArtifact)} • {formatTimestamp(selectedArtifact.created_at)}
+                  {getLanguageLabel(selectedArtifact)} • {formatMessageTime(selectedArtifact.created_at)}
                 </p>
               </div>
               <div className="flex items-center gap-1">

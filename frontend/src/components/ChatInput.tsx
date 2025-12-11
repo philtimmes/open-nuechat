@@ -11,7 +11,7 @@ interface ChatInputProps {
   isListening?: boolean;
   placeholder?: string;
   isUploadingZip?: boolean;
-  inputRef?: RefObject<HTMLTextAreaElement>;
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
 }
 
 export default function ChatInput({ 

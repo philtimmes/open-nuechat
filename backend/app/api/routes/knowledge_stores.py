@@ -18,6 +18,9 @@ from pathlib import Path
 from app.db.database import get_db
 from app.api.dependencies import get_current_user
 from app.services.rate_limiter import rate_limiter, RateLimitExceeded
+from app.services.validators import (
+    validate_file_size, is_dangerous_file, MAX_DOCUMENT_SIZE, FileValidationError
+)
 from app.models.models import (
     User, KnowledgeStore, KnowledgeStoreShare, 
     Document, DocumentChunk, SharePermission
@@ -482,6 +485,13 @@ async def add_document_to_store(
         store_id, current_user, db, SharePermission.EDIT
     )
     
+    # Security: Check for dangerous file patterns
+    if is_dangerous_file(file.filename or ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File type not allowed for security reasons"
+        )
+    
     # Get file extension
     file_ext = Path(file.filename).suffix.lower() if file.filename else ""
     
@@ -549,7 +559,14 @@ async def add_document_to_store(
     upload_dir = f"uploads/knowledge_stores/{store_id}"
     os.makedirs(upload_dir, exist_ok=True)
     
-    file_path = f"{upload_dir}/{file.filename}"
+    # Sanitize filename to prevent path traversal attacks
+    safe_filename = os.path.basename(file.filename or "upload")
+    # Remove any remaining path separators
+    safe_filename = safe_filename.replace("/", "_").replace("\\", "_")
+    # Prevent .. sequences
+    safe_filename = safe_filename.replace("..", "_")
+    
+    file_path = f"{upload_dir}/{safe_filename}"
     with open(file_path, "wb") as f:
         f.write(file_content)
     
