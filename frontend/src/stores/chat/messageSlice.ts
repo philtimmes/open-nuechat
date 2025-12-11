@@ -1,0 +1,223 @@
+/**
+ * Message slice - Message CRUD and branching operations
+ */
+import type { Message, Artifact, MessageBranch } from '../../types';
+import type { MessageSlice, SliceCreator } from './types';
+import api from '../../lib/api';
+import { extractArtifacts, collectChatArtifacts } from '../../lib/artifacts';
+
+export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
+  messages: [],
+  isLoadingMessages: false,
+
+  fetchMessages: async (chatId: string) => {
+    set({ isLoadingMessages: true, error: null });
+    try {
+      const response = await api.get(`/chats/${chatId}/messages`);
+      const messages: Message[] = Array.isArray(response.data) ? response.data : [];
+      
+      // Collect artifacts from all messages
+      const allArtifacts: Artifact[] = [];
+      for (const msg of messages) {
+        if (msg.artifacts) {
+          allArtifacts.push(...msg.artifacts);
+        }
+        if (msg.content) {
+          const { artifacts } = extractArtifacts(msg.content);
+          allArtifacts.push(...artifacts);
+        }
+      }
+      
+      set({ 
+        messages, 
+        isLoadingMessages: false,
+        artifacts: allArtifacts,
+      });
+      
+      // Also fetch uploaded artifacts and code summary
+      const { fetchUploadedData, fetchCodeSummary } = get();
+      await Promise.all([
+        fetchUploadedData(chatId),
+        fetchCodeSummary(chatId),
+      ]);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to fetch messages';
+      set({ error: errorMessage, isLoadingMessages: false, messages: [] });
+      console.error('Failed to fetch messages:', error);
+    }
+  },
+
+  addMessage: (message: Message) => {
+    // Extract artifacts from new message
+    const { artifacts: newArtifacts } = extractArtifacts(message.content || '');
+    const allNewArtifacts = [...(message.artifacts || []), ...newArtifacts];
+    
+    set((state) => ({
+      messages: [...state.messages, message],
+      artifacts: [...state.artifacts, ...allNewArtifacts],
+    }));
+  },
+
+  clearMessages: () => {
+    set({ 
+      messages: [], 
+      artifacts: [], 
+      selectedArtifact: null,
+      streamingArtifacts: [],
+    });
+  },
+
+  updateMessage: (messageId: string, updates: Partial<Message>) => {
+    set((state) => {
+      const updatedMessages = state.messages.map((m) =>
+        m.id === messageId ? { ...m, ...updates } : m
+      );
+      
+      // If content was updated, re-extract all artifacts from all messages
+      if (updates.content !== undefined) {
+        const messageArtifacts: Artifact[] = [];
+        for (const msg of updatedMessages) {
+          if (msg.artifacts) {
+            messageArtifacts.push(...msg.artifacts);
+          }
+          if (msg.content) {
+            const { artifacts } = extractArtifacts(msg.content);
+            messageArtifacts.push(...artifacts);
+          }
+        }
+        // Keep uploaded artifacts separate and merge
+        const uploadedArtifacts = (state.uploadedArtifacts || []).map(a => ({ ...a, source: 'upload' as const }));
+        return {
+          messages: updatedMessages,
+          artifacts: [...uploadedArtifacts, ...messageArtifacts],
+        };
+      }
+      
+      return { messages: updatedMessages };
+    });
+  },
+
+  replaceMessageId: (tempId: string, realId: string, parentId?: string | null) => {
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === tempId 
+          ? { ...m, id: realId, parent_id: parentId } 
+          : m
+      ),
+    }));
+  },
+
+  retryMessage: async (messageId: string) => {
+    const { messages, currentChat } = get();
+    if (!currentChat) return;
+    
+    const messageIndex = messages.findIndex((m) => m.id === messageId);
+    if (messageIndex === -1) return;
+    
+    const message = messages[messageIndex];
+    if (message.role !== 'assistant') return;
+    
+    // Find the user message before this
+    let userMessageIndex = messageIndex - 1;
+    while (userMessageIndex >= 0 && messages[userMessageIndex].role !== 'user') {
+      userMessageIndex--;
+    }
+    if (userMessageIndex < 0) return;
+    
+    const userMessage = messages[userMessageIndex];
+    
+    // Check if there are messages after this one
+    const hasMessagesAfter = messageIndex < messages.length - 1;
+    
+    if (hasMessagesAfter) {
+      // Create a branch - store current content as a branch
+      const currentBranch: MessageBranch = {
+        id: `branch-${Date.now()}`,
+        content: message.content,
+        artifacts: message.artifacts,
+        tool_calls: message.tool_calls,
+        input_tokens: message.input_tokens,
+        output_tokens: message.output_tokens,
+        created_at: message.created_at,
+      };
+      
+      // Initialize branches array if needed
+      const existingBranches = message.branches || [];
+      const branches = [...existingBranches, currentBranch];
+      
+      // Update the message to have branches
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                branches,
+                current_branch: branches.length,
+                content: '',
+              }
+            : m
+        ),
+      }));
+    } else {
+      // No messages after - just clear and regenerate
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.id === messageId
+            ? { ...m, content: '' }
+            : m
+        ),
+      }));
+    }
+    
+    // Store for WebSocket context to pick up
+    (window as unknown as Record<string, unknown>).__retryMessageId = messageId;
+    (window as unknown as Record<string, unknown>).__retryUserContent = userMessage.content;
+  },
+
+  switchBranch: (messageId: string, branchIndex: number) => {
+    const { messages } = get();
+    const message = messages.find((m) => m.id === messageId);
+    if (!message || !message.branches) return;
+    
+    const totalBranches = message.branches.length + 1;
+    if (branchIndex < 0 || branchIndex >= totalBranches) return;
+    
+    // If switching to the "main" branch (last one, current content)
+    if (branchIndex === message.branches.length) {
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          m.id === messageId
+            ? { ...m, current_branch: undefined }
+            : m
+        ),
+      }));
+      return;
+    }
+    
+    // Switch to a stored branch
+    const branch = message.branches[branchIndex];
+    const currentContent = message.content;
+    const currentArtifacts = message.artifacts;
+    
+    set((state) => ({
+      messages: state.messages.map((m) =>
+        m.id === messageId
+          ? {
+              ...m,
+              content: branch.content,
+              artifacts: branch.artifacts,
+              tool_calls: branch.tool_calls,
+              input_tokens: branch.input_tokens,
+              output_tokens: branch.output_tokens,
+              current_branch: branchIndex,
+              branches: m.branches?.map((b, i) =>
+                i === (m.current_branch ?? m.branches!.length)
+                  ? { ...b, content: currentContent, artifacts: currentArtifacts }
+                  : b
+              ),
+            }
+          : m
+      ),
+    }));
+  },
+});

@@ -125,6 +125,129 @@ BINARY_EXTENSIONS = {
 # Maximum file size for content extraction (500KB)
 MAX_CONTENT_SIZE = 500 * 1024
 
+# Security limits
+MAX_FILES_IN_ARCHIVE = 10000
+MAX_TOTAL_UNCOMPRESSED_SIZE = 500 * 1024 * 1024  # 500MB
+MAX_PATH_DEPTH = 50
+MAX_PATH_COMPONENT_LENGTH = 255
+
+
+class ZipSecurityError(Exception):
+    """Raised when a zip file fails security validation"""
+    pass
+
+
+def validate_zip_path(filename: str) -> None:
+    """
+    Validate a zip entry path for security issues.
+    
+    Checks for:
+    - Null bytes
+    - Absolute paths
+    - Directory traversal (.. components)
+    - Excessive path depth
+    - Overly long path components
+    
+    Args:
+        filename: The path from the zip entry
+        
+    Raises:
+        ZipSecurityError: If the path fails validation
+    """
+    # Check for null bytes
+    if '\x00' in filename:
+        raise ZipSecurityError(f"Null byte in filename: {repr(filename)}")
+    
+    # Check for absolute paths
+    if filename.startswith('/') or filename.startswith('\\'):
+        raise ZipSecurityError(f"Absolute path not allowed: {filename}")
+    
+    # Windows absolute path check
+    if len(filename) > 1 and filename[1] == ':':
+        raise ZipSecurityError(f"Windows absolute path not allowed: {filename}")
+    
+    # Normalize path separators and split
+    normalized = filename.replace('\\', '/')
+    components = normalized.split('/')
+    
+    # Check path depth
+    if len(components) > MAX_PATH_DEPTH:
+        raise ZipSecurityError(f"Path too deep ({len(components)} levels): {filename}")
+    
+    # Check each component
+    for component in components:
+        # Directory traversal check
+        if component == '..':
+            raise ZipSecurityError(f"Directory traversal not allowed: {filename}")
+        
+        # Component length check
+        if len(component) > MAX_PATH_COMPONENT_LENGTH:
+            raise ZipSecurityError(f"Path component too long ({len(component)} chars): {component[:50]}...")
+
+
+def is_symlink(zip_info: zipfile.ZipInfo) -> bool:
+    """
+    Check if a zip entry is a symbolic link.
+    
+    Symlinks in zip files have a special external_attr that indicates
+    Unix file mode with symlink bit set.
+    
+    Args:
+        zip_info: ZipInfo object from the archive
+        
+    Returns:
+        True if the entry appears to be a symlink
+    """
+    # Unix symlink: external_attr high 16 bits contain Unix mode
+    # Symlink mode is 0o120000
+    unix_mode = (zip_info.external_attr >> 16) & 0xFFFF
+    return (unix_mode & 0o170000) == 0o120000
+
+
+def validate_zip_archive(zf: zipfile.ZipFile) -> None:
+    """
+    Validate an entire zip archive for security issues.
+    
+    Checks:
+    - Total number of files
+    - Total uncompressed size
+    - Each file path
+    - Symlinks
+    
+    Args:
+        zf: Open ZipFile object
+        
+    Raises:
+        ZipSecurityError: If the archive fails validation
+    """
+    info_list = zf.infolist()
+    
+    # Check file count
+    if len(info_list) > MAX_FILES_IN_ARCHIVE:
+        raise ZipSecurityError(
+            f"Too many files in archive: {len(info_list)} (max: {MAX_FILES_IN_ARCHIVE})"
+        )
+    
+    # Calculate total uncompressed size and validate each entry
+    total_size = 0
+    for info in info_list:
+        # Validate path
+        validate_zip_path(info.filename)
+        
+        # Check for symlinks
+        if is_symlink(info):
+            raise ZipSecurityError(f"Symlinks not allowed: {info.filename}")
+        
+        # Accumulate size
+        total_size += info.file_size
+        
+        # Early exit if size exceeded
+        if total_size > MAX_TOTAL_UNCOMPRESSED_SIZE:
+            raise ZipSecurityError(
+                f"Total uncompressed size exceeds limit: {total_size} bytes "
+                f"(max: {MAX_TOTAL_UNCOMPRESSED_SIZE})"
+            )
+
 
 class SignatureExtractor:
     """Extract code signatures from various programming languages"""
@@ -1217,6 +1340,9 @@ class ZipProcessor:
         total_size = 0
         
         with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
+            # Security validation first
+            validate_zip_archive(zf)
+            
             for info in zf.infolist():
                 # Skip directories
                 if info.is_dir():

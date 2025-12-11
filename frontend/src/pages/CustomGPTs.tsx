@@ -34,8 +34,6 @@ export default function CustomGPTs() {
     welcome_message: '',
     suggested_prompts: [''],
     model: '',
-    temperature: 1.0,
-    max_tokens: 4096,
     is_public: false,
     is_discoverable: false,
     knowledge_store_ids: [] as string[],
@@ -168,8 +166,6 @@ export default function CustomGPTs() {
         welcome_message: formData.welcome_message || null,
         suggested_prompts: formData.suggested_prompts.filter(p => p.trim()),
         model: formData.model,
-        temperature: formData.temperature,
-        max_tokens: formData.max_tokens,
         enabled_tools: [],
         knowledge_store_ids: formData.knowledge_store_ids,
         is_public: formData.is_public,
@@ -290,8 +286,6 @@ export default function CustomGPTs() {
       welcome_message: gpt.welcome_message || '',
       suggested_prompts: gpt.suggested_prompts.length ? gpt.suggested_prompts : [''],
       model: gpt.model,
-      temperature: gpt.temperature,
-      max_tokens: gpt.max_tokens,
       is_public: gpt.is_public,
       is_discoverable: gpt.is_discoverable,
       knowledge_store_ids: gpt.knowledge_store_ids || [],
@@ -313,8 +307,6 @@ export default function CustomGPTs() {
       welcome_message: '',
       suggested_prompts: [''],
       model: defaultModel || '',
-      temperature: 1.0,
-      max_tokens: 4096,
       is_public: false,
       is_discoverable: false,
       knowledge_store_ids: [],
@@ -789,58 +781,25 @@ export default function CustomGPTs() {
                 </div>
                 
                 {/* Model Settings */}
-                <div className="grid grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Model</label>
-                    <select
-                      value={formData.model}
-                      onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-                      className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    >
-                      {models.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.name || model.id}
-                        </option>
-                      ))}
-                      {models.length === 0 && (
-                        <option value={defaultModel || 'default'}>{defaultModel || 'Default Model'}</option>
-                      )}
-                    </select>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Temperature</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="2"
-                      step="0.1"
-                      value={formData.temperature}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value);
-                        if (!isNaN(val) && val >= 0 && val <= 2) {
-                          setFormData({ ...formData, temperature: val });
-                        }
-                      }}
-                      className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    />
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Max Tokens</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={formData.max_tokens}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value);
-                        if (!isNaN(val) && val >= 1) {
-                          setFormData({ ...formData, max_tokens: val });
-                        }
-                      }}
-                      className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                    />
-                  </div>
+                <div>
+                  <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Model</label>
+                  <select
+                    value={formData.model}
+                    onChange={(e) => setFormData({ ...formData, model: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  >
+                    {models.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name || model.id}
+                      </option>
+                    ))}
+                    {models.length === 0 && (
+                      <option value={defaultModel || 'default'}>{defaultModel || 'Default Model'}</option>
+                    )}
+                  </select>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Temperature and context window are inherited from system defaults
+                  </p>
                 </div>
                 
                 {/* Visibility */}

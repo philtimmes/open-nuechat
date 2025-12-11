@@ -6,7 +6,7 @@ Supports:
 - Real-time notifications
 """
 from typing import Dict, Set, Optional, Any, List
-from datetime import datetime, timezone, timezone
+from datetime import datetime, timezone
 import json
 import asyncio
 import uuid

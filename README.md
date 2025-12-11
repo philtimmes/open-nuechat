@@ -6,6 +6,91 @@
 
 ---
 
+## ⚡ Quick Start
+
+```bash
+# 1. Clone and configure
+git clone https://github.com/yourname/open-nuechat.git
+cd open-nuechat
+cp .env.example .env
+
+# 2. Edit .env with your settings (minimum required):
+#    - SECRET_KEY (generate with: openssl rand -hex 32)
+#    - ADMIN_EMAIL / ADMIN_PASS
+#    - LLM_API_BASE_URL (e.g., http://localhost:11434/v1 for Ollama)
+
+# 3. Build and start (choose your platform)
+./control.sh build --profile cpu     # or: rocm, cuda
+./control.sh start -d --profile cpu
+
+# 4. Open http://localhost:8000
+```
+
+> **GPU Users**: For ROCm, run `./control.sh faiss-build --profile rocm` first (~12 min build).
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Open-NueChat                                │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐    ┌─────────────────────────────────────────┐    │
+│  │   React     │    │              FastAPI Backend            │    │
+│  │  Frontend   │◄──►│  ┌─────────┐ ┌─────────┐ ┌──────────┐  │    │
+│  │  (Vite)     │    │  │  Auth   │ │  Chat   │ │   RAG    │  │    │
+│  └─────────────┘    │  │ Service │ │ Service │ │ Service  │  │    │
+│                     │  └────┬────┘ └────┬────┘ └────┬─────┘  │    │
+│                     │       │           │           │        │    │
+│                     │  ┌────▼───────────▼───────────▼─────┐  │    │
+│                     │  │           SQLite + FAISS         │  │    │
+│                     │  └──────────────────────────────────┘  │    │
+│                     └─────────────────────────────────────────┘    │
+│                                       │                            │
+│  ┌─────────────┐    ┌─────────────┐   │   ┌─────────────────────┐  │
+│  │ TTS Service │    │ Image Gen   │   │   │    LLM Backend      │  │
+│  │  (Kokoro)   │    │ (Diffusers) │   └──►│ (Ollama/vLLM/etc.)  │  │
+│  └─────────────┘    └─────────────┘       └─────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## ✨ Features
+
+| Category | Features |
+|----------|----------|
+| 🤖 **Custom GPTs** | Create AI assistants with custom prompts, attach knowledge bases, publish to marketplace |
+| 📚 **Knowledge Bases** | RAG with local embeddings, FAISS vector search, 40+ file types supported |
+| 💬 **Real-time Chat** | WebSocket streaming, conversation branching, retry/regenerate, zip file uploads |
+| 🎙️ **Voice** | TTS (Kokoro), STT (Whisper), hands-free conversation mode |
+| 🖼️ **Image Gen** | Integrated diffusion model, queue-based generation |
+| 🔐 **Auth** | JWT tokens, OAuth2 (Google/GitHub), API keys with scopes |
+| 🔧 **Tools** | Calculator, web search, Python execution, document search, custom MCP tools |
+| 💰 **Billing** | Token tracking, tier limits (Free/Pro/Enterprise), admin bypass |
+
+---
+
+## 📖 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [USAGE.md](USAGE.md) | User guide - features, workflows, tips |
+| [.env.example](.env.example) | All configuration options with descriptions |
+| `/docs` (runtime) | Interactive API documentation (Swagger) |
+
+---
+
+## Prerequisites
+
+- **Docker** and **Docker Compose**
+- **GPU Acceleration** (optional):
+  - AMD: ROCm 6.0+ drivers
+  - NVIDIA: CUDA 12.0+ and nvidia-container-toolkit
+
+---
+
 ## Table of Contents
 
 - [Features](#features)
@@ -123,7 +208,7 @@ Built-in tools that the LLM can use:
 
 ```bash
 # Clone the repository
-git clone https://github.com/philtimmes/open-nuechat.git
+git clone https://github.com/yourname/open-nuechat.git
 cd open-nuechat
 
 # Copy and configure environment
@@ -455,9 +540,14 @@ For detailed instructions on using Open-NueChat features, see **[USAGE.md](USAGE
 
 ## Schema Version
 
-**Current: NC-0.6.27**
+**Current: NC-0.6.28**
 
 The database schema is automatically migrated on startup.
+
+### Recent Changes (NC-0.6.28)
+- **Security**: Enhanced zip file validation, rate limiting, JWT token blacklisting
+- **Architecture**: Models split into domain modules, chat store split into slices
+- **DX**: Keyboard shortcuts, structured logging, improved error handling
 
 ---
 
@@ -479,7 +569,7 @@ Any use, modification, or distribution requires:
 2. **Citation**: For academic/research use:
    ```
    Open-NueChat: An Open-Source LLM Chat Platform
-   https://github.com/philtimmes/open-nuechat
+   https://github.com/yourname/open-nuechat
    ```
 3. **Visible Credit**: If deployed as a service, include credit in footer or about page
 

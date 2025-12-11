@@ -147,12 +147,11 @@ You are a friendly Python programming tutor. You:
 
 #### Model Settings
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| **Base Model** | Which LLM to use | (system default) |
-| **Temperature** | Creativity (0.0-2.0) | 0.7 |
-| **Max Tokens** | Maximum response length | 4096 |
-| **Top P** | Nucleus sampling | 1.0 |
+| Setting | Description |
+|---------|-------------|
+| **Base Model** | Which LLM to use for this GPT |
+
+> **Note**: Temperature and context window are inherited from system defaults configured in the Admin panel.
 
 #### Knowledge Base
 
@@ -561,4 +560,4 @@ For developers:
 | **Embedding** | Vector representation of text for semantic search |
 | **Token** | Unit of text (roughly 4 characters or 0.75 words) |
 | **System Prompt** | Instructions that define AI behavior |
-| **Temperature** | Controls randomness (0=deterministic, 2=creative) |
+| **Temperature** | Controls randomness in responses (0=deterministic, 2=creative). Set by admin. |

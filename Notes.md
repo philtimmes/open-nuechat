@@ -10,58 +10,105 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.27
+**Current Version:** NC-0.6.28
 
 ---
 
 ## Architecture
 
 ### Deployment (Single Container)
+
 ```
-┌─────────────────────────────────────┐
-│           open-nuechat              │
-│  ┌─────────────────────────────┐   │
-│  │         FastAPI             │   │
-│  │  ┌─────────┬─────────────┐  │   │
-│  │  │ /api/*  │ /ws/*       │  │   │
-│  │  │ Backend │ WebSocket   │  │   │
-│  │  └─────────┴─────────────┘  │   │
-│  │  ┌─────────────────────┐    │   │
-│  │  │ /* (static files)   │    │   │
-│  │  │ Frontend SPA        │    │   │
-│  │  └─────────────────────┘    │   │
-│  └─────────────────────────────┘   │
-│   Host: BACKEND_HOST:BACKEND_PORT  │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Open-NueChat                                │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐    ┌─────────────────────────────────────────┐    │
+│  │   React     │    │              FastAPI Backend            │    │
+│  │  Frontend   │◄──►│  ┌─────────┐ ┌─────────┐ ┌──────────┐  │    │
+│  │  (Vite)     │    │  │  Auth   │ │  Chat   │ │   RAG    │  │    │
+│  └─────────────┘    │  │ Service │ │ Service │ │ Service  │  │    │
+│                     │  └────┬────┘ └────┬────┘ └────┬─────┘  │    │
+│                     │       │           │           │        │    │
+│                     │  ┌────▼───────────▼───────────▼─────┐  │    │
+│                     │  │           SQLite + FAISS         │  │    │
+│                     │  └──────────────────────────────────┘  │    │
+│                     └─────────────────────────────────────────┘    │
+│                                       │                            │
+│  ┌─────────────┐    ┌─────────────┐   │   ┌─────────────────────┐  │
+│  │ TTS Service │    │ Image Gen   │   │   │    LLM Backend      │  │
+│  │  (Kokoro)   │    │ (Diffusers) │   └──►│ (Ollama/vLLM/etc.)  │  │
+│  └─────────────┘    └─────────────┘       └─────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Backend Structure
+### Backend Structure (Refactored NC-0.6.28)
+
 ```
 backend/app/
-├── api/routes/       # FastAPI route handlers
-├── core/config.py    # Pydantic settings
-├── db/database.py    # SQLAlchemy async engine
-├── models/           # SQLAlchemy ORM models
-├── services/         # Business logic
-│   ├── auth.py       # JWT + bcrypt
-│   ├── billing.py    # Token tracking
-│   ├── document_queue.py  # Persistent doc processing
-│   ├── llm.py        # OpenAI-compatible client
-│   ├── rag.py        # FAISS + embeddings
-│   └── stt.py        # Speech-to-text
-├── filters/          # Bidirectional stream filters
-└── tools/            # Built-in LLM tools
+├── api/
+│   ├── routes/              # FastAPI route handlers
+│   ├── helpers.py           # Shared route utilities (NEW)
+│   ├── exception_handlers.py # Centralized error handling (NEW)
+│   ├── ws_types.py          # WebSocket event types (NEW)
+│   └── schemas.py           # Pydantic request/response schemas
+├── core/
+│   ├── config.py            # Pydantic settings
+│   └── logging.py           # Structured logging (NEW)
+├── db/database.py           # SQLAlchemy async engine
+├── models/                  # SQLAlchemy ORM models (REFACTORED)
+│   ├── __init__.py          # Re-exports all models
+│   ├── base.py              # Base, generate_uuid, enums
+│   ├── user.py              # User, OAuthAccount, APIKey
+│   ├── chat.py              # Chat, Message, ChatParticipant
+│   ├── document.py          # Document, DocumentChunk, KnowledgeStore
+│   ├── assistant.py         # CustomAssistant, AssistantConversation
+│   ├── billing.py           # TokenUsage
+│   ├── tool.py              # Tool, ToolUsage
+│   ├── filter.py            # ChatFilter
+│   ├── upload.py            # UploadedFile, UploadedArchive
+│   └── settings.py          # SystemSetting, Theme
+├── services/
+│   ├── auth.py              # JWT + bcrypt
+│   ├── billing.py           # Token tracking
+│   ├── document_queue.py    # Persistent doc processing
+│   ├── llm.py               # OpenAI-compatible client
+│   ├── rag.py               # FAISS + embeddings
+│   ├── stt.py               # Speech-to-text
+│   ├── token_manager.py     # JWT blacklisting (NEW)
+│   ├── rate_limiter.py      # Token bucket rate limiting (NEW)
+│   ├── zip_processor.py     # Secure zip extraction (SECURITY UPDATE)
+│   └── microservice_utils.py # Shared microservice utilities (NEW)
+├── filters/                 # Bidirectional stream filters
+└── tools/                   # Built-in LLM tools
 ```
 
-### Frontend Structure
+### Frontend Structure (Refactored NC-0.6.28)
+
 ```
 frontend/src/
-├── components/       # React components
-├── hooks/            # Custom hooks
-├── pages/            # Route pages
-├── lib/              # API client, utilities
-├── stores/           # Zustand state
-└── types/            # TypeScript types
+├── components/              # React components
+├── hooks/
+│   ├── useMobile.ts
+│   ├── useVoice.ts
+│   └── useKeyboardShortcuts.ts  # Keyboard shortcuts (NEW)
+├── pages/                   # Route pages
+├── lib/
+│   ├── api.ts               # API client
+│   ├── artifacts.ts         # Artifact extraction
+│   ├── formatters.ts        # Shared formatting utilities (NEW)
+│   └── wsTypes.ts           # WebSocket type guards (NEW)
+├── stores/
+│   ├── chatStore.ts         # Legacy (re-exports from chat/)
+│   ├── chat/                # Modular chat store (NEW)
+│   │   ├── index.ts         # Composed store
+│   │   ├── types.ts         # Type definitions
+│   │   ├── chatSlice.ts     # Chat CRUD
+│   │   ├── messageSlice.ts  # Message handling
+│   │   ├── streamSlice.ts   # Streaming state
+│   │   ├── artifactSlice.ts # Artifacts
+│   │   └── codeSummarySlice.ts  # Code tracking
+│   └── modelsStore.ts
+└── types/                   # TypeScript types
 ```
 
 ---
@@ -69,31 +116,30 @@ frontend/src/
 ## Configuration
 
 ### Required .env Settings
+
 ```bash
-LLM_API_KEY=your-api-key
-LLM_API_BASE=http://your-llm-endpoint/v1
-LLM_MODEL=your-model-name
-JWT_SECRET=generate-secure-random-string
+# Security (REQUIRED - generate unique values!)
+SECRET_KEY=your-secure-random-string-here  # openssl rand -hex 32
 ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=secure-admin-password
+ADMIN_PASS=secure-admin-password
+
+# LLM (REQUIRED)
+LLM_API_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=not-needed
+LLM_MODEL=default
 ```
 
 ### Optional .env Settings
+
 ```bash
 BACKEND_HOST=127.0.0.1
 BACKEND_PORT=8000
 DATABASE_URL=sqlite+aiosqlite:///./data/nuechat.db
 FREEFORALL=false
 FREE_TIER_TOKENS=100000
-IMAGE_SERVICE_URL=http://image-service:5000
-TTS_SERVICE_URL=http://tts-service:8100
-```
-
-### OAuth Configuration
-```bash
-GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=xxx
-GOOGLE_REDIRECT_URI=https://yourdomain.com/api/auth/google/callback
+IMAGE_SERVICE_URL=http://image-service:8002
+TTS_SERVICE_URL=http://tts-service:8001
+DEBUG=false
 ```
 
 ---
@@ -111,25 +157,51 @@ Admins (`is_admin=True`) bypass all tier-based limits:
 | API Keys | `api_keys.py` | free: 3, pro: 10, enterprise: 100 |
 | Token Usage | `billing.py` | Tier-based monthly limits |
 
-All checks use `if not current_user.is_admin:` guard before enforcing limits.
+### Rate Limiting (NC-0.6.28)
 
-### Token Refill System
+Token bucket rate limiting with configurable limits:
 
-User token counts (`tokens_used_this_month`) are automatically reset based on the configurable `token_refill_interval_hours` setting in Admin → System.
+| Action | Limit | Window | Burst |
+|--------|-------|--------|-------|
+| chat_message | 60 | 1 min | 10 |
+| image_generation | 10 | 1 min | 3 |
+| file_upload | 20 | 1 min | 5 |
+| api_key_creation | 5 | 1 hour | - |
+| login_attempt | 10 | 5 min | - |
+| document_upload | 30 | 1 hour | - |
+
+Rate limit headers returned:
+- `X-RateLimit-Limit`: Maximum requests
+- `X-RateLimit-Remaining`: Remaining requests
+- `X-RateLimit-Reset`: Reset timestamp
+- `Retry-After`: Seconds to wait (when exceeded)
+
+### Token Blacklisting (NC-0.6.28)
+
+JWT tokens can be blacklisted on logout:
+- In-memory LRU cache (max 10000 tokens)
+- Automatic cleanup of expired tokens
+- Refresh token rotation when older than half lifetime
+
+### Zip Security (NC-0.6.28)
+
+Enhanced zip extraction security:
+- Path traversal prevention (`..` detection)
+- Null byte detection
+- Symlink detection
+- Size limits (500MB uncompressed, 10000 files)
+- Path depth limits (50 levels max)
+
+---
+
+## Token Refill System
+
+User token counts (`tokens_used_this_month`) are automatically reset based on the configurable `token_refill_interval_hours` setting.
 
 **How It Works:**
 1. Background task runs every hour
 2. Compares current time vs `last_token_reset_timestamp`
 3. If elapsed >= `token_refill_interval_hours`, resets ALL users' tokens to 0
-
-**Times Compared:**
-```python
-now = datetime.now(timezone.utc)
-last_reset = datetime.fromisoformat(setting.value)
-hours_since_reset = (now - last_reset).total_seconds() / 3600
-if hours_since_reset >= refill_hours:
-    # Reset all users
-```
 
 **Admin Settings:**
 - Setting: `token_refill_interval_hours` (default: 720 = 30 days)
@@ -139,7 +211,7 @@ if hours_since_reset >= refill_hours:
 
 Enable in Admin → Site Dev → Debug Token Resets
 
-**When enabled, logs on every token reset check:**
+When enabled, logs:
 ```
 ============================================================
 [TOKEN_RESET_DEBUG] Token reset check triggered
@@ -148,22 +220,16 @@ Enable in Admin → Site Dev → Debug Token Resets
 [TOKEN_RESET_DEBUG] Refill interval: 720 hours
 [TOKEN_RESET_DEBUG] User token counts (3 users):
 [TOKEN_RESET_DEBUG]   admin@example.com: 150,000 tokens (tier: enterprise)
-[TOKEN_RESET_DEBUG]   user1@example.com: 45,000 tokens (tier: pro)
-[TOKEN_RESET_DEBUG]   user2@example.com: 12,500 tokens (tier: free)
 ============================================================
-[Token Reset not necessary]
-[TOKEN_RESET_DEBUG] 671.5 hours until next reset.
 ```
-
-**When disabled:** Silent operation (no logging).
 
 ---
 
 ## Document Processing Queue
 
-Documents uploaded to RAG or Knowledge Stores are processed asynchronously via a persistent queue that survives container restarts.
+Documents uploaded to RAG are processed asynchronously via a persistent queue.
 
-### How It Works
+### Queue Flow
 ```
 User uploads document
   → Document saved to disk
@@ -175,7 +241,7 @@ Background worker (runs continuously)
   → Pick up pending task
   → Extract text from document
   → Create embeddings
-  → Update document (is_processed=True, chunk_count=N)
+  → Update document (is_processed=True)
   → Remove task from queue
 ```
 
@@ -187,94 +253,61 @@ Queue state stored in `/app/data/document_queue.json`:
   "task-uuid-1": {
     "task_id": "task-uuid-1",
     "document_id": "doc-uuid",
-    "user_id": "user-uuid",
-    "knowledge_store_id": "store-uuid",
-    "file_path": "/app/uploads/...",
-    "file_type": "application/pdf",
     "status": "pending",
-    "created_at": "2024-12-11T10:00:00+00:00",
     "retry_count": 0
   }
 }
 ```
 
 ### Task States
-
-| Status | Description |
-|--------|-------------|
-| `pending` | Waiting to be processed |
-| `processing` | Currently being processed |
-| `completed` | Successfully processed (removed from queue) |
-| `failed` | Failed after 3 retries |
-
-### Restart Behavior
-
-On startup:
-1. Load queue from disk
-2. Reset any `processing` tasks to `pending` (interrupted)
-3. Start background worker
-4. Worker processes pending tasks
-
-### Logging
-```
-[DOC_QUEUE] Worker started
-[DOC_QUEUE] Added task abc123 for document def456
-[DOC_QUEUE] Processing task abc123 - document def456
-[DOC_QUEUE] Extracting text from /app/uploads/...
-[DOC_QUEUE] Creating embeddings for document def456
-[DOC_QUEUE] Completed processing document def456 (42 chunks)
-[DOC_QUEUE] Removed task abc123
-[DOC_QUEUE] Empty Document Queue
-```
-
-**Enable in:** Admin → Site Dev → Debug Document Queue
-
-**When disabled:** Silent operation (no logging).
+- `pending`: Waiting to be processed
+- `processing`: Currently being processed
+- `completed`: Successfully processed (removed)
+- `failed`: Failed after 3 retries
 
 ---
 
-## Message Chain / Branching Architecture
+## Message Branching
 
 Messages form a tree structure via `parent_id`:
 ```
-User1 (parent_id=null)        <- First message is root
+User1 (parent_id=null)
   └── Asst1 (parent_id=User1)
         └── User2 (parent_id=Asst1)
               └── Asst2 (parent_id=User2)
                     ├── User3a (parent_id=Asst2)  <- Branch A
-                    └── User3b (parent_id=Asst2)  <- Branch B (edit/retry)
+                    └── User3b (parent_id=Asst2)  <- Branch B
 ```
 
 ### Frontend Message Flow
 
-**Sending a New Message:**
 ```typescript
-// ChatPage.tsx - handleSendMessage
-1. Calculate parentId from store messages (self-contained)
+// handleSendMessage
+1. Calculate parentId from store messages (fresh read to avoid stale closures)
 2. Call sendChatMessage(chatId, content, undefined, parentId)
 
-// WebSocketContext.tsx - sendChatMessage
+// WebSocket flow
 3. Create temp user message with parent_id
 4. Send to backend via WebSocket
-
-// Backend saves, streams response
-5. stream_end returns assistant message_id
-6. Assistant becomes new leaf for next message
+5. Backend saves, streams response
+6. stream_end returns assistant message_id
+7. Assistant becomes new leaf for next message
 ```
 
-**Voice Mode Parent ID Fix (NC-0.6.27):**
-Calculate parentId directly from messages at send time to avoid stale closure issues:
-```typescript
-const handleSendMessage = async (content: string) => {
-  const { messages } = useChatStore.getState();
-  const sortedMsgs = [...messages].sort((a, b) => 
-    new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-  );
-  const lastAssistant = sortedMsgs.reverse().find(m => m.role === 'assistant');
-  let parentId = lastAssistant?.id || null;
-  // ... rest of send logic
-};
-```
+---
+
+## Keyboard Shortcuts (NC-0.6.28)
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl/⌘ + N | New chat |
+| Ctrl/⌘ + / | Focus input |
+| Ctrl/⌘ + B | Toggle sidebar |
+| Ctrl/⌘ + Shift + Backspace | Delete chat |
+| Ctrl/⌘ + Shift + A | Toggle artifacts |
+| Ctrl/⌘ + K | Search |
+| Ctrl/⌘ + , | Settings |
+| Escape | Close panel |
 
 ---
 
@@ -283,81 +316,48 @@ const handleSendMessage = async (content: string) => {
 Admin-configurable message processing flows (Admin → Filter Chains tab).
 
 ### Step Types
-
-| Type | Description |
-|------|-------------|
-| `to_llm` | Ask LLM a question |
-| `query` | Generate search query |
-| `to_tool` | Execute a tool |
-| `go_to_llm` | Send to main LLM |
-| `filter_complete` | Exit chain early |
-| `set_var` | Set a variable |
-| `compare` | Compare values |
-| `context_insert` | Add to context |
-| `call_chain` | Execute another chain |
-| `stop` | Stop execution |
-| `block` | Block with error |
+- `to_llm`: Ask LLM a question
+- `query`: Generate search query
+- `to_tool`: Execute a tool
+- `go_to_llm`: Send to main LLM
+- `filter_complete`: Exit chain early
+- `set_var`: Set a variable
+- `compare`: Compare values
+- `context_insert`: Add to context
+- `call_chain`: Execute another chain
+- `stop`: Stop execution
+- `block`: Block with error
 
 ### Variables
-
 - `$Query` - Original user input
 - `$PreviousResult` - Last step output
 - `$Var[name]` - Named outputs from earlier steps
 
 ---
 
-## Image Generation
+## WebSocket Events
 
-### Request Detection
+### Client → Server
+- `subscribe`: Join a chat room
+- `unsubscribe`: Leave a chat room
+- `chat_message`: Send a message
+- `stop_generation`: Stop LLM generation
+- `ping`: Heartbeat
+- `regenerate`: Retry a message
 
-LLM decides if user wants an image via `[IMAGE_REQUEST]` tag:
-```
-User: "draw me a cat"
-LLM: [IMAGE_REQUEST: A cute orange tabby cat sitting...]
-```
-
-### Generation Flow
-```
-Message → Detect [IMAGE_REQUEST] → Queue job → Poll status → Display
-```
-
-### Persistence
-
-Images saved to `/app/data/generated_images/` with metadata in SQLite.
-
----
-
-## Voice Features (TTS/STT)
-
-### Text-to-Speech (TTS)
-- Microservice: `tts-service` with Kokoro model
-- Streaming audio chunks via WebSocket
-- ROCm GPU acceleration
-
-### Speech-to-Text (STT)
-- Whisper model (multilingual)
-- Voice Activity Detection (VAD)
-- Streaming transcription
-
----
-
-## API Response Formats
-
-### Chats List
-```json
-{ "chats": [...], "total": 0, "page": 1, "page_size": 20 }
-```
-
-### Messages List
-```json
-[{ "id": "...", "role": "user", "content": "..." }, ...]
-```
-
-### WebSocket Events
-- `stream_start` - LLM response starting
-- `stream_chunk` - Content chunk
-- `stream_end` - Response complete
-- `message_saved` - User message confirmed
+### Server → Client
+- `stream_start`: LLM response starting
+- `stream_chunk`: Content chunk
+- `stream_end`: Response complete
+- `stream_error`: Error during streaming
+- `tool_call`: Tool being invoked
+- `tool_result`: Tool response
+- `image_generation`: Image status update
+- `message_saved`: User message confirmed
+- `pong`: Heartbeat response
+- `error`: General error
+- `subscribed`: Room joined
+- `unsubscribed`: Room left
 
 ---
 
@@ -365,7 +365,8 @@ Images saved to `/app/data/generated_images/` with metadata in SQLite.
 
 | Version | Date | Summary |
 |---------|------|---------|
-| NC-0.6.27 | 2024-12-11 | Voice mode parent_id fix, token reset automation, document queue, admin limit bypasses |
+| NC-0.6.28 | 2024-12-11 | Model split, security hardening, rate limiting, keyboard shortcuts |
+| NC-0.6.27 | 2024-12-11 | Voice mode parent_id fix, token reset automation, admin bypasses |
 | NC-0.6.26 | 2024-12-10 | Talk to Me voice mode debug panel |
 | NC-0.6.25 | 2024-12-10 | Swipe gestures for retry/branch navigation |
 | NC-0.6.24 | 2024-12-09 | Filter chain debug mode |
@@ -373,31 +374,52 @@ Images saved to `/app/data/generated_images/` with metadata in SQLite.
 | NC-0.6.22 | 2024-12-09 | Error handling & file request fixes |
 | NC-0.6.21 | 2024-12-09 | Image generation queue |
 | NC-0.6.20 | 2024-12-09 | Image persistence |
-| NC-0.6.19 | 2024-12-09 | Image size/aspect selection |
-| NC-0.6.18 | 2024-12-08 | Image generation service |
-| NC-0.6.17 | 2024-12-08 | Image request detection |
-| NC-0.6.16 | 2024-12-08 | ROCm GPU for TTS |
-| NC-0.6.15 | 2024-12-08 | Artifact persistence |
-| NC-0.6.14 | 2024-12-08 | Mobile responsive buttons |
-| NC-0.6.13 | 2024-12-08 | Streaming TTS/STT |
-| NC-0.6.12 | 2024-12-08 | Voice UI polish |
-| NC-0.6.11 | 2024-12-08 | Voice TTS/STT frontend |
-| NC-0.6.10 | 2024-12-08 | STT backend |
-| NC-0.6.9 | 2024-12-08 | TTS microservice |
-| NC-0.6.8 | 2024-12-08 | Health check token reset |
-| NC-0.6.7 | 2024-12-08 | Artifacts panel |
-| NC-0.6.6 | 2024-12-08 | Persist login state |
-| NC-0.6.5 | 2024-12-08 | UI modernization |
-| NC-0.6.4 | 2024-12-08 | Stop generation |
-| NC-0.6.3 | 2024-12-08 | Message edit/delete branching |
-| NC-0.6.2 | 2024-12-08 | Code summary feature |
-| NC-0.6.1 | 2024-12-08 | Tool usage tracking |
-| NC-0.6.0 | 2024-12-08 | Agent flows editor |
+
+---
+
+## Development Guidelines
+
+### Adding New Models
+
+1. Create new file in `backend/app/models/` (e.g., `mymodel.py`)
+2. Import Base and generate_uuid from `base.py`
+3. Define SQLAlchemy model class
+4. Add re-export in `__init__.py`
+5. Run migrations on startup
+
+### Adding New API Routes
+
+1. Create route file in `backend/app/api/routes/`
+2. Use helpers from `helpers.py` for common patterns
+3. Register router in `main.py`
+4. Add exception handlers if needed
+
+### Frontend Store Slices
+
+1. Add new slice file in `frontend/src/stores/chat/`
+2. Define types in `types.ts`
+3. Implement slice creator function
+4. Compose in `index.ts`
+
+### Structured Logging
+
+```python
+from app.core.logging import StructuredLogger, log_duration
+
+logger = StructuredLogger(__name__)
+
+# Basic logging
+logger.info("User logged in", user_id="123", ip="1.2.3.4")
+
+# Timing operations
+with log_duration(logger, "database_query", table="users"):
+    result = await db.execute(query)
+```
 
 ---
 
 ## Database Schema Version
 
-Current: **NC-0.6.27**
+Current: **NC-0.6.28**
 
 Migrations run automatically on startup in `backend/app/main.py`.
