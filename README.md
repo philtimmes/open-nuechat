@@ -122,7 +122,7 @@ Built-in tools that the LLM can use:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourname/open-nuechat.git
+git clone https://github.com/philtimmes/open-nuechat.git
 cd open-nuechat
 
 # Copy and configure environment
@@ -461,7 +461,7 @@ Any use, modification, or distribution requires:
 2. **Citation**: For academic/research use:
    ```
    Open-NueChat: An Open-Source LLM Chat Platform
-   https://github.com/yourname/open-nuechat
+   https://github.com/philtimmes/open-nuechat
    ```
 3. **Visible Credit**: If deployed as a service, include credit in footer or about page
 
