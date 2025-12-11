@@ -17,11 +17,13 @@ from typing import AsyncGenerator, Optional, List, Dict, Any, Callable
 from datetime import datetime, timezone
 import json
 import asyncio
+import time
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.core.logging import get_logger, log_llm_request, log_duration
 from app.models.models import Chat, Message, MessageRole, ContentType, TokenUsage, User
 from app.services.billing import BillingService
 from app.filters import (
@@ -31,6 +33,9 @@ from app.filters import (
     StreamChunk,
     ChatFilterManager,
 )
+
+# Structured logger for LLM service
+llm_logger = get_logger("llm_service")
 
 
 class LLMService:
@@ -321,6 +326,11 @@ class LLMService:
         from app.models.models import CustomAssistant
         logger = logging.getLogger(__name__)
         
+        # Track timing for structured logging
+        stream_start_time = time.time()
+        tool_calls_count = 0
+        filters_applied = []
+        
         # Resolve the model to use
         # Handle "gpt:assistant_id" format - look up the assistant's actual model
         chat_model = chat.model
@@ -607,6 +617,20 @@ class LLMService:
             except Exception as update_err:
                 logger.warning(f"Failed to update message (may have been deleted): {update_err}")
                 # Don't rollback here - let the caller handle it
+            
+            # Log LLM request metrics
+            duration_ms = (time.time() - stream_start_time) * 1000
+            total_tokens = total_input_tokens + total_output_tokens
+            log_llm_request(
+                model=effective_model,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                duration_ms=duration_ms,
+                user_id=str(user.id),
+                chat_id=str(chat.id),
+                filters_applied=filters_applied if filters_applied else None,
+                tool_calls=tool_calls_count if tool_calls_count > 0 else None,
+            )
             
             yield {
                 "type": "message_end",

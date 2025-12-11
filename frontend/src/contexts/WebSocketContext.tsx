@@ -5,6 +5,12 @@ import { useBrandingStore } from '../stores/brandingStore';
 import { chatApi } from '../lib/api';
 import { extractArtifacts, cleanFilePath } from '../lib/artifacts';
 import { createFileChangeFromCode } from '../lib/signatures';
+import { 
+  parseServerEvent, 
+  isStreamStart, isStreamChunk, isStreamEnd, isStreamError,
+  isToolCall, isToolResult, isImageGeneration, isMessageSaved,
+  extractErrorMessage
+} from '../lib/wsTypes';
 import type { Message, StreamChunk, WSMessage, ZipFileResponse } from '../types';
 
 // Regex to detect file request tags in LLM responses

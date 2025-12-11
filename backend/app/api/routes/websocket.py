@@ -23,6 +23,13 @@ from app.services.image_gen import detect_image_request
 from app.tools.registry import tool_registry
 from app.models.models import User, Chat, Message, MessageRole, ContentType, AssistantConversation, CustomAssistant
 from app.core.config import settings
+from app.core.logging import log_websocket_event
+from app.api.ws_types import (
+    create_stream_start, create_stream_chunk, create_stream_end,
+    create_stream_error, create_error,
+    WSStreamStart, WSStreamChunk, WSStreamEnd, WSStreamError,
+    WSMessageSaved, WSToolCall, WSToolResult, WSImageGeneration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +79,9 @@ async def websocket_endpoint(
     connection = await ws_manager.connect(websocket, user_id, already_accepted=True)
     streaming_handler = StreamingHandler(ws_manager, connection)
     
+    # Log connection
+    log_websocket_event("connect", user_id)
+    
     try:
         while True:
             # Receive message
@@ -81,10 +91,9 @@ async def websocket_endpoint(
                 message = json.loads(data)
             except json.JSONDecodeError:
                 logger.error(f"Invalid JSON received: {data[:100]}")
-                await ws_manager.send_to_connection(connection, {
-                    "type": "error",
-                    "payload": {"error": "Invalid JSON"},
-                })
+                await ws_manager.send_to_connection(connection, 
+                    create_error("Invalid JSON").model_dump()
+                )
                 continue
             
             msg_type = message.get("type")
@@ -146,12 +155,13 @@ async def websocket_endpoint(
     
     except WebSocketDisconnect:
         logger.debug(f"WebSocket disconnected for user {user_id}")
+        log_websocket_event("disconnect", user_id)
     except Exception as e:
         logger.exception(f"WebSocket error for user {user_id}: {e}")
-        await ws_manager.send_to_connection(connection, {
-            "type": "error",
-            "payload": {"error": str(e)},
-        })
+        log_websocket_event("error", user_id, error=str(e))
+        await ws_manager.send_to_connection(connection, 
+            create_error(str(e)).model_dump()
+        )
     finally:
         await ws_manager.disconnect(connection)
 
@@ -282,23 +292,14 @@ async def handle_chat_message(
             
             message_id = assistant_message.id
             
-            # Send stream_start to show placeholder
-            await ws_manager.send_to_connection(connection, {
-                "type": "stream_start",
-                "payload": {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                },
-            })
+            # Send stream_start to show placeholder (using typed model)
+            await ws_manager.send_to_connection(connection, 
+                create_stream_start(chat_id, message_id).model_dump()
+            )
             
-            await ws_manager.send_to_connection(connection, {
-                "type": "stream_chunk",
-                "payload": {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "content": "Generating image...",
-                },
-            })
+            await ws_manager.send_to_connection(connection, 
+                create_stream_chunk(chat_id, message_id, "Generating image...").model_dump()
+            )
             
             # Send generation started notification with queue info
             await ws_manager.send_to_connection(connection, {
@@ -313,16 +314,13 @@ async def handle_chat_message(
                 },
             })
             
-            await ws_manager.send_to_connection(connection, {
-                "type": "stream_end",
-                "payload": {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "parent_id": user_message.id,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                },
-            })
+            await ws_manager.send_to_connection(connection, 
+                create_stream_end(
+                    chat_id, message_id, 
+                    input_tokens=0, output_tokens=0, 
+                    parent_id=user_message.id
+                ).model_dump()
+            )
             
             # Create callback to notify frontend when complete
             async def notify_completion():
@@ -638,15 +636,13 @@ async def handle_chat_message(
                             db.add(assistant_msg)
                             await db.commit()
                             
-                            # Send to frontend
-                            await ws_manager.send_to_connection(connection, {
-                                "type": "stream_start",
-                                "payload": {"chat_id": chat_id, "message_id": assistant_msg.id},
-                            })
-                            await ws_manager.send_to_connection(connection, {
-                                "type": "stream_chunk",
-                                "payload": {"chat_id": chat_id, "chunk": result.content},
-                            })
+                            # Send to frontend using typed models
+                            await ws_manager.send_to_connection(connection, 
+                                create_stream_start(chat_id, assistant_msg.id).model_dump()
+                            )
+                            await ws_manager.send_to_connection(connection, 
+                                create_stream_chunk(chat_id, assistant_msg.id, result.content).model_dump()
+                            )
                             await ws_manager.send_to_connection(connection, {
                                 "type": "stream_end",
                                 "payload": {

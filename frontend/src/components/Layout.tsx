@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useChatStore } from '../stores/chatStore';
 import { useBrandingStore, useFeatureFlags } from '../stores/brandingStore';
 import { useMobile } from '../hooks/useMobile';
+import { useChatShortcuts } from '../hooks/useKeyboardShortcuts';
 import Sidebar from './Sidebar';
 
 interface LayoutProps {
@@ -14,13 +15,68 @@ export default function Layout({ children }: LayoutProps) {
   const { isMobile } = useMobile();
   const [sidebarOpen, setSidebarOpen] = useState(!isMobile);
   const { user, logout } = useAuthStore();
-  const { fetchChats } = useChatStore();
+  const { fetchChats, createChat, setShowArtifacts } = useChatStore();
   const { config } = useBrandingStore();
   const features = useFeatureFlags();
   const navigate = useNavigate();
   const location = useLocation();
   
   const appName = config?.app_name || 'Open-NueChat';
+  
+  // Keyboard shortcuts handlers
+  const handleNewChat = useCallback(async () => {
+    const chat = await createChat();
+    if (chat) {
+      navigate(`/chat/${chat.id}`);
+    }
+  }, [createChat, navigate]);
+  
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarOpen(prev => !prev);
+  }, []);
+  
+  const handleToggleArtifacts = useCallback(() => {
+    setShowArtifacts((prev: boolean) => !prev);
+  }, [setShowArtifacts]);
+  
+  const handleFocusInput = useCallback(() => {
+    // Find and focus the chat input
+    const input = document.querySelector('[data-chat-input]') as HTMLTextAreaElement;
+    if (input) {
+      input.focus();
+    }
+  }, []);
+  
+  const handleSearch = useCallback(() => {
+    // Focus search if present, or show a search modal
+    const search = document.querySelector('[data-search-input]') as HTMLInputElement;
+    if (search) {
+      search.focus();
+    }
+  }, []);
+  
+  const handleSettings = useCallback(() => {
+    navigate('/settings');
+  }, [navigate]);
+  
+  // Register keyboard shortcuts
+  useChatShortcuts({
+    onNewChat: handleNewChat,
+    onToggleSidebar: handleToggleSidebar,
+    onToggleArtifacts: handleToggleArtifacts,
+    onFocusInput: handleFocusInput,
+    onSearch: handleSearch,
+    onSettings: handleSettings,
+  });
+  
+  // Listen for toggle-sidebar custom event from ChatPage
+  useEffect(() => {
+    const handleToggleSidebarEvent = () => {
+      setSidebarOpen(prev => !prev);
+    };
+    window.addEventListener('toggle-sidebar', handleToggleSidebarEvent);
+    return () => window.removeEventListener('toggle-sidebar', handleToggleSidebarEvent);
+  }, []);
   
   // Close sidebar on mobile when route changes
   useEffect(() => {

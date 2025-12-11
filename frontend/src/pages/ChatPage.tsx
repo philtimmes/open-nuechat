@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, useCallback, memo, useMemo } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useChatStore } from '../stores/chatStore';
 import { useBrandingStore } from '../stores/brandingStore';
 import { useModelsStore } from '../stores/modelsStore';
 import { useVoiceStore } from '../stores/voiceStore';
 import { useWebSocket } from '../contexts/WebSocketContext';
 import { useVoice } from '../hooks/useVoice';
+import { useChatShortcuts } from '../hooks/useKeyboardShortcuts';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import EmptyState from '../components/EmptyState';
@@ -635,6 +636,36 @@ export default function ChatPage() {
     onTranscript: (transcript) => sendMessageRef.current(transcript),
   });
   
+  // Input ref for keyboard shortcuts
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const navigate = useNavigate();
+  
+  // Keyboard shortcuts
+  useChatShortcuts({
+    onNewChat: () => {
+      navigate('/');
+      createChat();
+    },
+    onFocusInput: () => inputRef.current?.focus(),
+    onToggleSidebar: () => {
+      // Dispatch custom event for Layout to handle
+      window.dispatchEvent(new CustomEvent('toggle-sidebar'));
+    },
+    onDeleteChat: () => {
+      if (currentChat) {
+        setShowChatMenu(true); // Open menu to show delete option
+      }
+    },
+    onToggleArtifacts: () => setShowArtifacts(!showArtifacts),
+    onClosePanel: () => {
+      if (showArtifacts) setShowArtifacts(false);
+      else if (showSummary) setShowSummary(false);
+      else if (showChatMenu) setShowChatMenu(false);
+      else if (showModelSelector) setShowModelSelector(false);
+      else if (showShareDialog) setShowShareDialog(false);
+    },
+  });
+  
   // Check voice services on mount
   useEffect(() => {
     useVoiceStore.getState().checkServiceStatus();
@@ -1262,6 +1293,7 @@ export default function ChatPage() {
             isUploadingZip={isUploadingZip}
             isVoiceMode={isVoiceMode}
             isListening={isListening}
+            inputRef={inputRef}
             placeholder={isUploadingZip ? 'Processing zip file...' : 'Start a new conversation...'}
           />
         </div>
@@ -1591,6 +1623,7 @@ export default function ChatPage() {
             isUploadingZip={isUploadingZip}
             isVoiceMode={isVoiceMode}
             isListening={isListening}
+            inputRef={inputRef}
             placeholder={
               isVoiceMode
                 ? isListening

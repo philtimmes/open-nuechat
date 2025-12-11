@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.services.auth import AuthService
+from app.services.token_manager import is_token_blacklisted
 from app.models.models import User
 
 
@@ -21,6 +22,15 @@ async def get_current_user(
     """Get current authenticated user from JWT token"""
     
     token = credentials.credentials
+    
+    # Check if token is blacklisted (user logged out)
+    if await is_token_blacklisted(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
     payload = AuthService.decode_token(token)
     
     if not payload:

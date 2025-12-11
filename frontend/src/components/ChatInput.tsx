@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect, type RefObject } from 'react';
 
 interface ChatInputProps {
   onSend: (content: string, attachments?: File[]) => void;
@@ -11,6 +11,7 @@ interface ChatInputProps {
   isListening?: boolean;
   placeholder?: string;
   isUploadingZip?: boolean;
+  inputRef?: RefObject<HTMLTextAreaElement>;
 }
 
 export default function ChatInput({ 
@@ -23,12 +24,14 @@ export default function ChatInput({
   isVoiceMode,
   isListening,
   placeholder, 
-  isUploadingZip 
+  isUploadingZip,
+  inputRef 
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const internalRef = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = inputRef || internalRef;
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const handleSubmit = () => {
@@ -253,6 +256,7 @@ export default function ChatInput({
         {/* Text input */}
         <textarea
           ref={textareaRef}
+          data-chat-input
           value={message}
           onChange={handleTextareaChange}
           onKeyDown={handleKeyDown}

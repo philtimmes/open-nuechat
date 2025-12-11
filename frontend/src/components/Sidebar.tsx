@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore } from '../stores/authStore';
 import { useModelsStore } from '../stores/modelsStore';
+import { formatRelativeTime } from '../lib/formatters';
 import type { Chat } from '../types';
 
 interface SidebarProps {
@@ -75,6 +76,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   };
   
   const formatDate = (dateStr: string) => {
+    // Use the centralized formatter, but group by day for sidebar
     const date = new Date(dateStr);
     const now = new Date();
     const diff = now.getTime() - date.getTime();
@@ -82,7 +84,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     
     if (days === 0) return 'Today';
     if (days === 1) return 'Yesterday';
-    if (days < 7) return `${days} days ago`;
+    if (days < 7) return formatRelativeTime(dateStr);
     return date.toLocaleDateString();
   };
   

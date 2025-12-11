@@ -9,6 +9,8 @@ import secrets
 
 from app.db.database import get_db
 from app.services.auth import AuthService, OAuth2Service
+from app.services.rate_limiter import rate_limiter, RateLimitExceeded
+from app.services.token_manager import blacklist_token, is_token_blacklisted
 from app.api.schemas import (
     UserCreate, UserLogin, TokenResponse, TokenRefresh, 
     UserResponse, UserUpdate, LoginResponse
@@ -78,12 +80,24 @@ async def register(
 @router.post("/login", response_model=LoginResponse)
 async def login(
     credentials: UserLogin,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Login with email/password"""
     import logging
     logger = logging.getLogger(__name__)
     logger.debug(f"LOGIN ATTEMPT: {credentials.email}")
+    
+    # Rate limit by IP address
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        await rate_limiter.check_rate_limit("login_attempt", client_ip)
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many login attempts. Try again in {e.retry_after} seconds.",
+            headers={"Retry-After": str(e.retry_after)}
+        )
     
     user = await AuthService.authenticate_user(
         db=db,
@@ -176,6 +190,31 @@ async def update_me(
     
     await db.commit()
     return user
+
+
+@router.post("/logout")
+async def logout(
+    request: Request,
+    user: User = Depends(get_current_user),
+):
+    """
+    Logout current user by blacklisting their access token.
+    
+    The client should also discard their refresh token.
+    """
+    # Get the access token from the Authorization header
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        
+        # Decode to get expiration
+        payload = AuthService.decode_token(token)
+        if payload:
+            exp = payload.get("exp")
+            if exp:
+                await blacklist_token(token, exp)
+    
+    return {"message": "Logged out successfully"}
 
 
 # ============ OAuth Routes ============

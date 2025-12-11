@@ -423,3 +423,48 @@ with log_duration(logger, "database_query", table="users"):
 Current: **NC-0.6.28**
 
 Migrations run automatically on startup in `backend/app/main.py`.
+
+---
+
+## Integration Status (NC-0.6.28)
+
+### Backend Integration
+
+| Component | Integration Point | Status |
+|-----------|------------------|--------|
+| Exception Handlers | `main.py` line 405: `setup_exception_handlers(app)` | ✅ Active |
+| Rate Limiting | `auth.py` login endpoint, `knowledge_stores.py` | ✅ Active |
+| Token Blacklisting | `dependencies.py` `get_current_user()`, `auth.py` logout | ✅ Active |
+| Structured Logging | `llm.py` via `log_llm_request()` for request metrics | ✅ Active |
+| Zip Security | `zip_processor.py` line 1344: `validate_zip_archive(zf)` | ✅ Active |
+| WebSocket Types | `websocket.py` imports typed helpers from `ws_types.py` | ✅ Active |
+| Input Validators | `validators.py` available for route use | ✅ Available |
+
+### Frontend Integration
+
+| Component | Integration Point | Status |
+|-----------|------------------|--------|
+| Chat Store Slices | `chatStore.ts` re-exports from `chat/` directory | ✅ Active |
+| Keyboard Shortcuts | `Layout.tsx` and `ChatPage.tsx` via `useChatShortcuts` | ✅ Active |
+| WebSocket Types | `WebSocketContext.tsx` imports type guards | ✅ Active |
+| Formatters | `formatters.ts` available for component use | ✅ Available |
+| ChatInput Ref | `ChatPage.tsx` passes `inputRef` for focus shortcut | ✅ Active |
+
+### Security Hardening
+
+- Path traversal prevention in zip files (`validate_zip_path()`)
+- Symlink detection in archives (`is_symlink()`)
+- Size limits: 500MB uncompressed, 10000 files max
+- Path depth: 50 levels max, 255 chars per component
+- Login rate limiting: 10 attempts per 5 minutes per IP
+- JWT invalidation on logout with LRU cache (10K tokens)
+
+### Keyboard Shortcuts
+
+| Shortcut | Action | Works In |
+|----------|--------|----------|
+| Ctrl/⌘+N | New chat | Anywhere |
+| Ctrl/⌘+/ | Focus input | Chat page |
+| Ctrl/⌘+B | Toggle sidebar | Anywhere |
+| Ctrl/⌘+Shift+A | Toggle artifacts | Chat page |
+| Escape | Close panel | Chat page |

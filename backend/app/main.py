@@ -21,6 +21,7 @@ from app.api.routes import (
 )
 from app.services.rag import RAGService
 from app.filters import setup_default_filters, get_filter_registry
+from app.api.exception_handlers import setup_exception_handlers
 
 # Configure logging - reduce noise, keep only important messages
 logging.basicConfig(
@@ -399,6 +400,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Setup centralized exception handlers
+setup_exception_handlers(app)
 
 
 # Request logging middleware - disabled for cleaner logs

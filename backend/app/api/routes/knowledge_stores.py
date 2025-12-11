@@ -7,7 +7,7 @@ Allows users to create, manage, and share knowledge stores for RAG.
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, or_, and_
@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.db.database import get_db
 from app.api.dependencies import get_current_user
+from app.services.rate_limiter import rate_limiter, RateLimitExceeded
 from app.models.models import (
     User, KnowledgeStore, KnowledgeStoreShare, 
     Document, DocumentChunk, SharePermission
@@ -195,11 +196,22 @@ async def get_store_with_access(
 
 @router.post("", response_model=KnowledgeStoreResponse)
 async def create_knowledge_store(
-    request: KnowledgeStoreCreate,
+    request_data: KnowledgeStoreCreate,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new knowledge store"""
+    # Rate limit knowledge store creation
+    try:
+        await rate_limiter.check_rate_limit("knowledge_store_creation", str(current_user.id))
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Try again in {e.retry_after} seconds.",
+            headers={"Retry-After": str(e.retry_after)}
+        )
+    
     # Admins bypass store limits
     if not current_user.is_admin:
         # Check store limit per user
@@ -221,14 +233,14 @@ async def create_knowledge_store(
     
     store = KnowledgeStore(
         owner_id=current_user.id,
-        name=request.name,
-        description=request.description,
-        icon=request.icon,
-        color=request.color,
-        is_public=request.is_public,
-        is_discoverable=request.is_discoverable,
-        chunk_size=request.chunk_size,
-        chunk_overlap=request.chunk_overlap,
+        name=request_data.name,
+        description=request_data.description,
+        icon=request_data.icon,
+        color=request_data.color,
+        is_public=request_data.is_public,
+        is_discoverable=request_data.is_discoverable,
+        chunk_size=request_data.chunk_size,
+        chunk_overlap=request_data.chunk_overlap,
     )
     
     db.add(store)
@@ -446,6 +458,7 @@ async def list_store_documents(
 @router.post("/{store_id}/documents")
 async def add_document_to_store(
     store_id: str,
+    request: Request,
     file: UploadFile = File(...),
     description: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
@@ -455,6 +468,16 @@ async def add_document_to_store(
     Upload a document to a knowledge store.
     Supported formats: PDF, TXT, MD, code files, and more.
     """
+    # Rate limit document uploads
+    try:
+        await rate_limiter.check_rate_limit("document_upload", str(current_user.id))
+    except RateLimitExceeded as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Try again in {e.retry_after} seconds.",
+            headers={"Retry-After": str(e.retry_after)}
+        )
+    
     store, _ = await get_store_with_access(
         store_id, current_user, db, SharePermission.EDIT
     )
