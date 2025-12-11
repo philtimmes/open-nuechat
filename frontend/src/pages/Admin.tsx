@@ -1,0 +1,3884 @@
+import { useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuthStore } from '../stores/authStore';
+import api from '../lib/api';
+
+interface SystemSettings {
+  default_system_prompt: string;
+  title_generation_prompt: string;
+  rag_context_prompt: string;
+  input_token_price: number;
+  output_token_price: number;
+  token_refill_interval_hours: number;
+  free_tier_tokens: number;
+  pro_tier_tokens: number;
+  enterprise_tier_tokens: number;
+}
+
+interface OAuthSettings {
+  google_client_id: string;
+  google_client_secret: string;
+  google_oauth_enabled: boolean;
+  google_oauth_timeout: number;
+  github_client_id: string;
+  github_client_secret: string;
+  github_oauth_enabled: boolean;
+  github_oauth_timeout: number;
+}
+
+interface LLMSettings {
+  llm_api_base_url: string;
+  llm_api_key: string;
+  llm_model: string;
+  llm_timeout: number;
+  llm_max_tokens: number;
+  llm_temperature: number;
+  llm_stream_default: boolean;
+}
+
+interface FeatureFlags {
+  enable_registration: boolean;
+  enable_billing: boolean;
+  freeforall: boolean;
+}
+
+interface TierConfig {
+  id: string;
+  name: string;
+  price: number;
+  tokens: number;
+  features: string[];
+  popular: boolean;
+}
+
+interface UserListItem {
+  id: string;
+  email: string;
+  username: string;
+  tier: string;
+  is_admin: boolean;
+  is_active: boolean;
+  tokens_limit: number;
+  tokens_used: number;
+  chat_count: number;
+  created_at: string;
+}
+
+interface ChatListItem {
+  id: string;
+  title: string;
+  model: string | null;
+  owner_email?: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string | null;
+}
+
+interface ChatDetail {
+  id: string;
+  title: string;
+  model: string | null;
+  owner_id: string;
+  owner_email: string;
+  owner_username: string;
+  created_at: string;
+  updated_at: string | null;
+  messages: Array<{
+    id: string;
+    role: string;
+    content: string;
+    created_at: string;
+  }>;
+}
+
+interface ToolConfig {
+  id: string;
+  name: string;
+  description: string | null;
+  tool_type: 'mcp' | 'openapi';
+  url: string;
+  has_api_key: boolean;
+  is_public: boolean;
+  is_enabled: boolean;
+  schema_cache?: Array<{
+    name: string;
+    description?: string;
+    parameters?: unknown;
+  }>;
+}
+
+interface ToolUsageStat {
+  tool_id: string;
+  tool_name: string;
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  total_duration_ms: number;
+  avg_duration_ms: number;
+  last_used: string | null;
+  unique_users: number;
+}
+
+interface ToolUsageStats {
+  total_calls: number;
+  successful_calls: number;
+  failed_calls: number;
+  tools: ToolUsageStat[];
+}
+
+interface FilterConfig {
+  id?: string;
+  name: string;
+  description: string | null;
+  filter_type: 'to_llm' | 'from_llm' | 'to_tools' | 'from_tools';
+  priority: 'highest' | 'high' | 'medium' | 'low' | 'least';
+  enabled: boolean;
+  filter_mode: 'pattern' | 'code' | 'llm';
+  pattern: string | null;
+  replacement: string | null;
+  word_list: string[] | null;
+  case_sensitive: boolean;
+  action: 'modify' | 'block' | 'log' | 'passthrough';
+  block_message: string | null;
+  code: string | null;
+  llm_prompt: string | null;
+  config: Record<string, any> | null;
+  is_global: boolean;
+}
+
+type TabId = 'system' | 'oauth' | 'llm' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'dev';
+
+export default function Admin() {
+  const navigate = useNavigate();
+  const { user } = useAuthStore();
+  
+  // Settings state
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [oauthSettings, setOAuthSettings] = useState<OAuthSettings | null>(null);
+  const [llmSettings, setLLMSettings] = useState<LLMSettings | null>(null);
+  const [featureFlags, setFeatureFlags] = useState<FeatureFlags | null>(null);
+  const [tiers, setTiers] = useState<TierConfig[]>([]);
+  
+  // Dev settings (stored in localStorage)
+  const [debugVoiceMode, setDebugVoiceMode] = useState(() => {
+    return localStorage.getItem('nexus-debug-voice-mode') === 'true';
+  });
+  
+  // Dev settings (stored in backend)
+  const [debugTokenResets, setDebugTokenResets] = useState(false);
+  const [debugDocumentQueue, setDebugDocumentQueue] = useState(false);
+  const [lastTokenReset, setLastTokenReset] = useState<string | null>(null);
+  const [tokenRefillHours, setTokenRefillHours] = useState(720);
+  const [debugSettingsLoading, setDebugSettingsLoading] = useState(false);
+  
+  // UI state
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | object | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<TabId>('system');
+  const [editingTier, setEditingTier] = useState<string | null>(null);
+  const [newFeature, setNewFeature] = useState<string>('');
+  
+  // User management state
+  const [users, setUsers] = useState<UserListItem[]>([]);
+  const [usersTotal, setUsersTotal] = useState(0);
+  const [usersPage, setUsersPage] = useState(1);
+  const [usersSearch, setUsersSearch] = useState('');
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [selectedUser, setSelectedUser] = useState<UserListItem | null>(null);
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [userAction, setUserAction] = useState<'upgrade' | 'refund' | 'chats' | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  
+  // Chat viewing state
+  const [userChats, setUserChats] = useState<ChatListItem[]>([]);
+  const [userChatsTotal, setUserChatsTotal] = useState(0);
+  const [userChatsPage, setUserChatsPage] = useState(1);
+  const [allChats, setAllChats] = useState<ChatListItem[]>([]);
+  const [allChatsTotal, setAllChatsTotal] = useState(0);
+  const [allChatsPage, setAllChatsPage] = useState(1);
+  const [allChatsSearch, setAllChatsSearch] = useState('');
+  const [chatsLoading, setChatsLoading] = useState(false);
+  const [selectedChat, setSelectedChat] = useState<ChatDetail | null>(null);
+  const [showChatModal, setShowChatModal] = useState(false);
+  
+  // Tools state
+  const [tools, setTools] = useState<ToolConfig[]>([]);
+  const [toolsLoading, setToolsLoading] = useState(false);
+  const [toolUsageStats, setToolUsageStats] = useState<ToolUsageStats | null>(null);
+  const [showToolModal, setShowToolModal] = useState(false);
+  const [editingTool, setEditingTool] = useState<ToolConfig | null>(null);
+  const [toolForm, setToolForm] = useState({
+    name: '',
+    description: '',
+    tool_type: 'mcp' as 'mcp' | 'openapi',
+    url: '',
+    api_key: '',
+    is_public: false,
+    auth_type: 'bearer',
+  });
+  const [probeResult, setProbeResult] = useState<{ success: boolean; message: string; tools?: any[] } | null>(null);
+  const [probing, setProbing] = useState(false);
+  
+  // Filter state
+  const [filters, setFilters] = useState<FilterConfig[]>([]);
+  const [filtersLoading, setFiltersLoading] = useState(false);
+  const [showFilterModal, setShowFilterModal] = useState(false);
+  const [editingFilter, setEditingFilter] = useState<FilterConfig | null>(null);
+  const [filterForm, setFilterForm] = useState<FilterConfig>({
+    name: '',
+    description: null,
+    filter_type: 'to_llm',
+    priority: 'medium',
+    enabled: true,
+    filter_mode: 'pattern',
+    pattern: null,
+    replacement: null,
+    word_list: null,
+    case_sensitive: false,
+    action: 'modify',
+    block_message: null,
+    code: null,
+    llm_prompt: null,
+    config: null,
+    is_global: true,
+  });
+  const [filterTestContent, setFilterTestContent] = useState('');
+  const [filterTestResult, setFilterTestResult] = useState<{ original: string; result: string; modified: boolean; blocked: boolean; block_reason?: string } | null>(null);
+  const [filterTesting, setFilterTesting] = useState(false);
+  
+  // Filter Chains state (configurable agentic flows)
+  interface FilterChainConditional {
+    enabled: boolean;
+    logic?: string;
+    comparisons: Array<{ left: string; operator: string; right: string }>;
+    on_true?: FilterChainStep[];
+    on_false?: FilterChainStep[];
+  }
+  
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type StepConfig = Record<string, any>;
+  
+  interface FilterChainStep {
+    id: string;
+    type: string;
+    name?: string;
+    enabled?: boolean;
+    config: StepConfig;
+    on_error?: string;
+    jump_to_step?: string;
+    conditional?: FilterChainConditional;
+    loop?: {
+      enabled: boolean;
+      type: string;
+      count?: number;
+      while?: { left: string; operator: string; right: string };
+      max_iterations?: number;
+      loop_var?: string;
+    };
+  }
+  
+  interface FilterChainDef {
+    id?: string;
+    name: string;
+    description?: string;
+    enabled: boolean;
+    priority: number;
+    retain_history: boolean;
+    bidirectional: boolean;
+    outbound_chain_id?: string;
+    max_iterations: number;
+    debug: boolean;
+    definition: { steps: FilterChainStep[] };
+    created_at?: string;
+    updated_at?: string;
+  }
+  
+  interface StepTypeSchema {
+    label: string;
+    description: string;
+    category: string;
+    fields: Array<{
+      name: string;
+      type: string;
+      label?: string;
+      required?: boolean;
+      default?: unknown;
+      options?: Array<{ value: string; label: string }>;
+    }>;
+  }
+  
+  interface FilterChainSchema {
+    step_types: Record<string, StepTypeSchema>;
+    comparison_operators: Array<{ value: string; label: string }>;
+    builtin_variables: Array<{ value: string; label: string }>;
+    available_tools?: Array<{ value: string; label: string; category: string; description?: string }>;
+  }
+  
+  const [filterChains, setFilterChains] = useState<FilterChainDef[]>([]);
+  const [filterChainsLoading, setFilterChainsLoading] = useState(false);
+  const [filterChainSchema, setFilterChainSchema] = useState<FilterChainSchema | null>(null);
+  const [showFilterChainModal, setShowFilterChainModal] = useState(false);
+  const [editingFilterChain, setEditingFilterChain] = useState<FilterChainDef | null>(null);
+  const [filterChainForm, setFilterChainForm] = useState<FilterChainDef>({
+    name: '',
+    description: '',
+    enabled: true,
+    priority: 100,
+    retain_history: true,
+    bidirectional: false,
+    max_iterations: 10,
+    debug: false,
+    definition: { steps: [] },
+  });
+  const [filterChainJsonMode, setFilterChainJsonMode] = useState(false);
+  const [filterChainJson, setFilterChainJson] = useState('');
+  const [previewJsonChain, setPreviewJsonChain] = useState<FilterChainDef | null>(null);
+  
+  // LLM test state
+  const [llmTestResult, setLLMTestResult] = useState<{ success: boolean; message: string; models?: string[] } | null>(null);
+  const [llmTesting, setLLMTesting] = useState(false);
+  
+  const PAGE_SIZE = 10;
+  
+  // Redirect non-admins
+  useEffect(() => {
+    if (user && !user.is_admin) {
+      navigate('/');
+    }
+  }, [user, navigate]);
+  
+  // Fetch initial data
+  useEffect(() => {
+    fetchData();
+  }, []);
+  
+  // Fetch debug settings when dev tab is activated
+  useEffect(() => {
+    if (activeTab === 'dev') {
+      fetchDebugSettings();
+    }
+  }, [activeTab]);
+  
+  const fetchDebugSettings = async () => {
+    setDebugSettingsLoading(true);
+    try {
+      const res = await api.get('/admin/debug-settings');
+      setDebugTokenResets(res.data.debug_token_resets);
+      setDebugDocumentQueue(res.data.debug_document_queue);
+      setLastTokenReset(res.data.last_token_reset_timestamp);
+      setTokenRefillHours(res.data.token_refill_interval_hours);
+    } catch (err: any) {
+      console.error('Failed to load debug settings:', err);
+    } finally {
+      setDebugSettingsLoading(false);
+    }
+  };
+  
+  const saveDebugTokenResets = async (value: boolean) => {
+    try {
+      await api.put('/admin/debug-settings', { debug_token_resets: value });
+      setDebugTokenResets(value);
+      setSuccess('Debug setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save debug setting');
+    }
+  };
+  
+  const saveDebugDocumentQueue = async (value: boolean) => {
+    try {
+      await api.put('/admin/debug-settings', { debug_document_queue: value });
+      setDebugDocumentQueue(value);
+      setSuccess('Debug setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save debug setting');
+    }
+  };
+  
+  const fetchData = async () => {
+    try {
+      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes] = await Promise.all([
+        api.get('/admin/settings'),
+        api.get('/admin/oauth-settings'),
+        api.get('/admin/llm-settings'),
+        api.get('/admin/feature-flags'),
+        api.get('/admin/tiers'),
+      ]);
+      setSystemSettings(systemRes.data);
+      setOAuthSettings(oauthRes.data);
+      setLLMSettings(llmRes.data);
+      setFeatureFlags(featuresRes.data);
+      setTiers(tiersRes.data.tiers);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load settings');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // Save functions for each settings type
+  const saveSystemSettings = async () => {
+    if (!systemSettings) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      await api.put('/admin/settings', systemSettings);
+      setSuccess('System settings saved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save settings');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  const saveOAuthSettings = async () => {
+    if (!oauthSettings) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      await api.put('/admin/oauth-settings', oauthSettings);
+      setSuccess('OAuth settings saved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save OAuth settings');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  const saveLLMSettings = async () => {
+    if (!llmSettings) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      await api.put('/admin/llm-settings', llmSettings);
+      setSuccess('LLM settings saved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save LLM settings');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  const testLLMConnection = async () => {
+    setLLMTesting(true);
+    setLLMTestResult(null);
+    try {
+      const response = await api.post('/admin/llm-settings/test');
+      setLLMTestResult(response.data);
+    } catch (err: any) {
+      setLLMTestResult({
+        success: false,
+        message: err.response?.data?.detail || 'Connection test failed',
+      });
+    } finally {
+      setLLMTesting(false);
+    }
+  };
+  
+  const saveFeatureFlags = async () => {
+    if (!featureFlags) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      await api.put('/admin/feature-flags', featureFlags);
+      setSuccess('Feature flags saved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save feature flags');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  const saveTiers = async () => {
+    setIsSaving(true);
+    setError(null);
+    try {
+      await api.put('/admin/tiers', { tiers });
+      setSuccess('Tiers saved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save tiers');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  // Tier management
+  const updateTier = (tierId: string, updates: Partial<TierConfig>) => {
+    setTiers(tiers.map(t => t.id === tierId ? { ...t, ...updates } : t));
+  };
+  
+  const addFeatureToTier = (tierId: string) => {
+    if (!newFeature.trim()) return;
+    const tier = tiers.find(t => t.id === tierId);
+    if (tier) {
+      updateTier(tierId, { features: [...tier.features, newFeature.trim()] });
+      setNewFeature('');
+    }
+  };
+  
+  const removeFeatureFromTier = (tierId: string, index: number) => {
+    const tier = tiers.find(t => t.id === tierId);
+    if (tier) {
+      updateTier(tierId, { features: tier.features.filter((_, i) => i !== index) });
+    }
+  };
+  
+  // User management
+  const fetchUsers = async (page = 1, search = '') => {
+    setUsersLoading(true);
+    try {
+      const response = await api.get('/admin/users', {
+        params: { page, page_size: PAGE_SIZE, search: search || undefined },
+      });
+      setUsers(response.data.users);
+      setUsersTotal(response.data.total);
+      setUsersPage(page);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load users');
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+  
+  useEffect(() => {
+    if (activeTab === 'users') {
+      fetchUsers(1, usersSearch);
+    }
+  }, [activeTab]);
+  
+  const handleBanUser = async (targetUser: UserListItem) => {
+    if (!confirm(`${targetUser.is_active ? 'Ban' : 'Unban'} ${targetUser.email}?`)) return;
+    setActionLoading(true);
+    try {
+      await api.patch(`/admin/users/${targetUser.id}`, { is_active: !targetUser.is_active });
+      setSuccess(`User ${targetUser.is_active ? 'banned' : 'unbanned'}`);
+      fetchUsers(usersPage, usersSearch);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to update user');
+    } finally {
+      setActionLoading(false);
+      setTimeout(() => setSuccess(null), 3000);
+    }
+  };
+  
+  const handleResetTokens = async (targetUser: UserListItem) => {
+    if (!confirm(`Reset token usage for ${targetUser.email}?`)) return;
+    setActionLoading(true);
+    try {
+      await api.post(`/admin/users/${targetUser.id}/reset-tokens`);
+      setSuccess(`Tokens reset for ${targetUser.email}`);
+      fetchUsers(usersPage, usersSearch);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to reset tokens');
+    } finally {
+      setActionLoading(false);
+      setTimeout(() => setSuccess(null), 3000);
+    }
+  };
+  
+  const handleUpgradeUser = async (targetUser: UserListItem, newTier: string) => {
+    setActionLoading(true);
+    try {
+      await api.patch(`/admin/users/${targetUser.id}`, { tier: newTier });
+      setSuccess(`${targetUser.email} upgraded to ${newTier}`);
+      setShowUserModal(false);
+      setUserAction(null);
+      fetchUsers(usersPage, usersSearch);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to upgrade user');
+    } finally {
+      setActionLoading(false);
+      setTimeout(() => setSuccess(null), 3000);
+    }
+  };
+  
+  const handleRefundTokens = async (targetUser: UserListItem, amount: number) => {
+    setActionLoading(true);
+    try {
+      const newLimit = targetUser.tokens_limit + amount;
+      await api.patch(`/admin/users/${targetUser.id}`, { tokens_limit: newLimit });
+      setSuccess(`Refunded ${formatTokens(amount)} tokens to ${targetUser.email}`);
+      setShowUserModal(false);
+      setUserAction(null);
+      fetchUsers(usersPage, usersSearch);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to refund tokens');
+    } finally {
+      setActionLoading(false);
+      setTimeout(() => setSuccess(null), 3000);
+    }
+  };
+  
+  const handleToggleAdmin = async (targetUser: UserListItem) => {
+    if (targetUser.id === user?.id) {
+      setError("Cannot modify your own admin status");
+      return;
+    }
+    if (!confirm(`${targetUser.is_admin ? 'Remove admin from' : 'Make admin'} ${targetUser.email}?`)) return;
+    setActionLoading(true);
+    try {
+      await api.patch(`/admin/users/${targetUser.id}`, { is_admin: !targetUser.is_admin });
+      setSuccess(`Admin status updated for ${targetUser.email}`);
+      fetchUsers(usersPage, usersSearch);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to update user');
+    } finally {
+      setActionLoading(false);
+      setTimeout(() => setSuccess(null), 3000);
+    }
+  };
+  
+  // Chat viewing
+  const fetchUserChats = async (userId: string, page = 1) => {
+    setChatsLoading(true);
+    try {
+      const response = await api.get(`/admin/users/${userId}/chats`, {
+        params: { page, page_size: PAGE_SIZE },
+      });
+      setUserChats(response.data.chats);
+      setUserChatsTotal(response.data.total);
+      setUserChatsPage(page);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load chats');
+    } finally {
+      setChatsLoading(false);
+    }
+  };
+  
+  const fetchAllChats = async (page = 1, search = '') => {
+    setChatsLoading(true);
+    try {
+      const response = await api.get('/admin/all-chats', {
+        params: { page, page_size: PAGE_SIZE, search: search || undefined },
+      });
+      setAllChats(response.data.chats);
+      setAllChatsTotal(response.data.total);
+      setAllChatsPage(page);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load chats');
+    } finally {
+      setChatsLoading(false);
+    }
+  };
+  
+  useEffect(() => {
+    if (activeTab === 'chats') {
+      fetchAllChats(1, allChatsSearch);
+    }
+  }, [activeTab]);
+  
+  const viewChatDetail = async (chatId: string) => {
+    setChatsLoading(true);
+    try {
+      const response = await api.get(`/admin/chats/${chatId}`);
+      setSelectedChat(response.data);
+      setShowChatModal(true);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load chat');
+    } finally {
+      setChatsLoading(false);
+    }
+  };
+  
+  // Tools management
+  const fetchTools = async () => {
+    setToolsLoading(true);
+    try {
+      const [toolsResponse, statsResponse] = await Promise.all([
+        api.get('/tools'),
+        api.get('/tools/usage/stats'),
+      ]);
+      setTools(toolsResponse.data);
+      setToolUsageStats(statsResponse.data);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load tools');
+    } finally {
+      setToolsLoading(false);
+    }
+  };
+  
+  const resetToolUsage = async (toolId?: string) => {
+    const confirmMsg = toolId 
+      ? 'Reset usage statistics for this tool?' 
+      : 'Reset ALL tool usage statistics? This cannot be undone.';
+    if (!confirm(confirmMsg)) return;
+    
+    try {
+      if (toolId) {
+        await api.delete(`/tools/usage/stats/${toolId}`);
+      } else {
+        await api.delete('/tools/usage/stats');
+      }
+      fetchTools(); // Refresh stats
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to reset tool usage');
+    }
+  };
+  
+  const getToolUsageStats = (toolId: string): ToolUsageStat | undefined => {
+    return toolUsageStats?.tools.find(t => t.tool_id === toolId);
+  };
+  
+  useEffect(() => {
+    if (activeTab === 'tools') {
+      fetchTools();
+    }
+  }, [activeTab]);
+  
+  const resetToolForm = () => {
+    setToolForm({
+      name: '',
+      description: '',
+      tool_type: 'mcp',
+      url: '',
+      api_key: '',
+      is_public: false,
+      auth_type: 'bearer',
+    });
+    setEditingTool(null);
+    setProbeResult(null);
+  };
+  
+  const handleProbeUrl = async () => {
+    setProbing(true);
+    setProbeResult(null);
+    try {
+      const response = await api.post('/tools/probe', {
+        url: toolForm.url,
+        tool_type: toolForm.tool_type,
+        api_key: toolForm.api_key || undefined,
+        auth_type: toolForm.auth_type,
+      });
+      setProbeResult(response.data);
+    } catch (err: any) {
+      setProbeResult({
+        success: false,
+        message: err.response?.data?.detail || 'Failed to probe URL',
+      });
+    } finally {
+      setProbing(false);
+    }
+  };
+  
+  const handleCreateTool = async () => {
+    setActionLoading(true);
+    try {
+      if (editingTool) {
+        await api.put(`/tools/${editingTool.id}`, {
+          name: toolForm.name,
+          description: toolForm.description || undefined,
+          url: toolForm.url,
+          api_key: toolForm.api_key || undefined,
+          is_public: toolForm.is_public,
+          config: { auth_type: toolForm.auth_type },
+        });
+        setSuccess('Tool updated');
+      } else {
+        await api.post('/tools', {
+          name: toolForm.name,
+          description: toolForm.description || undefined,
+          tool_type: toolForm.tool_type,
+          url: toolForm.url,
+          api_key: toolForm.api_key || undefined,
+          is_public: toolForm.is_public,
+          config: { auth_type: toolForm.auth_type },
+        });
+        setSuccess('Tool created');
+      }
+      setShowToolModal(false);
+      resetToolForm();
+      fetchTools();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save tool');
+    } finally {
+      setActionLoading(false);
+      setTimeout(() => setSuccess(null), 3000);
+    }
+  };
+  
+  const handleDeleteTool = async (toolId: string) => {
+    if (!confirm('Delete this tool?')) return;
+    try {
+      await api.delete(`/tools/${toolId}`);
+      setSuccess('Tool deleted');
+      fetchTools();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to delete tool');
+    }
+    setTimeout(() => setSuccess(null), 3000);
+  };
+  
+  // Filter management
+  const fetchFilters = async () => {
+    setFiltersLoading(true);
+    try {
+      const response = await api.get('/admin/filters');
+      setFilters(response.data.filters);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load filters');
+    } finally {
+      setFiltersLoading(false);
+    }
+  };
+  
+  useEffect(() => {
+    if (activeTab === 'filters') {
+      fetchFilters();
+    }
+  }, [activeTab]);
+  
+  const resetFilterForm = () => {
+    setFilterForm({
+      name: '',
+      description: null,
+      filter_type: 'to_llm',
+      priority: 'medium',
+      enabled: true,
+      filter_mode: 'pattern',
+      pattern: null,
+      replacement: null,
+      word_list: null,
+      case_sensitive: false,
+      action: 'modify',
+      block_message: null,
+      code: null,
+      llm_prompt: null,
+      config: null,
+      is_global: true,
+    });
+    setEditingFilter(null);
+    setFilterTestResult(null);
+    setFilterTestContent('');
+  };
+  
+  const handleCreateFilter = async () => {
+    setActionLoading(true);
+    try {
+      if (editingFilter?.id) {
+        await api.patch(`/admin/filters/${editingFilter.id}`, {
+          name: filterForm.name,
+          description: filterForm.description || undefined,
+          priority: filterForm.priority,
+          enabled: filterForm.enabled,
+          filter_mode: filterForm.filter_mode,
+          pattern: filterForm.pattern || undefined,
+          replacement: filterForm.replacement || undefined,
+          word_list: filterForm.word_list || undefined,
+          case_sensitive: filterForm.case_sensitive,
+          action: filterForm.action,
+          block_message: filterForm.block_message || undefined,
+          code: filterForm.code || undefined,
+          llm_prompt: filterForm.llm_prompt || undefined,
+          config: filterForm.config || undefined,
+          is_global: filterForm.is_global,
+        });
+        setSuccess('Filter updated');
+      } else {
+        await api.post('/admin/filters', {
+          name: filterForm.name,
+          description: filterForm.description || undefined,
+          filter_type: filterForm.filter_type,
+          priority: filterForm.priority,
+          enabled: filterForm.enabled,
+          filter_mode: filterForm.filter_mode,
+          pattern: filterForm.pattern || undefined,
+          replacement: filterForm.replacement || undefined,
+          word_list: filterForm.word_list || undefined,
+          case_sensitive: filterForm.case_sensitive,
+          action: filterForm.action,
+          block_message: filterForm.block_message || undefined,
+          code: filterForm.code || undefined,
+          llm_prompt: filterForm.llm_prompt || undefined,
+          config: filterForm.config || undefined,
+          is_global: filterForm.is_global,
+        });
+        setSuccess('Filter created');
+      }
+      setShowFilterModal(false);
+      resetFilterForm();
+      fetchFilters();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save filter');
+    } finally {
+      setActionLoading(false);
+      setTimeout(() => setSuccess(null), 3000);
+    }
+  };
+  
+  const handleDeleteFilter = async (filterId: string) => {
+    if (!confirm('Delete this filter?')) return;
+    try {
+      await api.delete(`/admin/filters/${filterId}`);
+      setSuccess('Filter deleted');
+      fetchFilters();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to delete filter');
+    }
+    setTimeout(() => setSuccess(null), 3000);
+  };
+  
+  const handleToggleFilter = async (filterId: string) => {
+    try {
+      await api.post(`/admin/filters/${filterId}/toggle`);
+      fetchFilters();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to toggle filter');
+    }
+  };
+  
+  const handleTestFilter = async () => {
+    if (!editingFilter?.id || !filterTestContent) return;
+    setFilterTesting(true);
+    setFilterTestResult(null);
+    try {
+      const response = await api.post('/admin/filters/test', null, {
+        params: { filter_id: editingFilter.id, content: filterTestContent },
+      });
+      setFilterTestResult(response.data);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to test filter');
+    } finally {
+      setFilterTesting(false);
+    }
+  };
+  
+  const getFilterTypeLabel = (type: string) => {
+    switch (type) {
+      case 'to_llm': return 'User → LLM';
+      case 'from_llm': return 'LLM → User';
+      case 'to_tools': return 'To Tools';
+      case 'from_tools': return 'From Tools';
+      default: return type;
+    }
+  };
+  
+  const getFilterTypeColor = (type: string) => {
+    switch (type) {
+      case 'to_llm': return 'bg-blue-500/20 text-blue-400';
+      case 'from_llm': return 'bg-green-500/20 text-green-400';
+      case 'to_tools': return 'bg-orange-500/20 text-orange-400';
+      case 'from_tools': return 'bg-purple-500/20 text-purple-400';
+      default: return 'bg-gray-500/20 text-gray-400';
+    }
+  };
+  
+  // Filter Chains management
+  const fetchFilterChains = async () => {
+    setFilterChainsLoading(true);
+    try {
+      const [chainsRes, schemaRes, toolsRes] = await Promise.all([
+        api.get('/admin/filter-chains'),
+        api.get('/admin/filter-chains/schema'),
+        api.get('/tools'),
+      ]);
+      setFilterChains(chainsRes.data);
+      setFilterChainSchema(schemaRes.data);
+      setTools(toolsRes.data);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to load filter chains');
+    } finally {
+      setFilterChainsLoading(false);
+    }
+  };
+  
+  // Build flat list of available tools for filter chain step dropdown
+  const availableTools = useMemo(() => {
+    // If schema has available_tools, use those (includes MCP/OpenAPI from backend)
+    if (filterChainSchema?.available_tools) {
+      return filterChainSchema.available_tools as Array<{ value: string; label: string; category: string }>;
+    }
+    
+    // Fallback: build from tools state
+    const toolList: Array<{ value: string; label: string; category: string }> = [
+      // Built-in tools that are always available
+      { value: 'web_search', label: '🌐 Web Search', category: 'Built-in' },
+      { value: 'web_fetch', label: '📄 Fetch Web Page', category: 'Built-in' },
+      { value: 'calculator', label: '🔢 Calculator', category: 'Built-in' },
+      { value: 'code_interpreter', label: '💻 Run Code', category: 'Built-in' },
+    ];
+    
+    // Add MCP/OpenAPI tools and their sub-tools
+    for (const tool of tools) {
+      if (!tool.is_enabled) continue;
+      
+      if (tool.schema_cache && tool.schema_cache.length > 0) {
+        // Tool has sub-tools from schema_cache
+        for (const subTool of tool.schema_cache) {
+          const icon = tool.tool_type === 'mcp' ? '🔌' : '🔗';
+          toolList.push({
+            value: `${tool.name}:${subTool.name}`,
+            label: `${icon} ${tool.name} → ${subTool.name}`,
+            category: tool.name,
+          });
+        }
+      } else {
+        // Tool without sub-tools (single operation)
+        const icon = tool.tool_type === 'mcp' ? '🔌' : '🔗';
+        toolList.push({
+          value: tool.name,
+          label: `${icon} ${tool.name}`,
+          category: 'External',
+        });
+      }
+    }
+    
+    return toolList;
+  }, [tools, filterChainSchema]);
+  
+  useEffect(() => {
+    if (activeTab === 'filter_chains') {
+      fetchFilterChains();
+    }
+  }, [activeTab]);
+  
+  const resetFilterChainForm = () => {
+    setFilterChainForm({
+      name: '',
+      description: '',
+      enabled: true,
+      priority: 100,
+      retain_history: true,
+      bidirectional: false,
+      max_iterations: 10,
+      debug: false,
+      definition: { steps: [] },
+    });
+    setEditingFilterChain(null);
+    setFilterChainJsonMode(false);
+    setFilterChainJson('');
+  };
+  
+  const handleCreateFilterChain = async () => {
+    try {
+      let definition = filterChainForm.definition;
+      
+      // Parse JSON if in JSON mode
+      if (filterChainJsonMode && filterChainJson) {
+        try {
+          definition = JSON.parse(filterChainJson);
+        } catch {
+          setError('Invalid JSON in definition');
+          return;
+        }
+      }
+      
+      const payload = {
+        name: filterChainForm.name,
+        description: filterChainForm.description || undefined,
+        enabled: filterChainForm.enabled,
+        priority: filterChainForm.priority,
+        retain_history: filterChainForm.retain_history,
+        bidirectional: filterChainForm.bidirectional,
+        outbound_chain_id: filterChainForm.outbound_chain_id || undefined,
+        max_iterations: filterChainForm.max_iterations,
+        debug: filterChainForm.debug,
+        definition,
+      };
+      
+      if (editingFilterChain?.id) {
+        await api.put(`/admin/filter-chains/${editingFilterChain.id}`, payload);
+        setSuccess('Filter chain updated');
+      } else {
+        await api.post('/admin/filter-chains', payload);
+        setSuccess('Filter chain created');
+      }
+      
+      setShowFilterChainModal(false);
+      resetFilterChainForm();
+      fetchFilterChains();
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      if (typeof detail === 'string') {
+        setError(detail);
+      } else if (detail && typeof detail === 'object') {
+        setError(JSON.stringify(detail));
+      } else {
+        setError('Failed to save filter chain');
+      }
+    }
+    setTimeout(() => setSuccess(null), 3000);
+  };
+  
+  const handleDeleteFilterChain = async (chainId: string) => {
+    if (!confirm('Delete this filter chain?')) return;
+    try {
+      await api.delete(`/admin/filter-chains/${chainId}`);
+      setSuccess('Filter chain deleted');
+      fetchFilterChains();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to delete filter chain');
+    }
+    setTimeout(() => setSuccess(null), 3000);
+  };
+  
+  const handleToggleFilterChain = async (chainId: string) => {
+    const chain = filterChains.find(c => c.id === chainId);
+    if (!chain) return;
+    try {
+      await api.put(`/admin/filter-chains/${chainId}`, { enabled: !chain.enabled });
+      fetchFilterChains();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to toggle filter chain');
+    }
+  };
+  
+  const addStep = (stepType: string) => {
+    const newStep: FilterChainStep = {
+      id: `step_${Date.now()}`,
+      type: stepType,
+      name: filterChainSchema?.step_types[stepType]?.label || stepType,
+      enabled: true,
+      config: {},
+    };
+    setFilterChainForm(prev => ({
+      ...prev,
+      definition: {
+        steps: [...prev.definition.steps, newStep],
+      },
+    }));
+  };
+  
+  const updateStep = (stepId: string, updates: Partial<FilterChainStep>) => {
+    setFilterChainForm(prev => ({
+      ...prev,
+      definition: {
+        steps: prev.definition.steps.map(s => 
+          s.id === stepId ? { ...s, ...updates } : s
+        ),
+      },
+    }));
+  };
+  
+  const removeStep = (stepId: string) => {
+    setFilterChainForm(prev => ({
+      ...prev,
+      definition: {
+        steps: prev.definition.steps.filter(s => s.id !== stepId),
+      },
+    }));
+  };
+  
+  const moveStep = (stepId: string, direction: 'up' | 'down') => {
+    setFilterChainForm(prev => {
+      const steps = [...prev.definition.steps];
+      const idx = steps.findIndex(s => s.id === stepId);
+      if (idx === -1) return prev;
+      if (direction === 'up' && idx > 0) {
+        [steps[idx - 1], steps[idx]] = [steps[idx], steps[idx - 1]];
+      } else if (direction === 'down' && idx < steps.length - 1) {
+        [steps[idx], steps[idx + 1]] = [steps[idx + 1], steps[idx]];
+      }
+      return { ...prev, definition: { steps } };
+    });
+  };
+  
+  const getStepTypeColor = (category: string) => {
+    switch (category) {
+      case 'llm': return 'bg-purple-500/20 text-purple-400 border-purple-500/30';
+      case 'tool': return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
+      case 'context': return 'bg-green-500/20 text-green-400 border-green-500/30';
+      case 'flow': return 'bg-orange-500/20 text-orange-400 border-orange-500/30';
+      case 'variable': return 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30';
+      case 'debug': return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+      default: return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+    }
+  };
+  
+  // Utility functions
+  const formatTokens = (tokens: number) => {
+    if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(0)}M`;
+    if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`;
+    return tokens.toString();
+  };
+  
+  const formatHours = (hours: number) => {
+    if (hours >= 24 * 7) return `${Math.round(hours / (24 * 7))} week(s)`;
+    if (hours >= 24) return `${Math.round(hours / 24)} day(s)`;
+    return `${hours} hour(s)`;
+  };
+  
+  const AdminTabIcon = ({ type }: { type: string }) => {
+    const iconClass = "w-4 h-4";
+    switch (type) {
+      case 'system':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>;
+      case 'oauth':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>;
+      case 'llm':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>;
+      case 'features':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>;
+      case 'filters':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>;
+      case 'tiers':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>;
+      case 'users':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" /></svg>;
+      case 'chats':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>;
+      case 'tools':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>;
+      case 'filter_chains':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 4v6m0 0v6m0-6h6m-6 0h-6" transform="translate(-3, 0) scale(0.5)" /></svg>;
+      case 'dev':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>;
+      default:
+        return null;
+    }
+  };
+
+  const tabs: { id: TabId; label: string; iconType: string }[] = [
+    { id: 'system', label: 'System', iconType: 'system' },
+    { id: 'oauth', label: 'OAuth', iconType: 'oauth' },
+    { id: 'llm', label: 'LLM', iconType: 'llm' },
+    { id: 'features', label: 'Features', iconType: 'features' },
+    { id: 'filters', label: 'Filters', iconType: 'filters' },
+    { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
+    { id: 'tiers', label: 'Tiers', iconType: 'tiers' },
+    { id: 'users', label: 'Users', iconType: 'users' },
+    { id: 'chats', label: 'Chats', iconType: 'chats' },
+    { id: 'tools', label: 'Tools', iconType: 'tools' },
+    { id: 'dev', label: 'Site Dev', iconType: 'dev' },
+  ];
+  
+  if (!user?.is_admin) {
+    return null;
+  }
+  
+  return (
+    <div className="min-h-screen bg-[var(--color-background)] p-6">
+      <div className="max-w-6xl mx-auto">
+        <h1 className="text-2xl font-bold text-[var(--color-text)] mb-6">Admin Panel</h1>
+        
+        {/* Status Messages */}
+        {error && (
+          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
+            {typeof error === 'string' ? error : JSON.stringify(error)}
+            <button onClick={() => setError(null)} className="ml-2 text-red-300 hover:text-red-100">×</button>
+          </div>
+        )}
+        {success && (
+          <div className="mb-4 p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-400">
+            {success}
+          </div>
+        )}
+        
+        {/* Tabs */}
+        <div className="flex flex-wrap gap-2 mb-6 border-b border-[var(--color-border)] pb-4">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                activeTab === tab.id
+                  ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                  : 'bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border)]'
+              }`}
+            >
+              <AdminTabIcon type={tab.iconType} />
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        
+        {isLoading ? (
+          <div className="text-center py-8 text-[var(--color-text-secondary)]">Loading...</div>
+        ) : (
+          <>
+            {/* SYSTEM SETTINGS TAB */}
+            {activeTab === 'system' && systemSettings && (
+              <div className="space-y-6">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Prompts</h2>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Default System Prompt</label>
+                      <textarea
+                        value={systemSettings.default_system_prompt}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, default_system_prompt: e.target.value })}
+                        rows={3}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Title Generation Prompt</label>
+                      <textarea
+                        value={systemSettings.title_generation_prompt}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, title_generation_prompt: e.target.value })}
+                        rows={2}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">RAG Context Prompt</label>
+                      <textarea
+                        value={systemSettings.rag_context_prompt}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, rag_context_prompt: e.target.value })}
+                        rows={2}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Token Pricing & Limits</h2>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Input Token Price (per 1M)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={systemSettings.input_token_price}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, input_token_price: parseFloat(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Output Token Price (per 1M)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={systemSettings.output_token_price}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, output_token_price: parseFloat(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                        Token Refill Interval (hours)
+                        <span className="ml-2 text-xs opacity-70">= {formatHours(systemSettings.token_refill_interval_hours)}</span>
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={systemSettings.token_refill_interval_hours}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, token_refill_interval_hours: parseInt(e.target.value) || 1 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Free Tier Tokens</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={systemSettings.free_tier_tokens}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, free_tier_tokens: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Pro Tier Tokens</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={systemSettings.pro_tier_tokens}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, pro_tier_tokens: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Enterprise Tier Tokens</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={systemSettings.enterprise_tier_tokens}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, enterprise_tier_tokens: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                  </div>
+                </div>
+                
+                <button
+                  onClick={saveSystemSettings}
+                  disabled={isSaving}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSaving ? 'Saving...' : 'Save System Settings'}
+                </button>
+              </div>
+            )}
+            
+            {/* OAUTH SETTINGS TAB */}
+            {activeTab === 'oauth' && oauthSettings && (
+              <div className="space-y-6">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">🔷 Google OAuth</h2>
+                  
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 mb-4">
+                      <input
+                        type="checkbox"
+                        id="google-enabled"
+                        checked={oauthSettings.google_oauth_enabled}
+                        onChange={(e) => setOAuthSettings({ ...oauthSettings, google_oauth_enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <label htmlFor="google-enabled" className="text-sm text-[var(--color-text)]">Enable Google OAuth</label>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Client ID</label>
+                      <input
+                        type="text"
+                        value={oauthSettings.google_client_id}
+                        onChange={(e) => setOAuthSettings({ ...oauthSettings, google_client_id: e.target.value })}
+                        placeholder="xxxxx.apps.googleusercontent.com"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Client Secret</label>
+                      <input
+                        type="password"
+                        value={oauthSettings.google_client_secret}
+                        onChange={(e) => setOAuthSettings({ ...oauthSettings, google_client_secret: e.target.value })}
+                        placeholder="GOCSPX-xxxxx"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Timeout (seconds)</label>
+                      <input
+                        type="number"
+                        min="5"
+                        max="300"
+                        value={oauthSettings.google_oauth_timeout}
+                        onChange={(e) => setOAuthSettings({ ...oauthSettings, google_oauth_timeout: parseInt(e.target.value) || 30 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">⬛ GitHub OAuth</h2>
+                  
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 mb-4">
+                      <input
+                        type="checkbox"
+                        id="github-enabled"
+                        checked={oauthSettings.github_oauth_enabled}
+                        onChange={(e) => setOAuthSettings({ ...oauthSettings, github_oauth_enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <label htmlFor="github-enabled" className="text-sm text-[var(--color-text)]">Enable GitHub OAuth</label>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Client ID</label>
+                      <input
+                        type="text"
+                        value={oauthSettings.github_client_id}
+                        onChange={(e) => setOAuthSettings({ ...oauthSettings, github_client_id: e.target.value })}
+                        placeholder="Iv1.xxxxx"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Client Secret</label>
+                      <input
+                        type="password"
+                        value={oauthSettings.github_client_secret}
+                        onChange={(e) => setOAuthSettings({ ...oauthSettings, github_client_secret: e.target.value })}
+                        placeholder="xxxxx"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Timeout (seconds)</label>
+                      <input
+                        type="number"
+                        min="5"
+                        max="300"
+                        value={oauthSettings.github_oauth_timeout}
+                        onChange={(e) => setOAuthSettings({ ...oauthSettings, github_oauth_timeout: parseInt(e.target.value) || 30 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                  </div>
+                </div>
+                
+                <button
+                  onClick={saveOAuthSettings}
+                  disabled={isSaving}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSaving ? 'Saving...' : 'Save OAuth Settings'}
+                </button>
+              </div>
+            )}
+            
+            {/* LLM SETTINGS TAB */}
+            {activeTab === 'llm' && llmSettings && (
+              <div className="space-y-6">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">LLM Connection</h2>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Base URL</label>
+                      <input
+                        type="text"
+                        value={llmSettings.llm_api_base_url}
+                        onChange={(e) => setLLMSettings({ ...llmSettings, llm_api_base_url: e.target.value })}
+                        placeholder="http://localhost:11434/v1"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)</p>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Key</label>
+                      <input
+                        type="password"
+                        value={llmSettings.llm_api_key}
+                        onChange={(e) => setLLMSettings({ ...llmSettings, llm_api_key: e.target.value })}
+                        placeholder="sk-xxxxx or leave empty"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Default Model</label>
+                      <input
+                        type="text"
+                        value={llmSettings.llm_model}
+                        onChange={(e) => setLLMSettings({ ...llmSettings, llm_model: e.target.value })}
+                        placeholder="default"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Timeout (seconds)</label>
+                        <input
+                          type="number"
+                          min="10"
+                          max="600"
+                          value={llmSettings.llm_timeout}
+                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_timeout: parseInt(e.target.value) || 120 })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Max Tokens (default)</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={llmSettings.llm_max_tokens}
+                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_max_tokens: parseInt(e.target.value) || 4096 })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Temperature (default)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="2"
+                          step="0.1"
+                          value={llmSettings.llm_temperature}
+                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_temperature: parseFloat(e.target.value) || 0.7 })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        />
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="llm-stream"
+                        checked={llmSettings.llm_stream_default}
+                        onChange={(e) => setLLMSettings({ ...llmSettings, llm_stream_default: e.target.checked })}
+                        className="rounded"
+                      />
+                      <label htmlFor="llm-stream" className="text-sm text-[var(--color-text)]">Enable streaming by default</label>
+                    </div>
+                    
+                    {/* Test Connection */}
+                    <div className="border-t border-[var(--color-border)] pt-4 mt-4">
+                      <button
+                        onClick={testLLMConnection}
+                        disabled={llmTesting}
+                        className="px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] rounded-lg hover:bg-[var(--color-background)] disabled:opacity-50"
+                      >
+                        {llmTesting ? 'Testing...' : '🔌 Test Connection'}
+                      </button>
+                      
+                      {llmTestResult && (
+                        <div className={`mt-3 p-3 rounded-lg text-sm ${
+                          llmTestResult.success
+                            ? 'bg-green-500/10 border border-green-500/30 text-green-400'
+                            : 'bg-red-500/10 border border-red-500/30 text-red-400'
+                        }`}>
+                          <p className="font-medium">{llmTestResult.success ? '✓ Connected' : '✗ Failed'}</p>
+                          <p className="text-xs mt-1 opacity-80">{llmTestResult.message}</p>
+                          {llmTestResult.success && llmTestResult.models && llmTestResult.models.length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {llmTestResult.models.map((m, i) => (
+                                <span key={i} className="px-2 py-0.5 rounded text-xs bg-[var(--color-background)]">{m}</span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                
+                <button
+                  onClick={saveLLMSettings}
+                  disabled={isSaving}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSaving ? 'Saving...' : 'Save LLM Settings'}
+                </button>
+              </div>
+            )}
+            
+            {/* FEATURE FLAGS TAB */}
+            {activeTab === 'features' && featureFlags && (
+              <div className="space-y-6">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Feature Flags</h2>
+                  
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between p-3 bg-[var(--color-background)] rounded-lg">
+                      <div>
+                        <p className="text-[var(--color-text)] font-medium">Enable Registration</p>
+                        <p className="text-xs text-[var(--color-text-secondary)]">Allow new users to create accounts</p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={featureFlags.enable_registration}
+                        onChange={(e) => setFeatureFlags({ ...featureFlags, enable_registration: e.target.checked })}
+                        className="w-5 h-5 rounded"
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between p-3 bg-[var(--color-background)] rounded-lg">
+                      <div>
+                        <p className="text-[var(--color-text)] font-medium">Enable Billing</p>
+                        <p className="text-xs text-[var(--color-text-secondary)]">Show billing page and enforce tier limits</p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={featureFlags.enable_billing}
+                        onChange={(e) => setFeatureFlags({ ...featureFlags, enable_billing: e.target.checked })}
+                        className="w-5 h-5 rounded"
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between p-3 bg-[var(--color-background)] rounded-lg border-2 border-yellow-500/30">
+                      <div>
+                        <p className="text-[var(--color-text)] font-medium">🎉 Free For All Mode</p>
+                        <p className="text-xs text-[var(--color-text-secondary)]">Disable ALL token limits - unlimited usage for everyone</p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={featureFlags.freeforall}
+                        onChange={(e) => setFeatureFlags({ ...featureFlags, freeforall: e.target.checked })}
+                        className="w-5 h-5 rounded"
+                      />
+                    </div>
+                  </div>
+                </div>
+                
+                <button
+                  onClick={saveFeatureFlags}
+                  disabled={isSaving}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSaving ? 'Saving...' : 'Save Feature Flags'}
+                </button>
+              </div>
+            )}
+            
+            {/* FILTERS TAB */}
+            {activeTab === 'filters' && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xl font-semibold text-[var(--color-text)]">Message Filters</h2>
+                  <button
+                    onClick={() => {
+                      resetFilterForm();
+                      setShowFilterModal(true);
+                    }}
+                    className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90"
+                  >
+                    + Add Filter
+                  </button>
+                </div>
+                
+                {/* Filter type legend */}
+                <div className="flex flex-wrap gap-3 text-sm">
+                  <span className="px-2 py-1 rounded bg-blue-500/20 text-blue-400">User → LLM</span>
+                  <span className="px-2 py-1 rounded bg-green-500/20 text-green-400">LLM → User</span>
+                  <span className="px-2 py-1 rounded bg-orange-500/20 text-orange-400">To Tools</span>
+                  <span className="px-2 py-1 rounded bg-purple-500/20 text-purple-400">From Tools</span>
+                </div>
+                
+                {filtersLoading ? (
+                  <div className="text-center py-8 text-[var(--color-text-secondary)]">Loading filters...</div>
+                ) : filters.length === 0 ? (
+                  <div className="text-center py-8 text-[var(--color-text-secondary)]">
+                    No filters configured. Create one to get started.
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Group filters by type */}
+                    {(['to_llm', 'from_llm', 'to_tools', 'from_tools'] as const).map(filterType => {
+                      const typeFilters = filters.filter(f => f.filter_type === filterType);
+                      if (typeFilters.length === 0) return null;
+                      
+                      return (
+                        <div key={filterType} className="space-y-2">
+                          <h3 className={`text-sm font-medium ${getFilterTypeColor(filterType)} px-2 py-1 rounded inline-block`}>
+                            {getFilterTypeLabel(filterType)}
+                          </h3>
+                          <div className="grid gap-3">
+                            {typeFilters.map(filter => (
+                              <div
+                                key={filter.id}
+                                className={`bg-[var(--color-surface)] rounded-lg p-4 border ${
+                                  filter.enabled ? 'border-[var(--color-border)]' : 'border-red-500/30 opacity-60'
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-4">
+                                  <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-medium text-[var(--color-text)]">{filter.name}</span>
+                                      <span className={`px-2 py-0.5 rounded text-xs ${
+                                        filter.action === 'block' ? 'bg-red-500/20 text-red-400' :
+                                        filter.action === 'modify' ? 'bg-yellow-500/20 text-yellow-400' :
+                                        filter.action === 'log' ? 'bg-blue-500/20 text-blue-400' :
+                                        'bg-gray-500/20 text-gray-400'
+                                      }`}>
+                                        {filter.action}
+                                      </span>
+                                      <span className="px-2 py-0.5 rounded text-xs bg-[var(--color-background)] text-[var(--color-text-secondary)]">
+                                        {filter.priority}
+                                      </span>
+                                    </div>
+                                    {filter.description && (
+                                      <p className="text-sm text-[var(--color-text-secondary)] mt-1">{filter.description}</p>
+                                    )}
+                                    <div className="text-xs text-[var(--color-text-secondary)] mt-2">
+                                      Mode: {filter.filter_mode}
+                                      {filter.pattern && <span className="ml-2">| Pattern: <code className="bg-[var(--color-background)] px-1 rounded">{filter.pattern.substring(0, 30)}...</code></span>}
+                                      {filter.word_list && filter.word_list.length > 0 && <span className="ml-2">| Words: {filter.word_list.length}</span>}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      onClick={() => handleToggleFilter(filter.id!)}
+                                      className={`px-3 py-1 rounded text-sm ${
+                                        filter.enabled
+                                          ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                                          : 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                                      }`}
+                                    >
+                                      {filter.enabled ? 'Enabled' : 'Disabled'}
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setEditingFilter(filter);
+                                        setFilterForm(filter);
+                                        setShowFilterModal(true);
+                                      }}
+                                      className="px-3 py-1 bg-[var(--color-background)] text-[var(--color-text)] rounded text-sm hover:bg-[var(--color-border)]"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      onClick={() => handleDeleteFilter(filter.id!)}
+                                      className="px-3 py-1 bg-red-500/20 text-red-400 rounded text-sm hover:bg-red-500/30"
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* FILTER CHAINS TAB */}
+            {activeTab === 'filter_chains' && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-xl font-semibold text-[var(--color-text)]">Configurable Filter Chains</h2>
+                    <p className="text-sm text-[var(--color-text-secondary)] mt-1">
+                      Build agentic flows with LLM decisions, tool calls, conditionals, and loops
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      resetFilterChainForm();
+                      setShowFilterChainModal(true);
+                    }}
+                    className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90"
+                  >
+                    + New Chain
+                  </button>
+                </div>
+                
+                {filterChainsLoading ? (
+                  <div className="text-center py-8 text-[var(--color-text-secondary)]">Loading filter chains...</div>
+                ) : filterChains.length === 0 ? (
+                  <div className="text-center py-8 text-[var(--color-text-secondary)]">
+                    No filter chains configured. Create one to get started.
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {filterChains.map(chain => (
+                      <div
+                        key={chain.id}
+                        className={`bg-[var(--color-surface)] rounded-lg p-4 border ${
+                          chain.enabled ? 'border-[var(--color-border)]' : 'border-red-500/30 opacity-60'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-[var(--color-text)]">{chain.name}</span>
+                              <span className="px-2 py-0.5 rounded text-xs bg-[var(--color-background)] text-[var(--color-text-secondary)]">
+                                Priority: {chain.priority}
+                              </span>
+                              {chain.bidirectional && (
+                                <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                                  Bidirectional
+                                </span>
+                              )}
+                              {chain.retain_history && (
+                                <span className="px-2 py-0.5 rounded text-xs bg-blue-500/20 text-blue-400">
+                                  Hidden
+                                </span>
+                              )}
+                              {chain.debug && (
+                                <span className="px-2 py-0.5 rounded text-xs bg-yellow-500/20 text-yellow-400">
+                                  🐛 Debug
+                                </span>
+                              )}
+                            </div>
+                            {chain.description && (
+                              <p className="text-sm text-[var(--color-text-secondary)] mt-1">{chain.description}</p>
+                            )}
+                            <div className="text-xs text-[var(--color-text-secondary)] mt-2">
+                              {chain.definition?.steps?.length || 0} steps
+                              {chain.max_iterations && <span className="ml-2">| Max iterations: {chain.max_iterations}</span>}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleToggleFilterChain(chain.id!)}
+                              className={`px-3 py-1 rounded text-sm ${
+                                chain.enabled
+                                  ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                                  : 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                              }`}
+                            >
+                              {chain.enabled ? 'Enabled' : 'Disabled'}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingFilterChain(chain);
+                                setFilterChainForm(chain);
+                                setFilterChainJson(JSON.stringify(chain.definition, null, 2));
+                                setShowFilterChainModal(true);
+                              }}
+                              className="px-3 py-1 bg-[var(--color-background)] text-[var(--color-text)] rounded text-sm hover:bg-[var(--color-border)]"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => setPreviewJsonChain(chain)}
+                              className="px-3 py-1 bg-[var(--color-background)] text-[var(--color-text)] rounded text-sm hover:bg-[var(--color-border)]"
+                            >
+                              Preview JSON
+                            </button>
+                            <button
+                              onClick={() => handleDeleteFilterChain(chain.id!)}
+                              className="px-3 py-1 bg-red-500/20 text-red-400 rounded text-sm hover:bg-red-500/30"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* TIERS TAB */}
+            {activeTab === 'tiers' && (
+              <div className="space-y-6">
+                {tiers.map((tier) => (
+                  <div key={tier.id} className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-semibold text-[var(--color-text)]">{tier.name}</h3>
+                      <button
+                        onClick={() => setEditingTier(editingTier === tier.id ? null : tier.id)}
+                        className="text-sm text-[var(--color-primary)] hover:underline"
+                      >
+                        {editingTier === tier.id ? 'Done' : 'Edit'}
+                      </button>
+                    </div>
+                    
+                    {editingTier === tier.id ? (
+                      <div className="space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Name</label>
+                            <input
+                              type="text"
+                              value={tier.name}
+                              onChange={(e) => updateTier(tier.id, { name: e.target.value })}
+                              className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Price ($/month)</label>
+                            <input
+                              type="number"
+                              value={tier.price}
+                              onChange={(e) => updateTier(tier.id, { price: parseFloat(e.target.value) || 0 })}
+                              className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Tokens</label>
+                            <input
+                              type="number"
+                              value={tier.tokens}
+                              onChange={(e) => updateTier(tier.id, { tokens: parseInt(e.target.value) || 0 })}
+                              className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={tier.popular}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setTiers(tiers.map(t => ({ ...t, popular: t.id === tier.id })));
+                                } else {
+                                  updateTier(tier.id, { popular: false });
+                                }
+                              }}
+                              className="rounded"
+                            />
+                            <label className="text-sm text-[var(--color-text)]">Popular (highlighted)</label>
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Features</label>
+                          <div className="space-y-2">
+                            {tier.features.map((feature, i) => (
+                              <div key={i} className="flex items-center gap-2">
+                                <span className="flex-1 px-3 py-1 bg-[var(--color-background)] rounded text-sm text-[var(--color-text)]">{feature}</span>
+                                <button
+                                  onClick={() => removeFeatureFromTier(tier.id, i)}
+                                  className="text-red-400 hover:text-red-300"
+                                >×</button>
+                              </div>
+                            ))}
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={newFeature}
+                                onChange={(e) => setNewFeature(e.target.value)}
+                                placeholder="Add feature..."
+                                className="flex-1 px-3 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                                onKeyDown={(e) => e.key === 'Enter' && addFeatureToTier(tier.id)}
+                              />
+                              <button
+                                onClick={() => addFeatureToTier(tier.id)}
+                                className="px-3 py-1 bg-[var(--color-button)] text-[var(--color-button-text)] rounded text-sm"
+                              >Add</button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="text-2xl font-bold text-[var(--color-text)]">${tier.price}<span className="text-sm font-normal text-[var(--color-text-secondary)]">/mo</span></p>
+                        <p className="text-sm text-[var(--color-text-secondary)] mb-2">{formatTokens(tier.tokens)} tokens</p>
+                        <ul className="text-sm text-[var(--color-text-secondary)]">
+                          {tier.features.map((f, i) => (
+                            <li key={i}>• {f}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                
+                <button
+                  onClick={saveTiers}
+                  disabled={isSaving}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSaving ? 'Saving...' : 'Save Tiers'}
+                </button>
+              </div>
+            )}
+            
+            {/* USERS TAB */}
+            {activeTab === 'users' && (
+              <div className="space-y-4">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={usersSearch}
+                    onChange={(e) => setUsersSearch(e.target.value)}
+                    placeholder="Search users..."
+                    className="flex-1 px-4 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                    onKeyDown={(e) => e.key === 'Enter' && fetchUsers(1, usersSearch)}
+                  />
+                  <button
+                    onClick={() => fetchUsers(1, usersSearch)}
+                    className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg"
+                  >Search</button>
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl border border-[var(--color-border)] overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[var(--color-background)]">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">User</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Tier</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Tokens</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Chats</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {usersLoading ? (
+                        <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--color-text-secondary)]">Loading...</td></tr>
+                      ) : users.length === 0 ? (
+                        <tr><td colSpan={5} className="px-4 py-8 text-center text-[var(--color-text-secondary)]">No users found</td></tr>
+                      ) : users.map((u) => (
+                        <tr key={u.id} className="border-t border-[var(--color-border)]">
+                          <td className="px-4 py-3">
+                            <div>
+                              <p className="text-[var(--color-text)] font-medium">
+                                {u.username}
+                                {u.is_admin && <span className="ml-2 text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">Admin</span>}
+                                {!u.is_active && <span className="ml-2 text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">Banned</span>}
+                              </p>
+                              <p className="text-xs text-[var(--color-text-secondary)]">{u.email}</p>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-[var(--color-text)]">{u.tier}</td>
+                          <td className="px-4 py-3 text-[var(--color-text)]">
+                            {formatTokens(u.tokens_used)} / {formatTokens(u.tokens_limit)}
+                          </td>
+                          <td className="px-4 py-3">
+                            <button
+                              onClick={() => {
+                                setSelectedUser(u);
+                                setUserAction('chats');
+                                fetchUserChats(u.id, 1);
+                                setShowUserModal(true);
+                              }}
+                              className="text-[var(--color-primary)] hover:underline"
+                            >
+                              {u.chat_count} chats
+                            </button>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => { setSelectedUser(u); setUserAction('upgrade'); setShowUserModal(true); }}
+                                className="text-xs px-2 py-1 bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30"
+                              >Tier</button>
+                              <button
+                                onClick={() => { setSelectedUser(u); setUserAction('refund'); setShowUserModal(true); }}
+                                className="text-xs px-2 py-1 bg-green-500/20 text-green-400 rounded hover:bg-green-500/30"
+                              >+Tokens</button>
+                              <button
+                                onClick={() => handleResetTokens(u)}
+                                className="text-xs px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded hover:bg-yellow-500/30"
+                              >Reset</button>
+                              <button
+                                onClick={() => handleToggleAdmin(u)}
+                                disabled={u.id === user?.id}
+                                className="text-xs px-2 py-1 bg-purple-500/20 text-purple-400 rounded hover:bg-purple-500/30 disabled:opacity-50"
+                              >{u.is_admin ? 'Demote' : 'Admin'}</button>
+                              <button
+                                onClick={() => handleBanUser(u)}
+                                className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                              >{u.is_active ? 'Ban' : 'Unban'}</button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                
+                {/* Pagination */}
+                {usersTotal > PAGE_SIZE && (
+                  <div className="flex justify-center gap-2">
+                    <button
+                      onClick={() => fetchUsers(usersPage - 1, usersSearch)}
+                      disabled={usersPage === 1}
+                      className="px-3 py-1 bg-[var(--color-surface)] rounded disabled:opacity-50"
+                    >←</button>
+                    <span className="px-3 py-1 text-[var(--color-text-secondary)]">
+                      Page {usersPage} of {Math.ceil(usersTotal / PAGE_SIZE)}
+                    </span>
+                    <button
+                      onClick={() => fetchUsers(usersPage + 1, usersSearch)}
+                      disabled={usersPage >= Math.ceil(usersTotal / PAGE_SIZE)}
+                      className="px-3 py-1 bg-[var(--color-surface)] rounded disabled:opacity-50"
+                    >→</button>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* CHATS TAB */}
+            {activeTab === 'chats' && (
+              <div className="space-y-4">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={allChatsSearch}
+                    onChange={(e) => setAllChatsSearch(e.target.value)}
+                    placeholder="Search chats by title..."
+                    className="flex-1 px-4 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                    onKeyDown={(e) => e.key === 'Enter' && fetchAllChats(1, allChatsSearch)}
+                  />
+                  <button
+                    onClick={() => fetchAllChats(1, allChatsSearch)}
+                    className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg"
+                  >Search</button>
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl border border-[var(--color-border)] overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[var(--color-background)]">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Title</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Owner</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Model</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Messages</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Updated</th>
+                        <th className="px-4 py-3 text-left text-[var(--color-text-secondary)]">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {chatsLoading ? (
+                        <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-text-secondary)]">Loading...</td></tr>
+                      ) : allChats.length === 0 ? (
+                        <tr><td colSpan={6} className="px-4 py-8 text-center text-[var(--color-text-secondary)]">No chats found</td></tr>
+                      ) : allChats.map((chat) => (
+                        <tr key={chat.id} className="border-t border-[var(--color-border)]">
+                          <td className="px-4 py-3 text-[var(--color-text)]">{chat.title}</td>
+                          <td className="px-4 py-3 text-[var(--color-text-secondary)]">{chat.owner_email || 'Unknown'}</td>
+                          <td className="px-4 py-3 text-[var(--color-text-secondary)]">{chat.model || 'default'}</td>
+                          <td className="px-4 py-3 text-[var(--color-text)]">{chat.message_count}</td>
+                          <td className="px-4 py-3 text-[var(--color-text-secondary)]">
+                            {chat.updated_at ? new Date(chat.updated_at).toLocaleDateString() : '-'}
+                          </td>
+                          <td className="px-4 py-3">
+                            <button
+                              onClick={() => viewChatDetail(chat.id)}
+                              className="text-xs px-2 py-1 bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30"
+                            >View</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                
+                {/* Pagination */}
+                {allChatsTotal > PAGE_SIZE && (
+                  <div className="flex justify-center gap-2">
+                    <button
+                      onClick={() => fetchAllChats(allChatsPage - 1, allChatsSearch)}
+                      disabled={allChatsPage === 1}
+                      className="px-3 py-1 bg-[var(--color-surface)] rounded disabled:opacity-50"
+                    >←</button>
+                    <span className="px-3 py-1 text-[var(--color-text-secondary)]">
+                      Page {allChatsPage} of {Math.ceil(allChatsTotal / PAGE_SIZE)}
+                    </span>
+                    <button
+                      onClick={() => fetchAllChats(allChatsPage + 1, allChatsSearch)}
+                      disabled={allChatsPage >= Math.ceil(allChatsTotal / PAGE_SIZE)}
+                      className="px-3 py-1 bg-[var(--color-surface)] rounded disabled:opacity-50"
+                    >→</button>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* TOOLS TAB */}
+            {activeTab === 'tools' && (
+              <div className="space-y-4">
+                {/* Header with stats summary */}
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => { resetToolForm(); setShowToolModal(true); }}
+                    className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg"
+                  >+ Add Tool</button>
+                  
+                  {toolUsageStats && toolUsageStats.total_calls > 0 && (
+                    <div className="flex items-center gap-4">
+                      <div className="text-sm text-[var(--color-text-secondary)]">
+                        Total: <span className="text-[var(--color-text)] font-medium">{toolUsageStats.total_calls.toLocaleString()}</span> calls
+                        <span className="mx-2">•</span>
+                        <span className="text-green-400">{toolUsageStats.successful_calls.toLocaleString()}</span> success
+                        <span className="mx-2">•</span>
+                        <span className="text-red-400">{toolUsageStats.failed_calls.toLocaleString()}</span> failed
+                      </div>
+                      <button
+                        onClick={() => resetToolUsage()}
+                        className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                      >Reset All Stats</button>
+                    </div>
+                  )}
+                </div>
+                
+                <div className="grid gap-4">
+                  {toolsLoading ? (
+                    <div className="text-center py-8 text-[var(--color-text-secondary)]">Loading...</div>
+                  ) : tools.length === 0 ? (
+                    <div className="text-center py-8 text-[var(--color-text-secondary)]">No tools configured</div>
+                  ) : (
+                    tools.map((tool) => {
+                      const usage = getToolUsageStats(tool.id);
+                      return (
+                        <div key={tool.id} className="bg-[var(--color-surface)] rounded-xl p-4 border border-[var(--color-border)]">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <h3 className="text-[var(--color-text)] font-medium">{tool.name}</h3>
+                              <p className="text-sm text-[var(--color-text-secondary)]">{tool.url}</p>
+                              <div className="flex flex-wrap gap-2 mt-2">
+                                <span className={`text-xs px-2 py-0.5 rounded ${tool.tool_type === 'mcp' ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>
+                                  {tool.tool_type.toUpperCase()}
+                                </span>
+                                {tool.is_public && <span className="text-xs px-2 py-0.5 rounded bg-purple-500/20 text-purple-400">Public</span>}
+                                {tool.has_api_key && <span className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">API Key</span>}
+                              </div>
+                              
+                              {/* Usage Stats */}
+                              {usage && usage.total_calls > 0 && (
+                                <div className="mt-3 pt-3 border-t border-[var(--color-border)]">
+                                  <div className="flex flex-wrap gap-4 text-xs">
+                                    <div>
+                                      <span className="text-[var(--color-text-secondary)]">Calls:</span>
+                                      <span className="ml-1 text-[var(--color-text)] font-medium">{usage.total_calls.toLocaleString()}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-[var(--color-text-secondary)]">Success:</span>
+                                      <span className="ml-1 text-green-400 font-medium">{usage.successful_calls.toLocaleString()}</span>
+                                      <span className="text-[var(--color-text-secondary)] ml-1">
+                                        ({Math.round((usage.successful_calls / usage.total_calls) * 100)}%)
+                                      </span>
+                                    </div>
+                                    <div>
+                                      <span className="text-[var(--color-text-secondary)]">Failed:</span>
+                                      <span className="ml-1 text-red-400 font-medium">{usage.failed_calls.toLocaleString()}</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-[var(--color-text-secondary)]">Avg Time:</span>
+                                      <span className="ml-1 text-[var(--color-text)]">{usage.avg_duration_ms.toFixed(0)}ms</span>
+                                    </div>
+                                    <div>
+                                      <span className="text-[var(--color-text-secondary)]">Users:</span>
+                                      <span className="ml-1 text-[var(--color-text)]">{usage.unique_users}</span>
+                                    </div>
+                                    {usage.last_used && (
+                                      <div>
+                                        <span className="text-[var(--color-text-secondary)]">Last Used:</span>
+                                        <span className="ml-1 text-[var(--color-text)]">
+                                          {new Date(usage.last_used).toLocaleDateString()}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                              {(!usage || usage.total_calls === 0) && (
+                                <div className="mt-3 pt-3 border-t border-[var(--color-border)]">
+                                  <span className="text-xs text-[var(--color-text-secondary)]">No usage recorded</span>
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex flex-col gap-2 ml-4">
+                              <button
+                                onClick={() => {
+                                  setEditingTool(tool);
+                                  setToolForm({
+                                    name: tool.name,
+                                    description: tool.description || '',
+                                    tool_type: tool.tool_type,
+                                    url: tool.url,
+                                    api_key: '',
+                                    is_public: tool.is_public,
+                                    auth_type: 'bearer',
+                                  });
+                                  setShowToolModal(true);
+                                }}
+                                className="text-xs px-2 py-1 bg-blue-500/20 text-blue-400 rounded"
+                              >Edit</button>
+                              {usage && usage.total_calls > 0 && (
+                                <button
+                                  onClick={() => resetToolUsage(tool.id)}
+                                  className="text-xs px-2 py-1 bg-orange-500/20 text-orange-400 rounded"
+                                >Reset Stats</button>
+                              )}
+                              <button
+                                onClick={() => handleDeleteTool(tool.id)}
+                                className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded"
+                              >Delete</button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+            
+            {/* MODALS */}
+            
+            {/* User Action Modal */}
+            {showUserModal && selectedUser && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-2xl max-h-[80vh] overflow-y-auto border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
+                    {userAction === 'upgrade' ? 'Change Tier' : userAction === 'refund' ? 'Add Tokens' : 'User Chats'}
+                    <span className="text-sm font-normal text-[var(--color-text-secondary)] ml-2">— {selectedUser.email}</span>
+                  </h3>
+                  
+                  {userAction === 'upgrade' && (
+                    <div className="flex flex-col gap-2">
+                      {['free', 'pro', 'enterprise'].map((tier) => (
+                        <button
+                          key={tier}
+                          onClick={() => handleUpgradeUser(selectedUser, tier)}
+                          disabled={actionLoading || selectedUser.tier === tier}
+                          className={`px-4 py-2 rounded-lg text-sm font-medium ${
+                            selectedUser.tier === tier ? 'bg-[var(--color-border)] text-[var(--color-text-secondary)]' : 'bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90'
+                          } disabled:opacity-50`}
+                        >
+                          {tier.charAt(0).toUpperCase() + tier.slice(1)}
+                          {selectedUser.tier === tier && ' (current)'}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  
+                  {userAction === 'refund' && (
+                    <div className="flex flex-wrap gap-2">
+                      {[10000, 50000, 100000, 500000, 1000000].map((amount) => (
+                        <button
+                          key={amount}
+                          onClick={() => handleRefundTokens(selectedUser, amount)}
+                          disabled={actionLoading}
+                          className="px-3 py-2 rounded-lg text-sm font-medium bg-green-500/20 text-green-400 hover:bg-green-500/30 disabled:opacity-50"
+                        >
+                          +{formatTokens(amount)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  
+                  {userAction === 'chats' && (
+                    <div className="space-y-2">
+                      {chatsLoading ? (
+                        <div className="text-center py-4 text-[var(--color-text-secondary)]">Loading...</div>
+                      ) : userChats.length === 0 ? (
+                        <div className="text-center py-4 text-[var(--color-text-secondary)]">No chats</div>
+                      ) : userChats.map((chat) => (
+                        <div key={chat.id} className="flex items-center justify-between p-3 bg-[var(--color-background)] rounded-lg">
+                          <div>
+                            <p className="text-[var(--color-text)] font-medium">{chat.title}</p>
+                            <p className="text-xs text-[var(--color-text-secondary)]">{chat.message_count} messages • {chat.model || 'default'}</p>
+                          </div>
+                          <button
+                            onClick={() => viewChatDetail(chat.id)}
+                            className="text-xs px-2 py-1 bg-blue-500/20 text-blue-400 rounded"
+                          >View</button>
+                        </div>
+                      ))}
+                      
+                      {userChatsTotal > PAGE_SIZE && (
+                        <div className="flex justify-center gap-2 mt-4">
+                          <button
+                            onClick={() => fetchUserChats(selectedUser.id, userChatsPage - 1)}
+                            disabled={userChatsPage === 1}
+                            className="px-3 py-1 bg-[var(--color-surface)] rounded disabled:opacity-50"
+                          >←</button>
+                          <span className="px-3 py-1 text-[var(--color-text-secondary)]">
+                            {userChatsPage} / {Math.ceil(userChatsTotal / PAGE_SIZE)}
+                          </span>
+                          <button
+                            onClick={() => fetchUserChats(selectedUser.id, userChatsPage + 1)}
+                            disabled={userChatsPage >= Math.ceil(userChatsTotal / PAGE_SIZE)}
+                            className="px-3 py-1 bg-[var(--color-surface)] rounded disabled:opacity-50"
+                          >→</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  <div className="mt-6 flex justify-end">
+                    <button
+                      onClick={() => { setShowUserModal(false); setUserAction(null); setSelectedUser(null); }}
+                      className="px-4 py-2 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                    >Close</button>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* Chat Detail Modal */}
+            {showChatModal && selectedChat && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-4xl max-h-[80vh] overflow-y-auto border border-[var(--color-border)]">
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <h3 className="text-lg font-semibold text-[var(--color-text)]">{selectedChat.title}</h3>
+                      <p className="text-sm text-[var(--color-text-secondary)]">
+                        {selectedChat.owner_username} ({selectedChat.owner_email}) • {selectedChat.model || 'default'}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => { setShowChatModal(false); setSelectedChat(null); }}
+                      className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)] text-2xl"
+                    >×</button>
+                  </div>
+                  
+                  <div className="space-y-4">
+                    {selectedChat.messages.map((msg) => (
+                      <div key={msg.id} className={`p-4 rounded-lg ${msg.role === 'user' ? 'bg-blue-500/10 border-l-2 border-blue-500' : 'bg-[var(--color-background)]'}`}>
+                        <p className="text-xs text-[var(--color-text-secondary)] mb-1 uppercase">{msg.role}</p>
+                        <p className="text-[var(--color-text)] whitespace-pre-wrap">{msg.content}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* Tool Modal */}
+            {showToolModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-md border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
+                    {editingTool ? 'Edit Tool' : 'Add Tool'}
+                  </h3>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Name</label>
+                      <input
+                        type="text"
+                        value={toolForm.name}
+                        onChange={(e) => setToolForm({ ...toolForm, name: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Type</label>
+                      <select
+                        value={toolForm.tool_type}
+                        onChange={(e) => setToolForm({ ...toolForm, tool_type: e.target.value as 'mcp' | 'openapi' })}
+                        disabled={!!editingTool}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                      >
+                        <option value="mcp">MCP</option>
+                        <option value="openapi">OpenAPI</option>
+                      </select>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">URL</label>
+                      <input
+                        type="text"
+                        value={toolForm.url}
+                        onChange={(e) => setToolForm({ ...toolForm, url: e.target.value })}
+                        placeholder="http://localhost:3000 or https://api.example.com/openapi.json"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Key (optional)</label>
+                      <input
+                        type="password"
+                        value={toolForm.api_key}
+                        onChange={(e) => setToolForm({ ...toolForm, api_key: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <button
+                        onClick={handleProbeUrl}
+                        disabled={probing || !toolForm.url}
+                        className="w-full px-4 py-2 bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] rounded-lg disabled:opacity-50"
+                      >
+                        {probing ? 'Testing...' : 'Test Connection'}
+                      </button>
+                      
+                      {probeResult && (
+                        <div className={`mt-2 p-3 rounded-lg text-sm ${probeResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                          {probeResult.message}
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="tool-public"
+                        checked={toolForm.is_public}
+                        onChange={(e) => setToolForm({ ...toolForm, is_public: e.target.checked })}
+                        className="rounded"
+                      />
+                      <label htmlFor="tool-public" className="text-sm text-[var(--color-text)]">Make available to all users</label>
+                    </div>
+                  </div>
+                  
+                  <div className="mt-6 flex justify-end gap-2">
+                    <button
+                      onClick={() => { setShowToolModal(false); resetToolForm(); }}
+                      className="px-4 py-2 text-sm text-[var(--color-text-secondary)]"
+                    >Cancel</button>
+                    <button
+                      onClick={handleCreateTool}
+                      disabled={actionLoading || !toolForm.name || !toolForm.url}
+                      className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg disabled:opacity-50"
+                    >
+                      {actionLoading ? 'Saving...' : (editingTool ? 'Update' : 'Create')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* Filter Modal */}
+            {showFilterModal && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-2xl border border-[var(--color-border)] max-h-[90vh] overflow-y-auto">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
+                    {editingFilter ? 'Edit Filter' : 'Add Filter'}
+                  </h3>
+                  
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Name *</label>
+                        <input
+                          type="text"
+                          value={filterForm.name}
+                          onChange={(e) => setFilterForm({ ...filterForm, name: e.target.value })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          placeholder="my-filter"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Filter Type *</label>
+                        <select
+                          value={filterForm.filter_type}
+                          onChange={(e) => setFilterForm({ ...filterForm, filter_type: e.target.value as any })}
+                          disabled={!!editingFilter}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                        >
+                          <option value="to_llm">User → LLM (ToLLMFromChat)</option>
+                          <option value="from_llm">LLM → User (FromLLMToChat)</option>
+                          <option value="to_tools">To Tools</option>
+                          <option value="from_tools">From Tools</option>
+                        </select>
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Description</label>
+                      <input
+                        type="text"
+                        value={filterForm.description || ''}
+                        onChange={(e) => setFilterForm({ ...filterForm, description: e.target.value || null })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                        placeholder="What does this filter do?"
+                      />
+                    </div>
+                    
+                    <div className="grid grid-cols-3 gap-4">
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Priority</label>
+                        <select
+                          value={filterForm.priority}
+                          onChange={(e) => setFilterForm({ ...filterForm, priority: e.target.value as any })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                        >
+                          <option value="highest">Highest (runs first)</option>
+                          <option value="high">High</option>
+                          <option value="medium">Medium</option>
+                          <option value="low">Low</option>
+                          <option value="least">Least (runs last)</option>
+                        </select>
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Action</label>
+                        <select
+                          value={filterForm.action}
+                          onChange={(e) => setFilterForm({ ...filterForm, action: e.target.value as any })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                        >
+                          <option value="modify">Modify (replace content)</option>
+                          <option value="block">Block (stop message)</option>
+                          <option value="log">Log (passthrough + log)</option>
+                          <option value="passthrough">Passthrough (no change)</option>
+                        </select>
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Filter Mode</label>
+                        <select
+                          value={filterForm.filter_mode}
+                          onChange={(e) => setFilterForm({ ...filterForm, filter_mode: e.target.value as any })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                        >
+                          <option value="pattern">Pattern/Regex</option>
+                          <option value="code">Custom Code</option>
+                          <option value="llm">LLM-based</option>
+                        </select>
+                      </div>
+                    </div>
+                    
+                    {filterForm.filter_mode === 'pattern' && (
+                      <>
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Regex Pattern</label>
+                          <input
+                            type="text"
+                            value={filterForm.pattern || ''}
+                            onChange={(e) => setFilterForm({ ...filterForm, pattern: e.target.value || null })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] font-mono"
+                            placeholder="\\b(badword1|badword2)\\b"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Replacement Text (for modify action)</label>
+                          <input
+                            type="text"
+                            value={filterForm.replacement || ''}
+                            onChange={(e) => setFilterForm({ ...filterForm, replacement: e.target.value || null })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            placeholder="[FILTERED]"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Word List (comma-separated, alternative to regex)</label>
+                          <input
+                            type="text"
+                            value={filterForm.word_list?.join(', ') || ''}
+                            onChange={(e) => setFilterForm({ 
+                              ...filterForm, 
+                              word_list: e.target.value ? e.target.value.split(',').map(w => w.trim()).filter(Boolean) : null 
+                            })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            placeholder="word1, word2, word3"
+                          />
+                        </div>
+                        
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="case-sensitive"
+                            checked={filterForm.case_sensitive}
+                            onChange={(e) => setFilterForm({ ...filterForm, case_sensitive: e.target.checked })}
+                            className="rounded"
+                          />
+                          <label htmlFor="case-sensitive" className="text-sm text-[var(--color-text)]">Case sensitive matching</label>
+                        </div>
+                      </>
+                    )}
+                    
+                    {filterForm.filter_mode === 'code' && (
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Python Code (advanced)</label>
+                        <textarea
+                          value={filterForm.code || ''}
+                          onChange={(e) => setFilterForm({ ...filterForm, code: e.target.value || null })}
+                          rows={6}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] font-mono text-sm"
+                          placeholder="# content and context variables are available\nreturn content.replace('foo', 'bar')"
+                        />
+                      </div>
+                    )}
+                    
+                    {filterForm.filter_mode === 'llm' && (
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">LLM Prompt</label>
+                        <textarea
+                          value={filterForm.llm_prompt || ''}
+                          onChange={(e) => setFilterForm({ ...filterForm, llm_prompt: e.target.value || null })}
+                          rows={4}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          placeholder="Review this content and return a sanitized version..."
+                        />
+                      </div>
+                    )}
+                    
+                    {filterForm.action === 'block' && (
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Block Message</label>
+                        <input
+                          type="text"
+                          value={filterForm.block_message || ''}
+                          onChange={(e) => setFilterForm({ ...filterForm, block_message: e.target.value || null })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          placeholder="Your message was blocked because..."
+                        />
+                      </div>
+                    )}
+                    
+                    <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="filter-enabled"
+                          checked={filterForm.enabled}
+                          onChange={(e) => setFilterForm({ ...filterForm, enabled: e.target.checked })}
+                          className="rounded"
+                        />
+                        <label htmlFor="filter-enabled" className="text-sm text-[var(--color-text)]">Enabled</label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="filter-global"
+                          checked={filterForm.is_global}
+                          onChange={(e) => setFilterForm({ ...filterForm, is_global: e.target.checked })}
+                          className="rounded"
+                        />
+                        <label htmlFor="filter-global" className="text-sm text-[var(--color-text)]">Apply globally (all chats)</label>
+                      </div>
+                    </div>
+                    
+                    {/* Test section for existing filters */}
+                    {editingFilter?.id && (
+                      <div className="border-t border-[var(--color-border)] pt-4 mt-4">
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Test Filter</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={filterTestContent}
+                            onChange={(e) => setFilterTestContent(e.target.value)}
+                            className="flex-1 px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            placeholder="Enter test content..."
+                          />
+                          <button
+                            onClick={handleTestFilter}
+                            disabled={filterTesting || !filterTestContent}
+                            className="px-4 py-2 bg-blue-500 text-white rounded-lg disabled:opacity-50"
+                          >
+                            {filterTesting ? 'Testing...' : 'Test'}
+                          </button>
+                        </div>
+                        {filterTestResult && (
+                          <div className={`mt-2 p-3 rounded-lg text-sm ${
+                            filterTestResult.blocked ? 'bg-red-500/20 text-red-400' :
+                            filterTestResult.modified ? 'bg-yellow-500/20 text-yellow-400' :
+                            'bg-green-500/20 text-green-400'
+                          }`}>
+                            {filterTestResult.blocked ? (
+                              <>Blocked: {filterTestResult.block_reason}</>
+                            ) : filterTestResult.modified ? (
+                              <>Modified: "{filterTestResult.result}"</>
+                            ) : (
+                              <>Passed through unchanged</>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  
+                  <div className="mt-6 flex justify-end gap-2">
+                    <button
+                      onClick={() => { setShowFilterModal(false); resetFilterForm(); }}
+                      className="px-4 py-2 text-sm text-[var(--color-text-secondary)]"
+                    >Cancel</button>
+                    <button
+                      onClick={handleCreateFilter}
+                      disabled={actionLoading || !filterForm.name}
+                      className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg disabled:opacity-50"
+                    >
+                      {actionLoading ? 'Saving...' : (editingFilter ? 'Update' : 'Create')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            
+            {/* Filter Chain Modal - Visual No-Code Builder */}
+            {showFilterChainModal && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-[var(--color-surface)] rounded-xl w-full max-w-4xl border border-[var(--color-border)] max-h-[90vh] flex flex-col">
+                  {/* Header */}
+                  <div className="p-6 border-b border-[var(--color-border)]">
+                    <h3 className="text-xl font-semibold text-[var(--color-text)]">
+                      {editingFilterChain ? 'Edit Filter Chain' : 'Create Filter Chain'}
+                    </h3>
+                    <p className="text-sm text-[var(--color-text-secondary)] mt-1">
+                      Build automated flows that process messages before they reach the AI
+                    </p>
+                  </div>
+                  
+                  {/* Content - Scrollable */}
+                  <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                    {/* Basic Info */}
+                    <div className="bg-[var(--color-background)] rounded-lg p-4 space-y-4">
+                      <h4 className="font-medium text-[var(--color-text)]">Basic Information</h4>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Chain Name</label>
+                          <input
+                            type="text"
+                            value={filterChainForm.name}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, name: e.target.value })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            placeholder="e.g., Smart Search"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Run Order (lower runs first)</label>
+                          <select
+                            value={filterChainForm.priority}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          >
+                            <option value={10}>First (10)</option>
+                            <option value={50}>Early (50)</option>
+                            <option value={100}>Normal (100)</option>
+                            <option value={200}>Late (200)</option>
+                            <option value={500}>Last (500)</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Description (optional)</label>
+                        <input
+                          type="text"
+                          value={filterChainForm.description || ''}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, description: e.target.value })}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          placeholder="What does this chain do?"
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-4">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={filterChainForm.enabled}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, enabled: e.target.checked })}
+                            className="rounded"
+                          />
+                          <span className="text-sm text-[var(--color-text)]">Enabled</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={filterChainForm.retain_history}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
+                            className="rounded"
+                          />
+                          <span className="text-sm text-[var(--color-text)]">Hide processing from chat</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={filterChainForm.debug}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
+                            className="rounded"
+                          />
+                          <span className="text-sm text-[var(--color-text)]">🐛 Enable Debug (logs to console)</span>
+                        </label>
+                      </div>
+                    </div>
+                    
+                    {/* Steps */}
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h4 className="font-medium text-[var(--color-text)]">Steps</h4>
+                        <div className="text-xs text-[var(--color-text-secondary)]">
+                          Steps run in order from top to bottom
+                        </div>
+                      </div>
+                      
+                      {/* Step List */}
+                      {filterChainForm.definition?.steps?.length === 0 ? (
+                        <div className="text-center py-12 border-2 border-dashed border-[var(--color-border)] rounded-lg">
+                          <div className="text-[var(--color-text-secondary)] mb-4">No steps yet</div>
+                          <div className="text-sm text-[var(--color-text-secondary)]">Add a step below to get started</div>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {filterChainForm.definition?.steps?.map((step, index) => {
+                            // Get list of available variables for dropdowns (simplified syntax - no $Var needed)
+                            const availableVars = [
+                              { value: 'Query', label: 'User Message' },
+                              { value: 'PreviousResult', label: 'Previous Step Result' },
+                              ...filterChainForm.definition.steps
+                                .slice(0, index)
+                                .filter(s => s.config?.output_var)
+                                .map(s => ({ 
+                                  value: s.config.output_var, 
+                                  label: `Step ${filterChainForm.definition.steps.indexOf(s) + 1}: ${s.config.output_var}` 
+                                }))
+                            ];
+                            
+                            return (
+                              <div
+                                key={step.id}
+                                className={`bg-[var(--color-background)] rounded-lg border-2 ${
+                                  step.enabled !== false ? 'border-[var(--color-border)]' : 'border-red-500/30 opacity-60'
+                                }`}
+                              >
+                                {/* Step Header */}
+                                <div className="flex items-center gap-3 p-3 border-b border-[var(--color-border)]">
+                                  <div className="w-8 h-8 rounded-full bg-[var(--color-button)] text-[var(--color-button-text)] flex items-center justify-center font-bold text-sm">
+                                    {index + 1}
+                                  </div>
+                                  <select
+                                    value={step.type}
+                                    onChange={(e) => updateStep(step.id, { type: e.target.value, config: {} })}
+                                    className="flex-1 px-3 py-1.5 rounded bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] font-medium"
+                                  >
+                                    <optgroup label="AI Actions">
+                                      <option value="to_llm">🤖 Ask AI a Question</option>
+                                      <option value="query">🔍 Generate Search Query</option>
+                                    </optgroup>
+                                    <optgroup label="Tool Actions">
+                                      <option value="to_tool">🔧 Run a Tool</option>
+                                    </optgroup>
+                                    <optgroup label="Flow Control">
+                                      <option value="go_to_llm">➡️ Send to Main AI</option>
+                                      <option value="filter_complete">✅ Finish Chain</option>
+                                      <option value="stop">⛔ Stop Processing</option>
+                                      <option value="block">🚫 Block Message</option>
+                                    </optgroup>
+                                    <optgroup label="Data">
+                                      <option value="set_var">📝 Set Variable</option>
+                                      <option value="set_array">📋 Set Array</option>
+                                      <option value="context_insert">📎 Add to Context</option>
+                                      <option value="modify">✏️ Modify Content</option>
+                                    </optgroup>
+                                    <optgroup label="Logic">
+                                      <option value="compare">⚖️ Compare Values</option>
+                                      <option value="call_chain">🔗 Run Another Chain</option>
+                                    </optgroup>
+                                  </select>
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      onClick={() => {
+                                        const steps = [...filterChainForm.definition.steps];
+                                        if (index > 0) {
+                                          [steps[index], steps[index - 1]] = [steps[index - 1], steps[index]];
+                                          setFilterChainForm(prev => ({ ...prev, definition: { steps } }));
+                                        }
+                                      }}
+                                      disabled={index === 0}
+                                      className="p-1.5 rounded hover:bg-[var(--color-surface)] disabled:opacity-30 text-[var(--color-text-secondary)]"
+                                      title="Move up"
+                                    >
+                                      ↑
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        const steps = [...filterChainForm.definition.steps];
+                                        if (index < steps.length - 1) {
+                                          [steps[index], steps[index + 1]] = [steps[index + 1], steps[index]];
+                                          setFilterChainForm(prev => ({ ...prev, definition: { steps } }));
+                                        }
+                                      }}
+                                      disabled={index === filterChainForm.definition.steps.length - 1}
+                                      className="p-1.5 rounded hover:bg-[var(--color-surface)] disabled:opacity-30 text-[var(--color-text-secondary)]"
+                                      title="Move down"
+                                    >
+                                      ↓
+                                    </button>
+                                    <button
+                                      onClick={() => updateStep(step.id, { enabled: step.enabled === false })}
+                                      className={`p-1.5 rounded hover:bg-[var(--color-surface)] ${step.enabled !== false ? 'text-green-500' : 'text-red-500'}`}
+                                      title={step.enabled !== false ? 'Disable step' : 'Enable step'}
+                                    >
+                                      {step.enabled !== false ? '●' : '○'}
+                                    </button>
+                                    <button
+                                      onClick={() => removeStep(step.id)}
+                                      className="p-1.5 rounded hover:bg-red-500/20 text-red-500"
+                                      title="Delete step"
+                                    >
+                                      ×
+                                    </button>
+                                  </div>
+                                </div>
+                                
+                                {/* Step Config - Dynamic based on type */}
+                                <div className="p-4 space-y-3">
+                                  {/* Ask AI / Generate Query */}
+                                  {(step.type === 'to_llm' || step.type === 'query') && (
+                                    <>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                                          {step.type === 'query' ? 'What to generate a query for:' : 'Question to ask AI:'}
+                                        </label>
+                                        {/* Clickable variable chips */}
+                                        <div className="flex flex-wrap gap-1 mb-2">
+                                          <span className="text-xs text-[var(--color-text-secondary)]">Insert:</span>
+                                          {availableVars.map(v => (
+                                            <button
+                                              key={v.value}
+                                              type="button"
+                                              onClick={() => {
+                                                const currentPrompt = step.config?.prompt || '';
+                                                updateStep(step.id, { config: { ...step.config, prompt: currentPrompt + `{${v.value}}` } });
+                                              }}
+                                              className="px-2 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
+                                              title={`Insert {${v.value}}`}
+                                            >
+                                              {v.label}
+                                            </button>
+                                          ))}
+                                        </div>
+                                        <textarea
+                                          value={step.config?.prompt || ''}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, prompt: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          rows={2}
+                                          placeholder={step.type === 'query' 
+                                            ? 'Generate a search query for: Query' 
+                                            : 'Can you answer this question without searching? Query'}
+                                        />
+                                        <div className="text-xs text-[var(--color-text-secondary)] mt-1">
+                                          💡 Click chips to insert. JSON paths: <code className="bg-[var(--color-surface)] px-1 rounded">SearchResults.results[0].url</code>
+                                        </div>
+                                      </div>
+                                      <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                                            Append (if no variables used):
+                                          </label>
+                                          <select
+                                            value={step.config?.input_var || 'Query'}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, input_var: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          >
+                                            {availableVars.map(v => (
+                                              <option key={v.value} value={v.value}>{v.label}</option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                        <div>
+                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Save result as:</label>
+                                          <input
+                                            type="text"
+                                            value={step.config?.output_var || ''}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, output_var: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                            placeholder="e.g., AIAnswer"
+                                          />
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Instructions for AI (optional):</label>
+                                        <input
+                                          type="text"
+                                          value={step.config?.system_prompt || ''}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, system_prompt: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          placeholder="e.g., Reply with only YES or NO"
+                                        />
+                                      </div>
+                                    </>
+                                  )}
+                                  
+                                  {/* Run Tool */}
+                                  {step.type === 'to_tool' && (
+                                    <>
+                                      <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Tool to run:</label>
+                                          <select
+                                            value={step.config?.tool_name || ''}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, tool_name: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          >
+                                            <option value="">Select a tool...</option>
+                                            {/* Group tools by category */}
+                                            {(() => {
+                                              const categories = [...new Set(availableTools.map(t => t.category))];
+                                              return categories.map(category => (
+                                                <optgroup key={category} label={category}>
+                                                  {availableTools
+                                                    .filter(t => t.category === category)
+                                                    .map(t => (
+                                                      <option key={t.value} value={t.value}>{t.label}</option>
+                                                    ))
+                                                  }
+                                                </optgroup>
+                                              ));
+                                            })()}
+                                          </select>
+                                        </div>
+                                        <div>
+                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Save result as:</label>
+                                          <input
+                                            type="text"
+                                            value={step.config?.output_var || ''}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, output_var: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                            placeholder="e.g., SearchResults"
+                                          />
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Tool input:</label>
+                                        {(() => {
+                                          // Extract param_name and param_source from existing params if not set explicitly
+                                          let paramName = step.config?.param_name;
+                                          let paramSource = step.config?.param_source;
+                                          
+                                          if (!paramName && step.config?.params) {
+                                            const paramKeys = Object.keys(step.config.params);
+                                            if (paramKeys.length > 0) {
+                                              paramName = paramKeys[0];
+                                              paramSource = step.config.params[paramKeys[0]];
+                                            }
+                                          }
+                                          paramName = paramName || 'query';
+                                          paramSource = paramSource || '$PreviousResult';
+                                          
+                                          return (
+                                            <>
+                                              <div className="flex gap-2 items-center">
+                                                <input
+                                                  type="text"
+                                                  value={paramName}
+                                                  onChange={(e) => {
+                                                    const newParamName = e.target.value || 'query';
+                                                    updateStep(step.id, { 
+                                                      config: { 
+                                                        ...step.config, 
+                                                        param_name: newParamName,
+                                                        param_source: paramSource,
+                                                        params: { [newParamName]: paramSource } 
+                                                      } 
+                                                    });
+                                                  }}
+                                                  className="w-24 px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                                                  placeholder="query"
+                                                  title="Parameter name (e.g., query, urls, input)"
+                                                />
+                                                <span className="text-[var(--color-text-secondary)]">=</span>
+                                                <input
+                                                  type="text"
+                                                  value={paramSource}
+                                                  onChange={(e) => {
+                                                    updateStep(step.id, { 
+                                                      config: { 
+                                                        ...step.config, 
+                                                        param_name: paramName,
+                                                        param_source: e.target.value, 
+                                                        params: { [paramName]: e.target.value } 
+                                                      } 
+                                                    });
+                                                  }}
+                                                  className="flex-1 px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                                  placeholder="SearchResults.results[0].url"
+                                                />
+                                              </div>
+                                              {/* Variable chips for quick insertion */}
+                                              <div className="flex flex-wrap gap-1 mt-2">
+                                                <span className="text-xs text-[var(--color-text-secondary)]">Insert:</span>
+                                                {availableVars.map(v => (
+                                                  <button
+                                                    key={v.value}
+                                                    type="button"
+                                                    onClick={() => {
+                                                      updateStep(step.id, { 
+                                                        config: { 
+                                                          ...step.config, 
+                                                          param_name: paramName,
+                                                          param_source: v.value, 
+                                                          params: { [paramName]: v.value } 
+                                                        } 
+                                                      });
+                                                    }}
+                                                    className="px-2 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
+                                                    title={`Use ${v.value}`}
+                                                  >
+                                                    {v.label}
+                                                  </button>
+                                                ))}
+                                              </div>
+                                            </>
+                                          );
+                                        })()}
+                                        <div className="text-xs text-[var(--color-text-secondary)] mt-1">
+                                          💡 For arrays: <code className="bg-[var(--color-surface)] px-1 rounded">[url_out]</code> → <code className="bg-[var(--color-surface)] px-1 rounded">["https://..."]</code>. JSON path: <code className="bg-[var(--color-surface)] px-1 rounded">Results.results[0].url</code>
+                                        </div>
+                                      </div>
+                                      <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={step.config?.add_to_context !== false}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, add_to_context: e.target.checked } })}
+                                          className="rounded"
+                                        />
+                                        <span className="text-sm text-[var(--color-text)]">Add result to AI context</span>
+                                      </label>
+                                    </>
+                                  )}
+                                  
+                                  {/* Send to Main AI */}
+                                  {step.type === 'go_to_llm' && (
+                                    <>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Send this data to the main AI:</label>
+                                        <select
+                                          value={step.config?.input_var || 'Query'}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, input_var: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                        >
+                                          {availableVars.map(v => (
+                                            <option key={v.value} value={v.value}>{v.label}</option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                      <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={step.config?.include_context !== false}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, include_context: e.target.checked } })}
+                                          className="rounded"
+                                        />
+                                        <span className="text-sm text-[var(--color-text)]">Include accumulated context</span>
+                                      </label>
+                                    </>
+                                  )}
+                                  
+                                  {/* Finish Chain */}
+                                  {step.type === 'filter_complete' && (
+                                    <div>
+                                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">What to do:</label>
+                                      <select
+                                        value={step.config?.action || 'go_to_llm'}
+                                        onChange={(e) => updateStep(step.id, { config: { ...step.config, action: e.target.value } })}
+                                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                      >
+                                        <option value="go_to_llm">Continue to main AI with results</option>
+                                        <option value="return">Return result directly to user</option>
+                                        <option value="stop">Stop without sending anything</option>
+                                      </select>
+                                    </div>
+                                  )}
+                                  
+                                  {/* Set Variable */}
+                                  {step.type === 'set_var' && (
+                                    <>
+                                      <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Variable name:</label>
+                                          <input
+                                            type="text"
+                                            value={step.config?.var_name || ''}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, var_name: e.target.value, output_var: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                            placeholder="e.g., url_out"
+                                          />
+                                        </div>
+                                        <div>
+                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Value (with JSON path):</label>
+                                          <input
+                                            type="text"
+                                            value={step.config?.value || ''}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, value: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                            placeholder="e.g., SearchResults.results[0].url"
+                                          />
+                                        </div>
+                                      </div>
+                                      <div className="flex flex-wrap gap-1 mt-2">
+                                        <span className="text-xs text-[var(--color-text-secondary)]">Insert:</span>
+                                        {availableVars.map(v => (
+                                          <button
+                                            key={v.value}
+                                            type="button"
+                                            onClick={() => {
+                                              const currentValue = step.config?.value || '';
+                                              updateStep(step.id, { config: { ...step.config, value: currentValue + v.value } });
+                                            }}
+                                            className="px-2 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
+                                            title={`Insert ${v.value}`}
+                                          >
+                                            {v.label}
+                                          </button>
+                                        ))}
+                                      </div>
+                                      <div className="text-xs text-[var(--color-text-secondary)] mt-1">
+                                        💡 Use JSON paths: <code className="bg-[var(--color-surface)] px-1 rounded">SearchResults.results[0].url</code> or <code className="bg-[var(--color-surface)] px-1 rounded">PreviousResult.title</code>
+                                      </div>
+                                    </>
+                                  )}
+                                  
+                                  {/* Set Array */}
+                                  {step.type === 'set_array' && (
+                                    <>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Array name:</label>
+                                        <input
+                                          type="text"
+                                          value={step.config?.var_name || ''}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, var_name: e.target.value, output_var: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          placeholder="e.g., urls"
+                                        />
+                                      </div>
+                                      <div className="space-y-2">
+                                        <label className="block text-sm text-[var(--color-text-secondary)]">Array values:</label>
+                                        {(step.config?.values || ['']).map((value: string, valueIndex: number) => (
+                                          <div key={valueIndex} className="flex gap-2 items-center">
+                                            <span className="text-xs text-[var(--color-text-secondary)] w-8">[{valueIndex}]</span>
+                                            <input
+                                              type="text"
+                                              value={value}
+                                              onChange={(e) => {
+                                                const values = [...(step.config?.values || [''])];
+                                                values[valueIndex] = e.target.value;
+                                                updateStep(step.id, { config: { ...step.config, values } });
+                                              }}
+                                              className="flex-1 px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                              placeholder="e.g., SearchResults.results[0].url"
+                                            />
+                                            {(step.config?.values || ['']).length > 1 && (
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  const values = [...(step.config?.values || [''])];
+                                                  values.splice(valueIndex, 1);
+                                                  updateStep(step.id, { config: { ...step.config, values } });
+                                                }}
+                                                className="p-2 text-red-400 hover:bg-red-500/20 rounded"
+                                                title="Remove value"
+                                              >
+                                                ✕
+                                              </button>
+                                            )}
+                                          </div>
+                                        ))}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            const values = [...(step.config?.values || ['']), ''];
+                                            updateStep(step.id, { config: { ...step.config, values } });
+                                          }}
+                                          className="px-3 py-1.5 text-sm bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30"
+                                        >
+                                          + Add Value
+                                        </button>
+                                      </div>
+                                      <div className="flex flex-wrap gap-1 mt-2">
+                                        <span className="text-xs text-[var(--color-text-secondary)]">Insert into last value:</span>
+                                        {availableVars.map(v => (
+                                          <button
+                                            key={v.value}
+                                            type="button"
+                                            onClick={() => {
+                                              const values = [...(step.config?.values || [''])];
+                                              const lastIdx = values.length - 1;
+                                              values[lastIdx] = (values[lastIdx] || '') + v.value;
+                                              updateStep(step.id, { config: { ...step.config, values } });
+                                            }}
+                                            className="px-2 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
+                                            title={`Insert ${v.value}`}
+                                          >
+                                            {v.label}
+                                          </button>
+                                        ))}
+                                      </div>
+                                      <div className="text-xs text-[var(--color-text-secondary)] mt-1">
+                                        💡 Each value can use variables: <code className="bg-[var(--color-surface)] px-1 rounded">SearchResults.results[0].url</code>
+                                      </div>
+                                    </>
+                                  )}
+                                  
+                                  {/* Add to Context */}
+                                  {step.type === 'context_insert' && (
+                                    <div className="grid grid-cols-2 gap-3">
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Data to add:</label>
+                                        <select
+                                          value={step.config?.source_var || 'PreviousResult'}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, source_var: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                        >
+                                          {availableVars.map(v => (
+                                            <option key={v.value} value={v.value}>{v.label}</option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Label:</label>
+                                        <input
+                                          type="text"
+                                          value={step.config?.label || ''}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, label: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          placeholder="e.g., Search Results"
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                  
+                                  {/* Compare Values */}
+                                  {step.type === 'compare' && (
+                                    <>
+                                      <div className="grid grid-cols-3 gap-2 items-end">
+                                        <div>
+                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Check if:</label>
+                                          <select
+                                            value={step.config?.left || 'PreviousResult'}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, left: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          >
+                                            {availableVars.map(v => (
+                                              <option key={v.value} value={v.value}>{v.label}</option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                        <div>
+                                          <select
+                                            value={step.config?.operator || 'contains'}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, operator: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          >
+                                            <option value="contains">contains</option>
+                                            <option value="not_contains">does not contain</option>
+                                            <option value="==">equals</option>
+                                            <option value="!=">does not equal</option>
+                                            <option value="starts_with">starts with</option>
+                                            <option value="ends_with">ends with</option>
+                                          </select>
+                                        </div>
+                                        <div>
+                                          <input
+                                            type="text"
+                                            value={step.config?.right || ''}
+                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, right: e.target.value } })}
+                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                            placeholder="value"
+                                          />
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Save result (true/false) as:</label>
+                                        <input
+                                          type="text"
+                                          value={step.config?.output_var || ''}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, output_var: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          placeholder="e.g., NeedsSearch"
+                                        />
+                                      </div>
+                                    </>
+                                  )}
+                                  
+                                  {/* Modify Content */}
+                                  {step.type === 'modify' && (
+                                    <>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Create new content using:</label>
+                                        <textarea
+                                          value={step.config?.template || ''}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, template: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          rows={3}
+                                          placeholder="Type text and insert variables with {}"
+                                        />
+                                      </div>
+                                      <div className="text-xs text-[var(--color-text-secondary)]">
+                                        Insert variables: {availableVars.map(v => `{${v.value}}`).join(', ')}
+                                      </div>
+                                      <div>
+                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Save as:</label>
+                                        <input
+                                          type="text"
+                                          value={step.config?.output_var || ''}
+                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, output_var: e.target.value } })}
+                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                          placeholder="e.g., FinalMessage"
+                                        />
+                                      </div>
+                                    </>
+                                  )}
+                                  
+                                  {/* Run Another Chain */}
+                                  {step.type === 'call_chain' && (
+                                    <div>
+                                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Chain to run:</label>
+                                      <select
+                                        value={step.config?.chain_name || ''}
+                                        onChange={(e) => updateStep(step.id, { config: { ...step.config, chain_name: e.target.value } })}
+                                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                      >
+                                        <option value="">Select a chain...</option>
+                                        {filterChains.filter(c => c.id !== editingFilterChain?.id).map(c => (
+                                          <option key={c.id} value={c.name}>{c.name}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  )}
+                                  
+                                  {/* Stop / Block */}
+                                  {(step.type === 'stop' || step.type === 'block') && (
+                                    <div>
+                                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                                        {step.type === 'block' ? 'Message to show user:' : 'Reason (for logs):'}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={step.config?.message || ''}
+                                        onChange={(e) => updateStep(step.id, { config: { ...step.config, message: e.target.value } })}
+                                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
+                                        placeholder={step.type === 'block' ? 'Your request was blocked' : 'Processing stopped'}
+                                      />
+                                    </div>
+                                  )}
+                                  
+                                  {/* Conditional - Simple UI */}
+                                  <div className="border-t border-[var(--color-border)] pt-3 mt-3">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={step.conditional?.enabled || false}
+                                        onChange={(e) => updateStep(step.id, { 
+                                          conditional: {
+                                            enabled: e.target.checked,
+                                            comparisons: step.conditional?.comparisons || [{ left: 'PreviousResult', operator: 'contains', right: '' }],
+                                            logic: step.conditional?.logic || 'and',
+                                            on_true: step.conditional?.on_true || [],
+                                            on_false: step.conditional?.on_false || []
+                                          }
+                                        })}
+                                        className="rounded"
+                                      />
+                                      <span className="text-sm text-[var(--color-text)]">Only run this step if condition is met</span>
+                                    </label>
+                                    
+                                    {step.conditional?.enabled && step.conditional.comparisons && (
+                                      <div className="mt-3 p-3 bg-[var(--color-surface)] rounded-lg">
+                                        <div className="grid grid-cols-3 gap-2 items-center">
+                                          <select
+                                            value={step.conditional.comparisons[0]?.left || 'PreviousResult'}
+                                            onChange={(e) => {
+                                              const newComparisons = [...(step.conditional?.comparisons || [])];
+                                              newComparisons[0] = { ...newComparisons[0], left: e.target.value };
+                                              updateStep(step.id, { 
+                                                conditional: { 
+                                                  enabled: true,
+                                                  logic: step.conditional?.logic || 'and',
+                                                  comparisons: newComparisons,
+                                                  on_true: step.conditional?.on_true || [],
+                                                  on_false: step.conditional?.on_false || []
+                                                } 
+                                              });
+                                            }}
+                                            className="px-2 py-1.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                                          >
+                                            {availableVars.map(v => (
+                                              <option key={v.value} value={v.value}>{v.label}</option>
+                                            ))}
+                                          </select>
+                                          <select
+                                            value={step.conditional.comparisons[0]?.operator || 'contains'}
+                                            onChange={(e) => {
+                                              const newComparisons = [...(step.conditional?.comparisons || [])];
+                                              newComparisons[0] = { ...newComparisons[0], operator: e.target.value };
+                                              updateStep(step.id, { 
+                                                conditional: { 
+                                                  enabled: true,
+                                                  logic: step.conditional?.logic || 'and',
+                                                  comparisons: newComparisons,
+                                                  on_true: step.conditional?.on_true || [],
+                                                  on_false: step.conditional?.on_false || []
+                                                } 
+                                              });
+                                            }}
+                                            className="px-2 py-1.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                                          >
+                                            <option value="contains">contains</option>
+                                            <option value="not_contains">does not contain</option>
+                                            <option value="==">equals</option>
+                                            <option value="!=">does not equal</option>
+                                          </select>
+                                          <input
+                                            type="text"
+                                            value={step.conditional.comparisons[0]?.right || ''}
+                                            onChange={(e) => {
+                                              const newComparisons = [...(step.conditional?.comparisons || [])];
+                                              newComparisons[0] = { ...newComparisons[0], right: e.target.value };
+                                              updateStep(step.id, { 
+                                                conditional: { 
+                                                  enabled: true,
+                                                  logic: step.conditional?.logic || 'and',
+                                                  comparisons: newComparisons,
+                                                  on_true: step.conditional?.on_true || [],
+                                                  on_false: step.conditional?.on_false || []
+                                                } 
+                                              });
+                                            }}
+                                            className="px-2 py-1.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                                            placeholder="value"
+                                          />
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      
+                      {/* Add Step Button */}
+                      <div className="flex justify-center pt-4">
+                        <button
+                          onClick={() => addStep('to_llm')}
+                          className="px-6 py-3 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 font-medium"
+                        >
+                          + Add Step
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Footer */}
+                  <div className="p-6 border-t border-[var(--color-border)] flex justify-between">
+                    <button
+                      onClick={() => setFilterChainJsonMode(!filterChainJsonMode)}
+                      className="text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                    >
+                      {filterChainJsonMode ? '← Back to Visual Editor' : 'Advanced: Edit JSON →'}
+                    </button>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={() => { setShowFilterChainModal(false); resetFilterChainForm(); }}
+                        className="px-4 py-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleCreateFilterChain}
+                        disabled={!filterChainForm.name}
+                        className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50 font-medium"
+                      >
+                        {editingFilterChain ? 'Save Changes' : 'Create Chain'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* JSON Preview Modal */}
+            {previewJsonChain && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="bg-[var(--color-surface)] rounded-xl w-full max-w-4xl border border-[var(--color-border)] max-h-[90vh] flex flex-col">
+                  <div className="p-4 border-b border-[var(--color-border)] flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-[var(--color-text)]">
+                      {previewJsonChain.name} - JSON Definition
+                    </h3>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(JSON.stringify(previewJsonChain, null, 2));
+                        }}
+                        className="px-3 py-1 bg-[var(--color-background)] text-[var(--color-text)] rounded text-sm hover:bg-[var(--color-border)]"
+                      >
+                        Copy All
+                      </button>
+                      <button
+                        onClick={() => setPreviewJsonChain(null)}
+                        className="p-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                  <div className="p-4 overflow-auto flex-1">
+                    <pre className="text-sm text-[var(--color-text)] bg-[var(--color-background)] p-4 rounded-lg overflow-auto font-mono whitespace-pre-wrap">
+                      {JSON.stringify(previewJsonChain, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* SITE DEV TAB */}
+            {activeTab === 'dev' && (
+              <div className="space-y-6">
+                {/* Local Debug Settings */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Local Debug Settings</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    These settings are stored locally in your browser.
+                  </p>
+                  
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={debugVoiceMode}
+                        onChange={(e) => {
+                          const value = e.target.checked;
+                          setDebugVoiceMode(value);
+                          localStorage.setItem('nexus-debug-voice-mode', value ? 'true' : 'false');
+                        }}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                      />
+                      <div>
+                        <div className="text-[var(--color-text)] font-medium">Debug Talk To Me Session Data</div>
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                          Shows message IDs, parent chain, and leaf tracking info in the voice mode overlay
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* Server Debug Settings */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Server Debug Settings</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    These settings are stored on the server and affect backend logging.
+                  </p>
+                  
+                  {debugSettingsLoading ? (
+                    <div className="text-[var(--color-text-secondary)]">Loading...</div>
+                  ) : (
+                    <div className="space-y-4">
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={debugTokenResets}
+                          onChange={(e) => saveDebugTokenResets(e.target.checked)}
+                          className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                        />
+                        <div>
+                          <div className="text-[var(--color-text)] font-medium">Debug Token Resets</div>
+                          <div className="text-sm text-[var(--color-text-secondary)]">
+                            Logs detailed token counts for all users when token reset check occurs (hourly)
+                          </div>
+                        </div>
+                      </label>
+                      
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={debugDocumentQueue}
+                          onChange={(e) => saveDebugDocumentQueue(e.target.checked)}
+                          className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                        />
+                        <div>
+                          <div className="text-[var(--color-text)] font-medium">Debug Document Queue</div>
+                          <div className="text-sm text-[var(--color-text-secondary)]">
+                            Logs document processing queue activity (task added, processing, completed)
+                          </div>
+                        </div>
+                      </label>
+                      
+                      {/* Token Reset Info */}
+                      <div className="mt-4 p-4 bg-[var(--color-background)] rounded-lg border border-[var(--color-border)]">
+                        <h4 className="text-sm font-medium text-[var(--color-text)] mb-2">Token Reset Status</h4>
+                        <div className="space-y-1 text-sm text-[var(--color-text-secondary)]">
+                          <div>
+                            <span className="font-medium">Refill Interval:</span> {tokenRefillHours} hours ({Math.round(tokenRefillHours / 24)} days)
+                          </div>
+                          <div>
+                            <span className="font-medium">Last Reset:</span>{' '}
+                            {lastTokenReset 
+                              ? new Date(lastTokenReset).toLocaleString() 
+                              : 'Never (will reset on next check)'}
+                          </div>
+                          {lastTokenReset && (
+                            <div>
+                              <span className="font-medium">Next Reset:</span>{' '}
+                              {(() => {
+                                const lastResetDate = new Date(lastTokenReset);
+                                const nextReset = new Date(lastResetDate.getTime() + tokenRefillHours * 60 * 60 * 1000);
+                                const now = new Date();
+                                const hoursUntil = Math.max(0, (nextReset.getTime() - now.getTime()) / (1000 * 60 * 60));
+                                return `${nextReset.toLocaleString()} (${Math.round(hoursUntil)} hours from now)`;
+                              })()}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

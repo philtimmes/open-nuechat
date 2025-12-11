@@ -1,0 +1,23 @@
+# Image Generation Service
+# NOTE: diffusers installed from git in Dockerfile
+# NOTE: PyTorch ROCm is in base image
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# Image processing
+Pillow>=10.0.0
+
+# Utilities
+pydantic>=2.5.3
+python-dotenv>=1.0.0
+aiofiles>=23.2.1
+
+# Hugging Face
+transformers>=4.36.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+
+# For model downloading
+huggingface-hub>=0.20.0

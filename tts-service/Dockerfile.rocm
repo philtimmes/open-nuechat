@@ -1,0 +1,60 @@
+# Kokoro TTS Service with ROCm GPU Support
+# Uses ROCm PyTorch for AMD GPU acceleration
+
+FROM rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
+
+# ROCm environment
+ENV ROCM_PATH=/opt/rocm
+ENV HSA_OVERRIDE_GFX_VERSION=9.0.10
+ENV HIP_VISIBLE_DEVICES=0
+ENV PYTORCH_ROCM_ARCH=gfx90a
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    # Build tools
+    build-essential \
+    curl \
+    git \
+    # espeak-ng for Kokoro phonemizer
+    espeak-ng \
+    # Audio libraries
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+# PyTorch ROCm is already in base image
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt
+
+# Copy application code
+COPY main.py .
+
+# Environment variables
+ENV TTS_HOST=0.0.0.0
+ENV TTS_PORT=8033
+ENV TTS_MAX_QUEUE_SIZE=100
+ENV TTS_MAX_CONCURRENT=2
+ENV TTS_RESULT_TTL=300
+ENV TTS_MAX_TEXT_LENGTH=10000
+# Enable GPU by default in ROCm container
+ENV TTS_USE_GPU=true
+
+# Expose port
+EXPOSE 8033
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8033/health || exit 1
+
+# Run the service
+CMD ["python", "main.py"]

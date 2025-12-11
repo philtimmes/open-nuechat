@@ -1,0 +1,505 @@
+services:
+  # =============================================================================
+  # Main Application - ROCm GPU (default)
+  # =============================================================================
+  open-nuechat:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: open-nuechat
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - rocm
+    environment:
+      # Branding
+      - APP_NAME=${APP_NAME:-Open-NueChat}
+      - APP_TAGLINE=${APP_TAGLINE:-AI-Powered Chat Platform}
+      - APP_VERSION=${APP_VERSION:-1.0.0}
+      - APP_DESCRIPTION=${APP_DESCRIPTION:-A full-featured LLM chat platform}
+      - FAVICON_URL=${FAVICON_URL:-/favicon.ico}
+      - LOGO_URL=${LOGO_URL:-}
+      - LOGO_TEXT=${LOGO_TEXT:-}
+      - DEFAULT_THEME=${DEFAULT_THEME:-dark}
+      - BRAND_PRIMARY_COLOR=${BRAND_PRIMARY_COLOR:-}
+      - BRAND_SECONDARY_COLOR=${BRAND_SECONDARY_COLOR:-}
+      - BRAND_ACCENT_COLOR=${BRAND_ACCENT_COLOR:-}
+      - FOOTER_TEXT=${FOOTER_TEXT:-}
+      - PRIVACY_URL=${PRIVACY_URL:-}
+      - TERMS_URL=${TERMS_URL:-}
+      - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
+      - WELCOME_TITLE=${WELCOME_TITLE:-}
+      - WELCOME_MESSAGE=${WELCOME_MESSAGE:-}
+      # Feature Flags
+      - ENABLE_REGISTRATION=${ENABLE_REGISTRATION:-true}
+      - ENABLE_OAUTH_GOOGLE=${ENABLE_OAUTH_GOOGLE:-true}
+      - ENABLE_OAUTH_GITHUB=${ENABLE_OAUTH_GITHUB:-true}
+      - ENABLE_BILLING=${ENABLE_BILLING:-true}
+      - ENABLE_PUBLIC_ASSISTANTS=${ENABLE_PUBLIC_ASSISTANTS:-true}
+      - ENABLE_PUBLIC_KNOWLEDGE_STORES=${ENABLE_PUBLIC_KNOWLEDGE_STORES:-true}
+      - FREEFORALL=${FREEFORALL:-false}
+      # Database
+      - DATABASE_URL=sqlite+aiosqlite:///./data/nuechat.db
+      # Security
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - ALGORITHM=${ALGORITHM:-HS256}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-30}
+      # Administrator Account
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
+      - ADMIN_PASS=${ADMIN_PASS:-}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-Administrator}
+      # LLM - OpenAI Compatible API
+      - LLM_API_BASE_URL=${LLM_API_BASE_URL:-http://localhost:8080/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-not-needed}
+      - LLM_MODEL=${LLM_MODEL:-default}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-120}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
+      # OAuth
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
+      # Stripe
+      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # Pricing
+      - INPUT_TOKEN_PRICE=${INPUT_TOKEN_PRICE:-0.0}
+      - OUTPUT_TOKEN_PRICE=${OUTPUT_TOKEN_PRICE:-0.0}
+      # RAG - Embeddings and FAISS (ROCm GPU)
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - CHUNK_SIZE=${CHUNK_SIZE:-512}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-50}
+      - TOP_K_RESULTS=${TOP_K_RESULTS:-5}
+      - TIKA_URL=${TIKA_URL:-http://localhost:9998/tika}
+      - FAISS_INDEX_DIR=${FAISS_INDEX_DIR:-/app/faiss_indexes}
+      - FAISS_NPROBE=${FAISS_NPROBE:-32}
+      - FAISS_USE_GPU=${FAISS_USE_GPU:-true}
+      - TOOL_ENCRYPTION_KEY=${TOOL_ENCRYPTION_KEY:-}
+      # TTS Service
+      - TTS_SERVICE_URL=${TTS_SERVICE_URL:-http://localhost:8033}
+      - TTS_TIMEOUT=${TTS_TIMEOUT:-120}
+      # Image Generation Service
+      - IMAGE_GEN_SERVICE_URL=${IMAGE_GEN_SERVICE_URL:-http://localhost:8034}
+      - IMAGE_GEN_TIMEOUT=${IMAGE_GEN_TIMEOUT:-600}
+      # Server
+      - BACKEND_HOST=${BACKEND_HOST:-127.0.0.1}
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+    volumes:
+      - /opt/nuechat/_data:/app/data
+      - /opt/nuechat/_data:/app/uploads
+      - /opt/nuechat/_data/faiss_indexes:/app/faiss_indexes
+    # ROCm GPU access
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    security_opt:
+      - seccomp:unconfined
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${BACKEND_PORT:-8000}/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # =============================================================================
+  # Main Application - NVIDIA CUDA GPU
+  # =============================================================================
+  open-nuechat-cuda:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.cuda
+    container_name: open-nuechat
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - cuda
+    environment:
+      # Branding
+      - APP_NAME=${APP_NAME:-Open-NueChat}
+      - APP_TAGLINE=${APP_TAGLINE:-AI-Powered Chat Platform}
+      - APP_VERSION=${APP_VERSION:-1.0.0}
+      - APP_DESCRIPTION=${APP_DESCRIPTION:-A full-featured LLM chat platform}
+      - FAVICON_URL=${FAVICON_URL:-/favicon.ico}
+      - LOGO_URL=${LOGO_URL:-}
+      - LOGO_TEXT=${LOGO_TEXT:-}
+      - DEFAULT_THEME=${DEFAULT_THEME:-dark}
+      - BRAND_PRIMARY_COLOR=${BRAND_PRIMARY_COLOR:-}
+      - BRAND_SECONDARY_COLOR=${BRAND_SECONDARY_COLOR:-}
+      - BRAND_ACCENT_COLOR=${BRAND_ACCENT_COLOR:-}
+      - FOOTER_TEXT=${FOOTER_TEXT:-}
+      - PRIVACY_URL=${PRIVACY_URL:-}
+      - TERMS_URL=${TERMS_URL:-}
+      - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
+      - WELCOME_TITLE=${WELCOME_TITLE:-}
+      - WELCOME_MESSAGE=${WELCOME_MESSAGE:-}
+      # Feature Flags
+      - ENABLE_REGISTRATION=${ENABLE_REGISTRATION:-true}
+      - ENABLE_OAUTH_GOOGLE=${ENABLE_OAUTH_GOOGLE:-true}
+      - ENABLE_OAUTH_GITHUB=${ENABLE_OAUTH_GITHUB:-true}
+      - ENABLE_BILLING=${ENABLE_BILLING:-true}
+      - ENABLE_PUBLIC_ASSISTANTS=${ENABLE_PUBLIC_ASSISTANTS:-true}
+      - ENABLE_PUBLIC_KNOWLEDGE_STORES=${ENABLE_PUBLIC_KNOWLEDGE_STORES:-true}
+      - FREEFORALL=${FREEFORALL:-false}
+      # Database
+      - DATABASE_URL=sqlite+aiosqlite:///./data/nuechat.db
+      # Security
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - ALGORITHM=${ALGORITHM:-HS256}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-30}
+      # Administrator Account
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
+      - ADMIN_PASS=${ADMIN_PASS:-}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-Administrator}
+      # LLM - OpenAI Compatible API
+      - LLM_API_BASE_URL=${LLM_API_BASE_URL:-http://localhost:8080/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-not-needed}
+      - LLM_MODEL=${LLM_MODEL:-default}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-120}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
+      # OAuth
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
+      # Stripe
+      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # Pricing
+      - INPUT_TOKEN_PRICE=${INPUT_TOKEN_PRICE:-0.0}
+      - OUTPUT_TOKEN_PRICE=${OUTPUT_TOKEN_PRICE:-0.0}
+      # RAG - Embeddings and FAISS (CUDA GPU)
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - CHUNK_SIZE=${CHUNK_SIZE:-512}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-50}
+      - TOP_K_RESULTS=${TOP_K_RESULTS:-5}
+      - TIKA_URL=${TIKA_URL:-http://localhost:9998/tika}
+      - FAISS_INDEX_DIR=${FAISS_INDEX_DIR:-/app/faiss_indexes}
+      - FAISS_NPROBE=${FAISS_NPROBE:-32}
+      - FAISS_USE_GPU=${FAISS_USE_GPU:-true}
+      - TOOL_ENCRYPTION_KEY=${TOOL_ENCRYPTION_KEY:-}
+      # TTS Service
+      - TTS_SERVICE_URL=${TTS_SERVICE_URL:-http://localhost:8033}
+      - TTS_TIMEOUT=${TTS_TIMEOUT:-120}
+      # Image Generation Service
+      - IMAGE_GEN_SERVICE_URL=${IMAGE_GEN_SERVICE_URL:-http://localhost:8034}
+      - IMAGE_GEN_TIMEOUT=${IMAGE_GEN_TIMEOUT:-600}
+      # Server
+      - BACKEND_HOST=${BACKEND_HOST:-127.0.0.1}
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+    volumes:
+      - /opt/nuechat/_data:/app/data
+      - /opt/nuechat/_data:/app/uploads
+      - /opt/nuechat/_data/faiss_indexes:/app/faiss_indexes
+    # NVIDIA GPU access
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${BACKEND_PORT:-8000}/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # =============================================================================
+  # Main Application - CPU Only (no GPU)
+  # =============================================================================
+  open-nuechat-cpu:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.cpu
+    container_name: open-nuechat
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - cpu
+    environment:
+      # Branding
+      - APP_NAME=${APP_NAME:-Open-NueChat}
+      - APP_TAGLINE=${APP_TAGLINE:-AI-Powered Chat Platform}
+      - APP_VERSION=${APP_VERSION:-1.0.0}
+      - APP_DESCRIPTION=${APP_DESCRIPTION:-A full-featured LLM chat platform}
+      - FAVICON_URL=${FAVICON_URL:-/favicon.ico}
+      - LOGO_URL=${LOGO_URL:-}
+      - LOGO_TEXT=${LOGO_TEXT:-}
+      - DEFAULT_THEME=${DEFAULT_THEME:-dark}
+      - BRAND_PRIMARY_COLOR=${BRAND_PRIMARY_COLOR:-}
+      - BRAND_SECONDARY_COLOR=${BRAND_SECONDARY_COLOR:-}
+      - BRAND_ACCENT_COLOR=${BRAND_ACCENT_COLOR:-}
+      - FOOTER_TEXT=${FOOTER_TEXT:-}
+      - PRIVACY_URL=${PRIVACY_URL:-}
+      - TERMS_URL=${TERMS_URL:-}
+      - SUPPORT_EMAIL=${SUPPORT_EMAIL:-}
+      - WELCOME_TITLE=${WELCOME_TITLE:-}
+      - WELCOME_MESSAGE=${WELCOME_MESSAGE:-}
+      # Feature Flags
+      - ENABLE_REGISTRATION=${ENABLE_REGISTRATION:-true}
+      - ENABLE_OAUTH_GOOGLE=${ENABLE_OAUTH_GOOGLE:-true}
+      - ENABLE_OAUTH_GITHUB=${ENABLE_OAUTH_GITHUB:-true}
+      - ENABLE_BILLING=${ENABLE_BILLING:-true}
+      - ENABLE_PUBLIC_ASSISTANTS=${ENABLE_PUBLIC_ASSISTANTS:-true}
+      - ENABLE_PUBLIC_KNOWLEDGE_STORES=${ENABLE_PUBLIC_KNOWLEDGE_STORES:-true}
+      - FREEFORALL=${FREEFORALL:-false}
+      # Database
+      - DATABASE_URL=sqlite+aiosqlite:///./data/nuechat.db
+      # Security
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - ALGORITHM=${ALGORITHM:-HS256}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-30}
+      # Administrator Account
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
+      - ADMIN_PASS=${ADMIN_PASS:-}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-Administrator}
+      # LLM - OpenAI Compatible API
+      - LLM_API_BASE_URL=${LLM_API_BASE_URL:-http://localhost:8080/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-not-needed}
+      - LLM_MODEL=${LLM_MODEL:-default}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-120}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
+      # OAuth
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
+      # Stripe
+      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # Pricing
+      - INPUT_TOKEN_PRICE=${INPUT_TOKEN_PRICE:-0.0}
+      - OUTPUT_TOKEN_PRICE=${OUTPUT_TOKEN_PRICE:-0.0}
+      # RAG - Embeddings and FAISS (CPU only)
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - CHUNK_SIZE=${CHUNK_SIZE:-512}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-50}
+      - TOP_K_RESULTS=${TOP_K_RESULTS:-5}
+      - TIKA_URL=${TIKA_URL:-http://localhost:9998/tika}
+      - FAISS_INDEX_DIR=${FAISS_INDEX_DIR:-/app/faiss_indexes}
+      - FAISS_NPROBE=${FAISS_NPROBE:-32}
+      - FAISS_USE_GPU=false
+      - TOOL_ENCRYPTION_KEY=${TOOL_ENCRYPTION_KEY:-}
+      # TTS Service
+      - TTS_SERVICE_URL=${TTS_SERVICE_URL:-http://localhost:8033}
+      - TTS_TIMEOUT=${TTS_TIMEOUT:-120}
+      # Image Generation (disabled for CPU)
+      - IMAGE_GEN_SERVICE_URL=
+      - IMAGE_GEN_TIMEOUT=${IMAGE_GEN_TIMEOUT:-600}
+      # Server
+      - BACKEND_HOST=${BACKEND_HOST:-127.0.0.1}
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+    volumes:
+      - /opt/nuechat/_data:/app/data
+      - /opt/nuechat/_data:/app/uploads
+      - /opt/nuechat/_data/faiss_indexes:/app/faiss_indexes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${BACKEND_PORT:-8000}/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # =============================================================================
+  # TTS Service - CPU Only
+  # =============================================================================
+  tts-service-cpu:
+    build:
+      context: ./tts-service
+      dockerfile: Dockerfile
+    container_name: nuechat-tts
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - cpu
+    environment:
+      - TTS_HOST=127.0.0.1
+      - TTS_PORT=${TTS_PORT:-8033}
+      - TTS_MAX_QUEUE_SIZE=${TTS_MAX_QUEUE_SIZE:-100}
+      - TTS_MAX_CONCURRENT=${TTS_MAX_CONCURRENT:-2}
+      - TTS_RESULT_TTL=${TTS_RESULT_TTL:-300}
+      - TTS_MAX_TEXT_LENGTH=${TTS_MAX_TEXT_LENGTH:-10000}
+      - TTS_USE_GPU=false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${TTS_PORT:-8033}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+  
+  # =============================================================================
+  # TTS Service - ROCm GPU
+  # =============================================================================
+  tts-service-rocm:
+    build:
+      context: ./tts-service
+      dockerfile: Dockerfile.rocm
+    container_name: nuechat-tts
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - rocm
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - TTS_HOST=127.0.0.1
+      - TTS_PORT=${TTS_PORT:-8033}
+      - TTS_MAX_QUEUE_SIZE=${TTS_MAX_QUEUE_SIZE:-100}
+      - TTS_MAX_CONCURRENT=${TTS_MAX_CONCURRENT:-4}
+      - TTS_RESULT_TTL=${TTS_RESULT_TTL:-300}
+      - TTS_MAX_TEXT_LENGTH=${TTS_MAX_TEXT_LENGTH:-10000}
+      - TTS_USE_GPU=true
+      - HSA_OVERRIDE_GFX_VERSION=9.0.10
+      - PYTORCH_ROCM_ARCH=gfx90a
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${TTS_PORT:-8033}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # =============================================================================
+  # TTS Service - NVIDIA CUDA
+  # =============================================================================
+  tts-service-cuda:
+    build:
+      context: ./tts-service
+      dockerfile: Dockerfile.cuda
+    container_name: nuechat-tts
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - TTS_HOST=127.0.0.1
+      - TTS_PORT=${TTS_PORT:-8033}
+      - TTS_MAX_QUEUE_SIZE=${TTS_MAX_QUEUE_SIZE:-100}
+      - TTS_MAX_CONCURRENT=${TTS_MAX_CONCURRENT:-4}
+      - TTS_RESULT_TTL=${TTS_RESULT_TTL:-300}
+      - TTS_MAX_TEXT_LENGTH=${TTS_MAX_TEXT_LENGTH:-10000}
+      - TTS_USE_GPU=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${TTS_PORT:-8033}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # =============================================================================
+  # Image Generation - ROCm GPU
+  # =============================================================================
+  image-service-rocm:
+    build:
+      context: ./image-service
+      dockerfile: Dockerfile.rocm
+    container_name: nuechat-image-gen
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - rocm
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - IMAGE_GEN_HOST=127.0.0.1
+      - IMAGE_GEN_PORT=${IMAGE_GEN_PORT:-8034}
+      - IMAGE_GEN_MODEL=${IMAGE_GEN_MODEL:-Tongyi-MAI/Z-Image-Turbo}
+      - IMAGE_GEN_DEFAULT_WIDTH=${IMAGE_GEN_DEFAULT_WIDTH:-1024}
+      - IMAGE_GEN_DEFAULT_HEIGHT=${IMAGE_GEN_DEFAULT_HEIGHT:-1024}
+      - IMAGE_GEN_INFERENCE_STEPS=${IMAGE_GEN_INFERENCE_STEPS:-9}
+      - IMAGE_GEN_MAX_QUEUE_SIZE=${IMAGE_GEN_MAX_QUEUE_SIZE:-20}
+      - IMAGE_GEN_MAX_CONCURRENT=${IMAGE_GEN_MAX_CONCURRENT:-1}
+      - HSA_OVERRIDE_GFX_VERSION=9.0.10
+      - PYTORCH_ROCM_ARCH=gfx90a
+      - HF_HOME=/app/hf_cache
+    volumes:
+      - /opt/nuechat/_data/hf_cache:/app/hf_cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${IMAGE_GEN_PORT:-8034}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  # =============================================================================
+  # Image Generation - NVIDIA CUDA
+  # =============================================================================
+  image-service-cuda:
+    build:
+      context: ./image-service
+      dockerfile: Dockerfile.cuda
+    container_name: nuechat-image-gen
+    restart: unless-stopped
+    network_mode: host
+    profiles:
+      - cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - IMAGE_GEN_HOST=127.0.0.1
+      - IMAGE_GEN_PORT=${IMAGE_GEN_PORT:-8034}
+      - IMAGE_GEN_MODEL=${IMAGE_GEN_MODEL:-Tongyi-MAI/Z-Image-Turbo}
+      - IMAGE_GEN_DEFAULT_WIDTH=${IMAGE_GEN_DEFAULT_WIDTH:-1024}
+      - IMAGE_GEN_DEFAULT_HEIGHT=${IMAGE_GEN_DEFAULT_HEIGHT:-1024}
+      - IMAGE_GEN_INFERENCE_STEPS=${IMAGE_GEN_INFERENCE_STEPS:-9}
+      - IMAGE_GEN_MAX_QUEUE_SIZE=${IMAGE_GEN_MAX_QUEUE_SIZE:-20}
+      - IMAGE_GEN_MAX_CONCURRENT=${IMAGE_GEN_MAX_CONCURRENT:-1}
+      - HF_HOME=/app/hf_cache
+    volumes:
+      - /opt/nuechat/_data/hf_cache:/app/hf_cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${IMAGE_GEN_PORT:-8034}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  # =============================================================================
+  # Optional: Apache Tika for PDF extraction
+  # =============================================================================
+  tika:
+    image: apache/tika:latest
+    container_name: nuechat-tika
+    restart: unless-stopped
+    profiles:
+      - tika
+    ports:
+      - "9998:9998"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9998/tika"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

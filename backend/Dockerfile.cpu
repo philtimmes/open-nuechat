@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1.4
+# Multi-stage build: Frontend + Backend (CPU Only)
+#
+# For systems without GPU acceleration
+
+# ============ Stage 1: Build Frontend ============
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+
+COPY frontend/package*.json ./
+RUN npm install --legacy-peer-deps
+
+COPY frontend/ ./
+RUN npm run build
+
+
+# ============ Stage 2: Backend Runtime (CPU) ============
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    libmagic1 \
+    libopenblas-dev \
+    swig \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip
+RUN pip install --upgrade pip
+
+# Install PyTorch CPU-only
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Install FAISS CPU
+RUN pip install faiss-cpu
+
+# Copy and install Python dependencies
+COPY backend/requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copy application code
+COPY backend/app/ ./app/
+
+# Copy frontend build
+COPY --from=frontend-builder /frontend/dist ./static/
+
+# Create data directories
+RUN mkdir -p /app/data /app/uploads /app/uploads/generated /app/faiss_indexes
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV BACKEND_HOST=0.0.0.0
+ENV BACKEND_PORT=8000
+ENV FAISS_USE_GPU=false
+
+CMD uvicorn app.main:app --host ${BACKEND_HOST} --port ${BACKEND_PORT} --log-level warning --no-access-log

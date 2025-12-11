@@ -1,0 +1,66 @@
+# Image Generation Service with NVIDIA CUDA GPU Support
+# Uses Diffusers with Z-Image-Turbo model
+
+FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install PyTorch with CUDA support and dependencies
+RUN pip install --upgrade pip && \
+    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 && \
+    pip install -r requirements.txt
+
+# Install diffusers from git for latest features
+RUN pip install git+https://github.com/huggingface/diffusers
+
+# Copy application code
+COPY main.py .
+
+# Environment variables
+ENV IMAGE_GEN_HOST=0.0.0.0
+ENV IMAGE_GEN_PORT=8034
+ENV IMAGE_GEN_MODEL=Tongyi-MAI/Z-Image-Turbo
+ENV IMAGE_GEN_DEFAULT_WIDTH=1024
+ENV IMAGE_GEN_DEFAULT_HEIGHT=1024
+ENV IMAGE_GEN_INFERENCE_STEPS=9
+ENV IMAGE_GEN_GUIDANCE_SCALE=0.0
+
+# Create output directory for generated images
+RUN mkdir -p /app/outputs
+
+# Expose port
+EXPOSE 8034
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8034/health || exit 1
+
+# Run the service
+CMD ["python", "main.py"]
