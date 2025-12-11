@@ -15,6 +15,7 @@
 - [Control Script](#control-script)
 - [Configuration](#configuration)
 - [Project Structure](#project-structure)
+- [User Guide](#user-guide)
 - [License](#license)
 
 ---
@@ -399,6 +400,7 @@ open-nuechat/
 ├── LICENSE                   # Apache 2.0 + attribution
 ├── Notes.md                  # Development notes
 ├── Signatures.md             # API signatures
+├── USAGE.md                  # User guide
 └── README.md
 ```
 
@@ -432,6 +434,22 @@ open-nuechat/
 - `WS /ws/ws?token={jwt}` - Real-time chat
 
 Full API documentation available at `/docs` when running.
+
+---
+
+## User Guide
+
+For detailed instructions on using Open-NueChat features, see **[USAGE.md](USAGE.md)**:
+
+- **Getting Started** - Account creation, first chat
+- **Model Selection** - Choosing and switching models
+- **Custom GPTs** - Creating personalized AI assistants
+- **Knowledge Bases** - Building RAG-enabled document stores
+- **Marketplace** - Publishing and subscribing to GPTs
+- **Voice Features** - TTS, STT, and Talk-to-Me mode
+- **Image Generation** - Creating images in chat
+- **Tools** - Built-in capabilities (calculator, web search, etc.)
+- **Tips & Best Practices** - Getting better results
 
 ---
 
