@@ -34,6 +34,11 @@ interface LLMSettings {
   llm_max_tokens: number;
   llm_temperature: number;
   llm_stream_default: boolean;
+  // History compression
+  history_compression_enabled: boolean;
+  history_compression_threshold: number;
+  history_compression_keep_recent: number;
+  history_compression_target_tokens: number;
 }
 
 interface FeatureFlags {
@@ -1621,6 +1626,81 @@ export default function Admin() {
                         className="rounded"
                       />
                       <label htmlFor="llm-stream" className="text-sm text-[var(--color-text)]">Enable streaming by default</label>
+                    </div>
+                    
+                    {/* History Compression Settings */}
+                    <div className="border-t border-[var(--color-border)] pt-4 mt-4">
+                      <h4 className="text-sm font-medium text-[var(--color-text)] mb-3 flex items-center gap-2">
+                        📦 History Compression
+                        <span className="text-xs font-normal text-[var(--color-text-secondary)]">
+                          (reduces context usage for long conversations)
+                        </span>
+                      </h4>
+                      
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="history-compression-enabled"
+                            checked={llmSettings.history_compression_enabled}
+                            onChange={(e) => setLLMSettings({ ...llmSettings, history_compression_enabled: e.target.checked })}
+                            className="rounded"
+                          />
+                          <label htmlFor="history-compression-enabled" className="text-sm text-[var(--color-text)]">
+                            Enable automatic history compression
+                          </label>
+                        </div>
+                        
+                        {llmSettings.history_compression_enabled && (
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pl-6">
+                            <div>
+                              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">
+                                Compression Threshold (messages)
+                              </label>
+                              <input
+                                type="number"
+                                min="5"
+                                max="100"
+                                value={llmSettings.history_compression_threshold}
+                                onChange={(e) => setLLMSettings({ ...llmSettings, history_compression_threshold: parseInt(e.target.value) || 20 })}
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                              />
+                              <p className="text-xs text-[var(--color-text-secondary)] mt-1">Compress after this many messages</p>
+                            </div>
+                            
+                            <div>
+                              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">
+                                Keep Recent (message pairs)
+                              </label>
+                              <input
+                                type="number"
+                                min="2"
+                                max="20"
+                                value={llmSettings.history_compression_keep_recent}
+                                onChange={(e) => setLLMSettings({ ...llmSettings, history_compression_keep_recent: parseInt(e.target.value) || 6 })}
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                              />
+                              <p className="text-xs text-[var(--color-text-secondary)] mt-1">Recent turns kept verbatim</p>
+                            </div>
+                            
+                            <div>
+                              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">
+                                Target Tokens
+                              </label>
+                              <input
+                                type="number"
+                                min="2000"
+                                max="128000"
+                                step="1000"
+                                value={llmSettings.history_compression_target_tokens}
+                                onChange={(e) => setLLMSettings({ ...llmSettings, history_compression_target_tokens: parseInt(e.target.value) || 8000 })}
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                              />
+                              <p className="text-xs text-[var(--color-text-secondary)] mt-1">Compress if exceeds this</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                     
                     {/* Test Connection */}

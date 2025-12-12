@@ -184,6 +184,11 @@ class LLMSettingsSchema(BaseModel):
     llm_max_tokens: int = Field(default=4096, ge=1)
     llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     llm_stream_default: bool = True
+    # History compression settings
+    history_compression_enabled: bool = True
+    history_compression_threshold: int = Field(default=20, ge=5, le=100)
+    history_compression_keep_recent: int = Field(default=6, ge=2, le=20)
+    history_compression_target_tokens: int = Field(default=8000, ge=2000, le=128000)
 
 
 class FeatureFlagsSchema(BaseModel):
@@ -329,6 +334,11 @@ async def get_llm_settings(
         llm_max_tokens=await get_system_setting_int(db, "llm_max_tokens"),
         llm_temperature=await get_system_setting_float(db, "llm_temperature"),
         llm_stream_default=await get_system_setting_bool(db, "llm_stream_default"),
+        # History compression
+        history_compression_enabled=await get_system_setting_bool(db, "history_compression_enabled"),
+        history_compression_threshold=await get_system_setting_int(db, "history_compression_threshold") or 20,
+        history_compression_keep_recent=await get_system_setting_int(db, "history_compression_keep_recent") or 6,
+        history_compression_target_tokens=await get_system_setting_int(db, "history_compression_target_tokens") or 8000,
     )
 
 
@@ -346,6 +356,11 @@ async def update_llm_settings(
     await set_setting(db, "llm_max_tokens", str(data.llm_max_tokens))
     await set_setting(db, "llm_temperature", str(data.llm_temperature))
     await set_setting(db, "llm_stream_default", str(data.llm_stream_default).lower())
+    # History compression
+    await set_setting(db, "history_compression_enabled", str(data.history_compression_enabled).lower())
+    await set_setting(db, "history_compression_threshold", str(data.history_compression_threshold))
+    await set_setting(db, "history_compression_keep_recent", str(data.history_compression_keep_recent))
+    await set_setting(db, "history_compression_target_tokens", str(data.history_compression_target_tokens))
     
     await db.commit()
     

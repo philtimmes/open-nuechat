@@ -1021,8 +1021,146 @@ class DocumentProcessor:
                 logger.warning("PyMuPDF not available for PDF fallback")
                 return ""
         
+        elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or path.suffix.lower() == ".docx":
+            # Word document (.docx)
+            return await DocumentProcessor.extract_text_from_docx(file_path)
+        
+        elif mime_type == "application/msword" or path.suffix.lower() == ".doc":
+            # Legacy Word document (.doc) - try with docx library (may not work for all)
+            # For full .doc support, would need antiword or libreoffice
+            logger.warning(".doc files may not extract properly - consider converting to .docx")
+            return await DocumentProcessor.extract_text_from_docx(file_path)
+        
+        elif mime_type in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"] or path.suffix.lower() in [".xlsx", ".xls"]:
+            # Excel spreadsheet
+            return await DocumentProcessor.extract_text_from_xlsx(file_path)
+        
+        elif mime_type in ["application/rtf", "text/rtf"] or path.suffix.lower() == ".rtf":
+            # RTF document
+            return await DocumentProcessor.extract_text_from_rtf(file_path)
+        
         else:
             try:
                 return path.read_text(encoding="utf-8")
             except:
                 return ""
+    
+    @staticmethod
+    async def extract_text_from_docx(file_path: str) -> str:
+        """Extract text from Word document (.docx)"""
+        try:
+            from docx import Document
+            doc = Document(file_path)
+            
+            text_parts = []
+            
+            # Extract paragraphs
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    text_parts.append(para.text)
+            
+            # Extract tables
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = []
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            row_text.append(cell.text.strip())
+                    if row_text:
+                        text_parts.append(" | ".join(row_text))
+            
+            text = "\n\n".join(text_parts)
+            logger.info(f"Extracted {len(text)} chars from DOCX")
+            return text
+            
+        except ImportError:
+            logger.error("python-docx not installed. Run: pip install python-docx")
+            return ""
+        except Exception as e:
+            logger.error(f"DOCX extraction failed: {e}")
+            return ""
+    
+    @staticmethod
+    async def extract_text_from_xlsx(file_path: str) -> str:
+        """Extract text from Excel spreadsheet (.xlsx/.xls)"""
+        try:
+            from openpyxl import load_workbook
+            
+            wb = load_workbook(file_path, data_only=True)
+            text_parts = []
+            
+            for sheet_name in wb.sheetnames:
+                sheet = wb[sheet_name]
+                text_parts.append(f"=== Sheet: {sheet_name} ===")
+                
+                for row in sheet.iter_rows():
+                    row_values = []
+                    for cell in row:
+                        if cell.value is not None:
+                            row_values.append(str(cell.value))
+                    if row_values:
+                        text_parts.append(" | ".join(row_values))
+            
+            wb.close()
+            text = "\n".join(text_parts)
+            logger.info(f"Extracted {len(text)} chars from XLSX")
+            return text
+            
+        except ImportError:
+            logger.error("openpyxl not installed. Run: pip install openpyxl")
+            return ""
+        except Exception as e:
+            logger.error(f"XLSX extraction failed: {e}")
+            # Try with xlrd for .xls files
+            if file_path.lower().endswith('.xls'):
+                return await DocumentProcessor._extract_text_from_xls_legacy(file_path)
+            return ""
+    
+    @staticmethod
+    async def _extract_text_from_xls_legacy(file_path: str) -> str:
+        """Extract text from legacy Excel (.xls) using xlrd"""
+        try:
+            import xlrd
+            
+            wb = xlrd.open_workbook(file_path)
+            text_parts = []
+            
+            for sheet_idx in range(wb.nsheets):
+                sheet = wb.sheet_by_index(sheet_idx)
+                text_parts.append(f"=== Sheet: {sheet.name} ===")
+                
+                for row_idx in range(sheet.nrows):
+                    row_values = [str(cell.value) for cell in sheet.row(row_idx) if cell.value]
+                    if row_values:
+                        text_parts.append(" | ".join(row_values))
+            
+            text = "\n".join(text_parts)
+            logger.info(f"Extracted {len(text)} chars from XLS (legacy)")
+            return text
+            
+        except ImportError:
+            logger.error("xlrd not installed. Run: pip install xlrd")
+            return ""
+        except Exception as e:
+            logger.error(f"XLS extraction failed: {e}")
+            return ""
+    
+    @staticmethod
+    async def extract_text_from_rtf(file_path: str) -> str:
+        """Extract text from RTF document"""
+        try:
+            from striprtf.striprtf import rtf_to_text
+            
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                rtf_content = f.read()
+            
+            text = rtf_to_text(rtf_content)
+            logger.info(f"Extracted {len(text)} chars from RTF")
+            return text
+            
+        except ImportError:
+            logger.error("striprtf not installed. Run: pip install striprtf")
+            return ""
+        except Exception as e:
+            logger.error(f"RTF extraction failed: {e}")
+            return ""

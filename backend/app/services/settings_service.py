@@ -61,6 +61,12 @@ SETTING_DEFAULTS = {
     
     # Safety filters (prompt injection, content moderation)
     "enable_safety_filters": "false",  # Disabled by default - most self-hosted users don't need this
+    
+    # History compression (reduce context window usage for long conversations)
+    "history_compression_enabled": "true",  # Compress old messages into summaries
+    "history_compression_threshold": "20",  # Compress after this many messages
+    "history_compression_keep_recent": "6",  # Keep this many recent message pairs intact
+    "history_compression_target_tokens": "8000",  # Target total tokens after compression
 }
 
 

@@ -8,6 +8,8 @@ type Tab = 'documents' | 'knowledge-bases';
 const ALLOWED_FILE_EXTENSIONS = [
   // Documents
   '.pdf', '.txt', '.md', '.json', '.csv',
+  // Office documents
+  '.docx', '.doc', '.xlsx', '.xls', '.rtf',
   // Python
   '.py', '.pyi',
   // JavaScript/TypeScript
@@ -271,6 +273,30 @@ export default function Documents() {
       return (
         <svg className="w-8 h-8 text-red-500" fill="currentColor" viewBox="0 0 24 24">
           <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 2l5 5h-5V4z" />
+        </svg>
+      );
+    }
+    if (type.includes('wordprocessingml') || type.includes('msword')) {
+      // Word document (.docx, .doc)
+      return (
+        <svg className="w-8 h-8 text-blue-600" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 2l5 5h-5V4zM9 13h6v1H9v-1zm0 2h6v1H9v-1zm0 2h4v1H9v-1z" />
+        </svg>
+      );
+    }
+    if (type.includes('spreadsheetml') || type.includes('ms-excel')) {
+      // Excel spreadsheet (.xlsx, .xls)
+      return (
+        <svg className="w-8 h-8 text-green-600" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 2l5 5h-5V4zM8 12h3v2H8v-2zm4 0h4v2h-4v-2zm-4 3h3v2H8v-2zm4 0h4v2h-4v-2z" />
+        </svg>
+      );
+    }
+    if (type.includes('rtf')) {
+      // RTF document
+      return (
+        <svg className="w-8 h-8 text-purple-500" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 2l5 5h-5V4zM9 13h6v1H9v-1zm0 2h6v1H9v-1z" />
         </svg>
       );
     }

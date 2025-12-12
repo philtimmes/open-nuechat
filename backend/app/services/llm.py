@@ -930,7 +930,67 @@ When you receive search results or external data in the conversation, follow the
             "content": content,
         })
         
+        # Apply history compression if needed
+        messages = await self._maybe_compress_history(db, messages)
+        
         return messages
+    
+    async def _maybe_compress_history(
+        self,
+        db: AsyncSession,
+        messages: List[Dict],
+    ) -> List[Dict]:
+        """
+        Compress history if it exceeds thresholds.
+        This helps manage context window limits for long conversations.
+        """
+        from app.services.settings_service import SettingsService
+        from app.services.history_compression import (
+            get_compression_service, 
+            CompressionConfig,
+            estimate_message_tokens
+        )
+        
+        # Check if compression is enabled
+        enabled = await SettingsService.get_bool(db, "history_compression_enabled")
+        if not enabled:
+            return messages
+        
+        # Load compression settings
+        threshold = int(await SettingsService.get(db, "history_compression_threshold") or "20")
+        keep_recent = int(await SettingsService.get(db, "history_compression_keep_recent") or "6")
+        target_tokens = int(await SettingsService.get(db, "history_compression_target_tokens") or "8000")
+        
+        config = CompressionConfig(
+            enabled=True,
+            threshold_messages=threshold,
+            keep_recent=keep_recent,
+            target_total_tokens=target_tokens,
+        )
+        
+        compression_service = get_compression_service(config)
+        
+        # Check if compression is needed
+        if not compression_service.should_compress(messages) and not compression_service.should_compress_by_tokens(messages):
+            return messages
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Compressing chat history: {len(messages)} messages, ~{estimate_message_tokens(messages)} tokens")
+        
+        # Perform compression
+        try:
+            compressed = await compression_service.compress_history(
+                messages=messages,
+                llm_client=None,  # We'll use our own client
+                model=await self._get_effective_model(None),
+                api_base=self.api_base,
+                api_key=self.api_key,
+            )
+            return compressed
+        except Exception as e:
+            logger.error(f"History compression failed: {e}")
+            return messages  # Return original on failure
     
     def _build_user_content(
         self,

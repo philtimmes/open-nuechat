@@ -185,6 +185,12 @@ class Settings(BaseSettings):
         # Documents
         "application/pdf", "text/plain", "text/markdown",
         "application/json", "text/csv",
+        # Office documents
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
+        "application/vnd.ms-excel",  # .xls (legacy)
+        "application/msword",  # .doc (legacy)
+        "application/rtf", "text/rtf",  # .rtf
         # Programming languages - these map to text/plain or application/octet-stream
         "text/x-python", "text/x-java", "text/x-c", "text/x-c++",
         "text/javascript", "application/javascript",
@@ -198,6 +204,8 @@ class Settings(BaseSettings):
     ALLOWED_FILE_EXTENSIONS: List[str] = [
         # Documents
         ".pdf", ".txt", ".md", ".json", ".csv",
+        # Office documents
+        ".docx", ".doc", ".xlsx", ".xls", ".rtf",
         # Python
         ".py", ".pyi", ".pyw",
         # JavaScript/TypeScript

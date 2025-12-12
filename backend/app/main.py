@@ -57,7 +57,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.29"
+SCHEMA_VERSION = "NC-0.6.31"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -193,6 +193,13 @@ async def run_migrations(conn):
             # Add enable_safety_filters setting (disabled by default)
             # This controls prompt injection and content moderation filters
             ("INSERT INTO system_settings (key, value) VALUES ('enable_safety_filters', 'false')", "enable_safety_filters setting"),
+        ],
+        "NC-0.6.30": [
+            # History compression settings
+            ("INSERT INTO system_settings (key, value) VALUES ('history_compression_enabled', 'true')", "history_compression_enabled"),
+            ("INSERT INTO system_settings (key, value) VALUES ('history_compression_threshold', '20')", "history_compression_threshold"),
+            ("INSERT INTO system_settings (key, value) VALUES ('history_compression_keep_recent', '6')", "history_compression_keep_recent"),
+            ("INSERT INTO system_settings (key, value) VALUES ('history_compression_target_tokens', '8000')", "history_compression_target_tokens"),
         ],
     }
     
