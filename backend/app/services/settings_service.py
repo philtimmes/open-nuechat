@@ -58,6 +58,9 @@ SETTING_DEFAULTS = {
     "enable_registration": str(config_settings.ENABLE_REGISTRATION).lower(),
     "enable_billing": str(config_settings.ENABLE_BILLING).lower(),
     "freeforall": str(config_settings.FREEFORALL).lower(),
+    
+    # Safety filters (prompt injection, content moderation)
+    "enable_safety_filters": "false",  # Disabled by default - most self-hosted users don't need this
 }
 
 

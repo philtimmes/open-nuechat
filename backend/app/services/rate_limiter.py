@@ -15,6 +15,14 @@ from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
 
 
+class RateLimitExceeded(Exception):
+    """Raised when rate limit is exceeded"""
+    def __init__(self, retry_after: int, message: str = "Rate limit exceeded"):
+        self.retry_after = retry_after
+        self.message = message
+        super().__init__(message)
+
+
 @dataclass
 class RateLimitConfig:
     """Configuration for a rate limit"""
@@ -126,10 +134,35 @@ class TokenBucketRateLimiter:
         async with self._lock:
             if key in self._buckets:
                 del self._buckets[key]
+    
+    async def check_rate_limit(
+        self,
+        action: str,
+        identifier: str,
+        cost: int = 1
+    ) -> None:
+        """
+        Check rate limit and raise exception if exceeded.
+        
+        Args:
+            action: Action name (must be a key in RATE_LIMITS)
+            identifier: User ID or IP address
+            cost: Number of tokens to consume
+            
+        Raises:
+            RateLimitExceeded: If rate limit is exceeded
+        """
+        config = RATE_LIMITS.get(action)
+        if not config:
+            return  # No limit configured for this action
+        
+        key = f"{action}:{identifier}"
+        allowed, headers = await self.check(key, config, cost)
+        
+        if not allowed:
+            retry_after = headers.get("Retry-After", 60)
+            raise RateLimitExceeded(retry_after, f"Rate limit exceeded for {action}")
 
-
-# Global rate limiter instance
-rate_limiter = TokenBucketRateLimiter()
 
 # Default rate limit configurations
 RATE_LIMITS = {
@@ -157,6 +190,10 @@ RATE_LIMITS = {
     # Knowledge store creation: 10 per hour
     "knowledge_store_creation": RateLimitConfig(requests=10, window_seconds=3600),
 }
+
+
+# Global rate limiter instance
+rate_limiter = TokenBucketRateLimiter()
 
 
 async def check_rate_limit(

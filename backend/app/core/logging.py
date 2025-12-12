@@ -40,7 +40,7 @@ class StructuredLogger:
         self.logger = logging.getLogger(name)
         self.default_fields: Dict[str, Any] = {}
     
-    def _log(self, level: int, message: str, **fields):
+    def _log(self, log_level: int, message: str, **fields):
         """Internal logging method with JSON formatting"""
         data = {
             **self.default_fields,
@@ -48,7 +48,7 @@ class StructuredLogger:
             "message": message,
             "timestamp": time.time()
         }
-        self.logger.log(level, json.dumps(data))
+        self.logger.log(log_level, json.dumps(data))
     
     def info(self, message: str, **fields):
         """Log at INFO level with structured fields"""
@@ -85,19 +85,22 @@ class StructuredLogger:
 
 
 @contextmanager
-def log_duration(logger: StructuredLogger, operation: str, **extra_fields):
+def log_duration(operation: str, logger: Optional[StructuredLogger] = None, **extra_fields):
     """
     Context manager to log operation duration.
     
     Usage:
-        with log_duration(logger, "database_query", table="users"):
+        with log_duration("database_query", table="users"):
             result = await db.execute(query)
     
     Args:
-        logger: StructuredLogger instance
         operation: Name of the operation being timed
+        logger: Optional StructuredLogger (creates one if not provided)
         **extra_fields: Additional fields to include in the log
     """
+    if logger is None:
+        logger = get_logger("timing")
+    
     start = time.perf_counter()
     error_occurred = None
     try:
@@ -125,7 +128,6 @@ def log_duration(logger: StructuredLogger, operation: str, **extra_fields):
 
 
 def log_llm_request(
-    logger: StructuredLogger,
     model: str,
     input_tokens: int,
     output_tokens: int,
@@ -135,7 +137,8 @@ def log_llm_request(
     filters_applied: Optional[list] = None,
     tool_calls: Optional[int] = None,
     error: Optional[str] = None,
-    streaming: bool = False
+    streaming: bool = False,
+    logger: Optional[StructuredLogger] = None
 ):
     """
     Log LLM request with all relevant metrics.
@@ -144,7 +147,6 @@ def log_llm_request(
     token counts, latency, and filter information.
     
     Args:
-        logger: StructuredLogger instance
         model: Model name used
         input_tokens: Number of input tokens
         output_tokens: Number of output tokens
@@ -155,7 +157,11 @@ def log_llm_request(
         tool_calls: Number of tool calls made
         error: Error message if request failed
         streaming: Whether this was a streaming request
+        logger: Optional StructuredLogger (creates one if not provided)
     """
+    if logger is None:
+        logger = get_logger("llm_service")
+    
     tokens_per_second = round(output_tokens / (duration_ms / 1000), 2) if duration_ms > 0 else 0
     
     log_data = {
@@ -181,22 +187,25 @@ def log_llm_request(
 
 
 def log_websocket_event(
-    logger: StructuredLogger,
     event_type: str,
     user_id: str,
     chat_id: Optional[str] = None,
+    logger: Optional[StructuredLogger] = None,
     **extra_fields
 ):
     """
     Log WebSocket events with consistent formatting.
     
     Args:
-        logger: StructuredLogger instance
         event_type: Type of WebSocket event
         user_id: User ID
         chat_id: Chat ID (if applicable)
+        logger: Optional StructuredLogger (creates one if not provided)
         **extra_fields: Additional event-specific fields
     """
+    if logger is None:
+        logger = get_logger("websocket")
+    
     logger.info(
         f"WebSocket event: {event_type}",
         event="websocket",
@@ -208,24 +217,27 @@ def log_websocket_event(
 
 
 def log_security_event(
-    logger: StructuredLogger,
     event_type: str,
     user_id: Optional[str] = None,
     ip_address: Optional[str] = None,
     success: bool = True,
+    logger: Optional[StructuredLogger] = None,
     **extra_fields
 ):
     """
     Log security-related events (auth, rate limiting, etc.).
     
     Args:
-        logger: StructuredLogger instance
         event_type: Type of security event
         user_id: User ID (if known)
         ip_address: Client IP address
         success: Whether the event was successful
+        logger: Optional StructuredLogger (creates one if not provided)
         **extra_fields: Additional event-specific fields
     """
+    if logger is None:
+        logger = get_logger("security")
+    
     log_level = logging.INFO if success else logging.WARNING
     logger._log(
         log_level,
@@ -237,3 +249,22 @@ def log_security_event(
         success=success,
         **extra_fields
     )
+
+
+def get_logger(name: str) -> StructuredLogger:
+    """
+    Get a structured logger instance.
+    
+    This is the primary way to get a logger for a module:
+    
+        from app.core.logging import get_logger
+        logger = get_logger(__name__)
+        logger.info("Something happened", user_id="123")
+    
+    Args:
+        name: Logger name (typically __name__)
+    
+    Returns:
+        StructuredLogger instance
+    """
+    return StructuredLogger(name)

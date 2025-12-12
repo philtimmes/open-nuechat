@@ -92,7 +92,7 @@ async def websocket_endpoint(
             except json.JSONDecodeError:
                 logger.error(f"Invalid JSON received: {data[:100]}")
                 await ws_manager.send_to_connection(connection, 
-                    create_error("Invalid JSON").model_dump()
+                    create_error("Invalid JSON")
                 )
                 continue
             
@@ -160,7 +160,7 @@ async def websocket_endpoint(
         logger.exception(f"WebSocket error for user {user_id}: {e}")
         log_websocket_event("error", user_id, error=str(e))
         await ws_manager.send_to_connection(connection, 
-            create_error(str(e)).model_dump()
+            create_error(str(e))
         )
     finally:
         await ws_manager.disconnect(connection)
@@ -182,6 +182,7 @@ async def handle_chat_message(
     document_ids = payload.get("document_ids")
     attachments = payload.get("attachments", [])
     parent_id = payload.get("parent_id")  # For conversation branching
+    client_message_id = payload.get("message_id")  # Client-generated UUID for the user message
     
     # Allow payload to override save_user_message (for file content continuation)
     if "save_user_message" in payload:
@@ -247,16 +248,20 @@ async def handle_chat_message(
             if not width:
                 width, height = 1024, 1024
             
-            # Save user message first
-            user_message = Message(
-                chat_id=chat_id,
-                sender_id=user_id,
-                role=MessageRole.USER,
-                content=content,
-                content_type=ContentType.TEXT,
-                attachments=attachments if attachments else None,
-                parent_id=parent_id,
-            )
+            # Save user message first (use client ID if provided)
+            img_msg_kwargs = {
+                "chat_id": chat_id,
+                "sender_id": user_id,
+                "role": MessageRole.USER,
+                "content": content,
+                "content_type": ContentType.TEXT,
+                "attachments": attachments if attachments else None,
+                "parent_id": parent_id,
+            }
+            if client_message_id:
+                img_msg_kwargs["id"] = client_message_id
+            
+            user_message = Message(**img_msg_kwargs)
             db.add(user_message)
             await db.flush()
             
@@ -294,11 +299,11 @@ async def handle_chat_message(
             
             # Send stream_start to show placeholder (using typed model)
             await ws_manager.send_to_connection(connection, 
-                create_stream_start(chat_id, message_id).model_dump()
+                create_stream_start(message_id, chat_id)
             )
             
             await ws_manager.send_to_connection(connection, 
-                create_stream_chunk(chat_id, message_id, "Generating image...").model_dump()
+                create_stream_chunk(message_id, "Generating image...", chat_id)
             )
             
             # Send generation started notification with queue info
@@ -316,10 +321,10 @@ async def handle_chat_message(
             
             await ws_manager.send_to_connection(connection, 
                 create_stream_end(
-                    chat_id, message_id, 
+                    message_id, chat_id, 
                     input_tokens=0, output_tokens=0, 
                     parent_id=user_message.id
-                ).model_dump()
+                )
             )
             
             # Create callback to notify frontend when complete
@@ -462,15 +467,20 @@ async def handle_chat_message(
         
         # Create user message only if save_user_message is True
         if save_user_message:
-            user_message = Message(
-                chat_id=chat_id,
-                sender_id=user_id,
-                role=MessageRole.USER,
-                content=content,
-                content_type=ContentType.TEXT,
-                attachments=attachments if attachments else None,
-                parent_id=parent_id,  # User message follows the previously shown assistant message
-            )
+            # Build message kwargs, using client ID if provided
+            msg_kwargs = {
+                "chat_id": chat_id,
+                "sender_id": user_id,
+                "role": MessageRole.USER,
+                "content": content,
+                "content_type": ContentType.TEXT,
+                "attachments": attachments if attachments else None,
+                "parent_id": parent_id,  # User message follows the previously shown assistant message
+            }
+            if client_message_id:
+                msg_kwargs["id"] = client_message_id
+            
+            user_message = Message(**msg_kwargs)
             db.add(user_message)
             await db.flush()
             logger.debug(f"User message saved: {user_message.id} with parent_id={parent_id}")
@@ -638,10 +648,10 @@ async def handle_chat_message(
                             
                             # Send to frontend using typed models
                             await ws_manager.send_to_connection(connection, 
-                                create_stream_start(chat_id, assistant_msg.id).model_dump()
+                                create_stream_start(assistant_msg.id, chat_id)
                             )
                             await ws_manager.send_to_connection(connection, 
-                                create_stream_chunk(chat_id, assistant_msg.id, result.content).model_dump()
+                                create_stream_chunk(assistant_msg.id, result.content, chat_id)
                             )
                             await ws_manager.send_to_connection(connection, {
                                 "type": "stream_end",
@@ -798,6 +808,7 @@ async def handle_chat_message(
                 parent_id=assistant_parent_id,  # For conversation branching
                 cancel_check=streaming_handler.is_stop_requested,  # Allow LLM to check cancellation
                 stream_setter=streaming_handler.set_active_stream,  # Allow direct stream cancellation
+                is_file_content=not save_user_message,  # Skip injection filter for user-uploaded files
             ):
                 # Check if stop was requested (backup check)
                 if streaming_handler.is_stop_requested():

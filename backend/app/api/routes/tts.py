@@ -222,3 +222,40 @@ async def get_queue_stats(
     except Exception as e:
         logger.error(f"Failed to get queue stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/cancel/{job_id}")
+async def cancel_tts_job(
+    job_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Cancel a specific TTS job"""
+    tts = get_tts_service()
+    
+    if not await tts.is_available():
+        raise HTTPException(status_code=503, detail="TTS service is not available")
+    
+    try:
+        cancelled = await tts.cancel_job(job_id)
+        return {"cancelled": cancelled, "job_id": job_id}
+    except Exception as e:
+        logger.error(f"Failed to cancel TTS job: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/cancel-all")
+async def cancel_all_tts_jobs(
+    user: User = Depends(get_current_user),
+):
+    """Cancel all queued TTS jobs for this user"""
+    tts = get_tts_service()
+    
+    if not await tts.is_available():
+        raise HTTPException(status_code=503, detail="TTS service is not available")
+    
+    try:
+        count = await tts.cancel_all_jobs()
+        return {"cancelled": count}
+    except Exception as e:
+        logger.error(f"Failed to cancel all TTS jobs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

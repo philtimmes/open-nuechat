@@ -344,6 +344,7 @@ class StreamingHandler:
             "type": "stream_chunk",
             "payload": {
                 "message_id": self._current_message_id,
+                "chat_id": self._current_chat_id,
                 "content": self._buffer,
             },
         })

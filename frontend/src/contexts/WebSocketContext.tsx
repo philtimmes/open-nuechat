@@ -106,9 +106,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [isConnected, setIsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   
-  // Track pending temp message IDs for replacement when server confirms
-  const pendingTempIdRef = useRef<string | null>(null);
-  
   const { accessToken, isAuthenticated, logout } = useAuthStore();
   const {
     currentChat,
@@ -241,16 +238,17 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         break;
         
       case 'message_saved': {
-        // Server confirms user message was saved - replace temp ID with real ID
+        // Server confirms user message was saved
+        // Since we use client-generated UUIDs, the ID should already match
         const payload = message.payload as { message_id: string; parent_id?: string };
-        console.log('Message saved received:', payload, 'pendingTempId:', pendingTempIdRef.current);
-        if (pendingTempIdRef.current && payload.message_id) {
-          console.log('Replacing temp ID:', pendingTempIdRef.current, '-> real ID:', payload.message_id);
-          // Use getState() to avoid stale closure issues
-          useChatStore.getState().replaceMessageId(pendingTempIdRef.current, payload.message_id, payload.parent_id);
-          pendingTempIdRef.current = null;
-        } else {
-          console.warn('message_saved: No pending temp ID or no message_id in payload');
+        console.log('Message saved confirmed:', payload.message_id);
+        // If parent_id was modified by server (e.g., validation), update it
+        if (payload.parent_id !== undefined) {
+          const { messages } = useChatStore.getState();
+          const msg = messages.find(m => m.id === payload.message_id);
+          if (msg && msg.parent_id !== payload.parent_id) {
+            useChatStore.getState().updateMessage(payload.message_id, { parent_id: payload.parent_id });
+          }
         }
         break;
       }
@@ -273,7 +271,16 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       }
         
       case 'stream_start': {
-        console.log('[stream_start] Stream starting');
+        const payload = message.payload as StreamChunk;
+        const { currentChat } = useChatStore.getState();
+        
+        // Validate this stream is for the current chat
+        if (payload.chat_id && currentChat?.id && payload.chat_id !== currentChat.id) {
+          console.warn('[stream_start] Ignoring stream for different chat:', payload.chat_id, 'current:', currentChat.id);
+          break;
+        }
+        
+        console.log('[stream_start] Stream starting for chat:', payload.chat_id);
         // Log current state
         const { messages, artifacts } = useChatStore.getState();
         console.log(`[stream_start] State before clear: ${messages.length} messages, ${artifacts.length} artifacts`);
@@ -290,6 +297,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         
       case 'stream_chunk': {
         const chunk = message.payload as StreamChunk;
+        const { currentChat } = useChatStore.getState();
+        
+        // Validate this chunk is for the current chat
+        if (chunk.chat_id && currentChat?.id && chunk.chat_id !== currentChat.id) {
+          // Silently ignore chunks for other chats (don't spam logs)
+          break;
+        }
+        
         if (chunk.content) {
           // Use buffered append for performance
           streamingBufferRef.current?.append(chunk.content);
@@ -322,6 +337,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         if (chunk.message_id) {
           const { streamingContent, currentChat, generatedImages } = useChatStore.getState();
           console.log('Final streaming content length:', streamingContent.length);
+          
+          // Only add message if it belongs to the current chat
+          // This prevents cross-chat contamination when switching chats during streaming
+          if (chunk.chat_id && currentChat?.id && chunk.chat_id !== currentChat.id) {
+            console.warn('Ignoring stream_end for different chat:', chunk.chat_id, 'current:', currentChat.id);
+            clearStreaming();
+            setIsSending(false);
+            break;
+          }
           
           // Extract artifacts from the content and attach to message
           // cleanContent has [📦 Artifact: ...] placeholders, artifacts has the extracted data
@@ -609,8 +633,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         if (data.type !== 'pong') {
           console.log('%c[WS]', 'color: green; font-weight: bold', data.type, data.payload ? Object.keys(data.payload) : 'no payload');
         }
-        if (data.type === 'image_generated') {
-          console.log('%c[IMAGE]', 'color: blue; font-weight: bold; font-size: 16px', 'Got image!', (data.payload as any)?.message_id);
+        if (data.type === 'image_generation') {
+          console.log('%c[IMAGE]', 'color: blue; font-weight: bold; font-size: 16px', 'Got image!', data.payload?.message_id);
         }
         handleMessage(data as WSMessage);
       };
@@ -695,10 +719,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   
   const sendChatMessage = useCallback((chatId: string, content: string, attachments?: unknown[], parentId?: string | null) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      // Add user message optimistically with temp ID
-      const tempId = `temp-${Date.now()}`;
+      // Generate a proper UUID for the user message (used by both frontend and backend)
+      const messageId = crypto.randomUUID();
       const userMessage: Message = {
-        id: tempId,
+        id: messageId,
         chat_id: chatId,
         role: 'user',
         content,
@@ -707,15 +731,12 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       };
       addMessage(userMessage);
       
-      // Store temp ID for replacement when message_saved comes back
-      pendingTempIdRef.current = tempId;
-      
       setIsSending(true);
       
       // Get zip context from store if available
       const { zipContext } = useChatStore.getState();
       
-      console.log('Sending chat message:', { chatId, content: content.substring(0, 50), parentId, tempId, hasZipContext: !!zipContext });
+      console.log('Sending chat message:', { chatId, content: content.substring(0, 50), parentId, messageId, hasZipContext: !!zipContext });
       wsRef.current.send(JSON.stringify({
         type: 'chat_message',
         payload: {
@@ -723,6 +744,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           content,
           attachments,
           parent_id: parentId,
+          message_id: messageId,  // Send the ID so backend uses it
           zip_context: zipContext,  // Include zip manifest if available
         },
       }));
@@ -796,12 +818,39 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     };
   }, [isAuthenticated, accessToken, connect, disconnect]);
   
-  // Subscribe to chat when it changes
+  // Track previous chat for proper unsubscribe
+  const previousChatIdRef = useRef<string | null>(null);
+  
+  // Subscribe to chat when it changes - with proper cleanup
   useEffect(() => {
-    if (isConnected && currentChat) {
-      subscribe(currentChat.id);
+    if (!isConnected) return;
+    
+    const newChatId = currentChat?.id || null;
+    const oldChatId = previousChatIdRef.current;
+    
+    // Unsubscribe from old chat first
+    if (oldChatId && oldChatId !== newChatId) {
+      console.log('[WS] Unsubscribing from old chat:', oldChatId);
+      unsubscribe(oldChatId);
+      // Clear any lingering streaming state when switching chats
+      clearStreaming();
     }
-  }, [isConnected, currentChat, subscribe]);
+    
+    // Subscribe to new chat
+    if (newChatId) {
+      console.log('[WS] Subscribing to chat:', newChatId);
+      subscribe(newChatId);
+    }
+    
+    previousChatIdRef.current = newChatId;
+    
+    // Cleanup on unmount
+    return () => {
+      if (newChatId) {
+        unsubscribe(newChatId);
+      }
+    };
+  }, [isConnected, currentChat?.id, subscribe, unsubscribe, clearStreaming]);
   
   // Heartbeat
   useEffect(() => {

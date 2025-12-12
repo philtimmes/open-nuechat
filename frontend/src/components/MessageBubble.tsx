@@ -95,9 +95,41 @@ function fixNestedCodeFences(content: string): string {
 //   ```javascript
 // Into:
 //   ```javascript::/path/to/file.js
+//
+// Also converts XML-style filename tags to markdown code fences:
+//   <Menu.cpp>code</Menu.cpp> → ```cpp::Menu.cpp\ncode\n```
+//   <artifact=file.py>code</artifact> → ```python::file.py\ncode\n```
 function preprocessContent(content: string): string {
   // First fix nested code fences
   let processed = fixNestedCodeFences(content);
+  
+  // Convert XML-style filename tags to markdown code fences
+  // Pattern 4a: Direct filename as tag: <Menu.cpp>...</Menu.cpp>
+  processed = processed.replace(
+    /<([A-Za-z_][\w\-./]*\.(\w+))>\s*([\s\S]*?)\s*<\/\1>/g,
+    (match, filepath, ext, code) => {
+      const lang = extToMarkdownLang(ext);
+      return `\n\`\`\`${lang}::${filepath}\n${code.trim()}\n\`\`\`\n`;
+    }
+  );
+  
+  // Pattern 4b: <artifact=filename> or <file=filename> or <code=filename>
+  processed = processed.replace(
+    /<(?:artifact|file|code)[=:]([A-Za-z_][\w\-./]*\.(\w+))>\s*([\s\S]*?)\s*<\/(?:artifact|file|code|\1)>/gi,
+    (match, filepath, ext, code) => {
+      const lang = extToMarkdownLang(ext);
+      return `\n\`\`\`${lang}::${filepath}\n${code.trim()}\n\`\`\`\n`;
+    }
+  );
+  
+  // Pattern 4c: <artifact name="filename"> attribute style
+  processed = processed.replace(
+    /<(?:artifact|file|code)\s+(?:name|filename|file|path)=["']([A-Za-z_][\w\-./]*\.(\w+))["'][^>]*>\s*([\s\S]*?)\s*<\/(?:artifact|file|code)>/gi,
+    (match, filepath, ext, code) => {
+      const lang = extToMarkdownLang(ext);
+      return `\n\`\`\`${lang}::${filepath}\n${code.trim()}\n\`\`\`\n`;
+    }
+  );
   
   // Match: optional backticks around filepath, newline, then code fence with language
   // Captures: 1=filepath (with or without backticks), 2=language
@@ -114,6 +146,49 @@ function preprocessContent(content: string): string {
   });
   
   return processed;
+}
+
+// Map file extension to markdown language identifier
+function extToMarkdownLang(ext: string): string {
+  const map: Record<string, string> = {
+    'py': 'python',
+    'js': 'javascript',
+    'ts': 'typescript',
+    'tsx': 'tsx',
+    'jsx': 'jsx',
+    'cpp': 'cpp',
+    'cc': 'cpp',
+    'cxx': 'cpp',
+    'c': 'c',
+    'h': 'c',
+    'hpp': 'cpp',
+    'cs': 'csharp',
+    'java': 'java',
+    'kt': 'kotlin',
+    'go': 'go',
+    'rs': 'rust',
+    'rb': 'ruby',
+    'php': 'php',
+    'swift': 'swift',
+    'sh': 'bash',
+    'bash': 'bash',
+    'zsh': 'zsh',
+    'ps1': 'powershell',
+    'sql': 'sql',
+    'html': 'html',
+    'htm': 'html',
+    'css': 'css',
+    'scss': 'scss',
+    'less': 'less',
+    'json': 'json',
+    'xml': 'xml',
+    'yaml': 'yaml',
+    'yml': 'yaml',
+    'toml': 'toml',
+    'md': 'markdown',
+    'txt': 'text',
+  };
+  return map[ext.toLowerCase()] || ext.toLowerCase();
 }
 
 interface VersionInfo {

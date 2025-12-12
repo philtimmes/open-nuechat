@@ -48,6 +48,20 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
   },
 
   addMessage: (message: Message) => {
+    const { currentChat, messages: existingMessages } = get();
+    
+    // Validate: Only add messages for the current chat
+    if (message.chat_id && currentChat?.id && message.chat_id !== currentChat.id) {
+      console.warn('[addMessage] Ignoring message for different chat:', message.chat_id, 'current:', currentChat.id);
+      return;
+    }
+    
+    // Validate: Don't add duplicate messages
+    if (existingMessages.some(m => m.id === message.id)) {
+      console.log('[addMessage] Skipping duplicate message:', message.id);
+      return;
+    }
+    
     // Extract artifacts from new message
     const { artifacts: newArtifacts } = extractArtifacts(message.content || '');
     const allNewArtifacts = [...(message.artifacts || []), ...newArtifacts];

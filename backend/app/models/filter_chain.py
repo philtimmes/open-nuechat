@@ -9,7 +9,7 @@ from sqlalchemy import Column, String, Boolean, DateTime, Text, Integer, JSON
 from datetime import datetime, timezone
 import uuid
 
-from app.models.models import Base
+from .base import Base
 
 
 class FilterChain(Base):

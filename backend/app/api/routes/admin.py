@@ -191,6 +191,7 @@ class FeatureFlagsSchema(BaseModel):
     enable_registration: bool = True
     enable_billing: bool = True
     freeforall: bool = False
+    enable_safety_filters: bool = False  # Prompt injection & content moderation filters
 
 
 class TiersSchema(BaseModel):
@@ -415,6 +416,7 @@ async def get_feature_flags(
         enable_registration=await get_system_setting_bool(db, "enable_registration"),
         enable_billing=await get_system_setting_bool(db, "enable_billing"),
         freeforall=await get_system_setting_bool(db, "freeforall"),
+        enable_safety_filters=await get_system_setting_bool(db, "enable_safety_filters"),
     )
 
 
@@ -428,6 +430,7 @@ async def update_feature_flags(
     await set_setting(db, "enable_registration", str(data.enable_registration).lower())
     await set_setting(db, "enable_billing", str(data.enable_billing).lower())
     await set_setting(db, "freeforall", str(data.freeforall).lower())
+    await set_setting(db, "enable_safety_filters", str(data.enable_safety_filters).lower())
     
     await db.commit()
     

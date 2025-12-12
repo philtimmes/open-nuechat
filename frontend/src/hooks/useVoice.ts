@@ -225,13 +225,20 @@ export function useVoice(options: UseVoiceOptions = {}) {
   }, [currentAudio]);
 
   // Stop any current audio playback (both server and local TTS)
-  const stopReading = useCallback(() => {
+  const stopReading = useCallback(async () => {
     console.log('stopReading called');
     
     // Abort any in-flight server TTS request
     if (ttsAbortControllerRef.current) {
       ttsAbortControllerRef.current.abort();
       ttsAbortControllerRef.current = null;
+    }
+    
+    // Cancel any queued backend TTS jobs
+    try {
+      await api.post('/tts/cancel-all');
+    } catch (e) {
+      // Ignore errors - service may not be available
     }
     
     // Stop local TTS (Web Speech API)

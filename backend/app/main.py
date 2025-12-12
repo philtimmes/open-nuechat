@@ -6,6 +6,7 @@ Full-featured LLM chat platform with OAuth2, billing, RAG, real-time streaming, 
 from contextlib import asynccontextmanager
 from pathlib import Path
 import asyncio
+import re
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -56,7 +57,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.28"
+SCHEMA_VERSION = "NC-0.6.29"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -188,6 +189,11 @@ async def run_migrations(conn):
             # New 'last_token_reset_timestamp' will be created automatically with ISO datetime
             ("DELETE FROM system_settings WHERE key = 'last_token_reset_period'", "remove old token reset setting"),
         ],
+        "NC-0.6.29": [
+            # Add enable_safety_filters setting (disabled by default)
+            # This controls prompt injection and content moderation filters
+            ("INSERT INTO system_settings (key, value) VALUES ('enable_safety_filters', 'false')", "enable_safety_filters setting"),
+        ],
     }
     
     # Sort versions and run migrations in order
@@ -218,6 +224,20 @@ async def run_migrations(conn):
                     if column in columns:
                         logger.info(f"  {name}: already exists, skipping")
                         continue
+                
+                # Check if system_settings key already exists
+                if "INSERT" in sql and "system_settings" in sql:
+                    # Extract the key from the INSERT statement
+                    key_match = re.search(r"VALUES\s*\(\s*'([^']+)'", sql)
+                    if key_match:
+                        setting_key = key_match.group(1)
+                        result = await conn.execute(
+                            text("SELECT 1 FROM system_settings WHERE key = :key"),
+                            {"key": setting_key}
+                        )
+                        if result.fetchone():
+                            logger.info(f"  {name}: setting '{setting_key}' already exists, skipping")
+                            continue
                 
                 await conn.execute(text(sql))
                 logger.info(f"  {name}: OK")

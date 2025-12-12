@@ -143,17 +143,21 @@ class LLMService:
         user: User,
         chat: Chat,
         message_id: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> FilterContext:
         """Create a filter context for processing."""
+        metadata = {
+            "user_tier": user.tier.value if user.tier else "free",
+            "user_email": user.email,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
         return FilterContext(
             user_id=str(user.id),
             chat_id=str(chat.id),
             message_id=message_id,
             model=chat.model or settings.LLM_MODEL,
-            metadata={
-                "user_tier": user.tier.value if user.tier else "free",
-                "user_email": user.email,
-            }
+            metadata=metadata,
         )
     
     async def create_message(
@@ -184,9 +188,14 @@ class LLMService:
         
         effective_model = await self._get_effective_model(chat_model)
         
+        # Check if safety filters are enabled (admin setting)
+        from app.services.settings_service import SettingsService
+        safety_filters_enabled = await SettingsService.get_bool(db, "enable_safety_filters")
+        
         # Get filter manager for this chat
         filter_manager = self._get_filter_manager(chat)
-        context = self._create_filter_context(user, chat)
+        extra_metadata = {"safety_filters_disabled": True} if not safety_filters_enabled else None
+        context = self._create_filter_context(user, chat, extra_metadata=extra_metadata)
         
         # === OverrideToLLM: Filter user input before sending to LLM ===
         to_llm_result = await filter_manager.process_to_llm(user_message, context)
@@ -306,6 +315,7 @@ class LLMService:
         parent_id: Optional[str] = None,  # For conversation branching - parent of the assistant message
         cancel_check: Optional[Callable[[], bool]] = None,  # Returns True if generation should be cancelled
         stream_setter: Optional[Callable[[Any], None]] = None,  # Callback to set active stream for cancellation
+        is_file_content: bool = False,  # True when content is user-uploaded file (skip injection filters)
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a message response with prompt-based tool orchestration.
@@ -350,9 +360,23 @@ class LLMService:
         
         effective_model = await self._get_effective_model(chat_model)
         
+        # Check if safety filters are enabled (admin setting)
+        from app.services.settings_service import SettingsService
+        safety_filters_enabled = await SettingsService.get_bool(db, "enable_safety_filters")
+        
         # Get filter manager for this chat
         filter_manager = self._get_filter_manager(chat)
-        context = self._create_filter_context(user, chat)
+        # Pass is_file_content and safety_filters_enabled to control filter behavior
+        extra_metadata = {}
+        if is_file_content:
+            extra_metadata["is_file_content"] = True
+        if not safety_filters_enabled:
+            extra_metadata["safety_filters_disabled"] = True
+        
+        context = self._create_filter_context(
+            user, chat, 
+            extra_metadata=extra_metadata if extra_metadata else None
+        )
         
         # === OverrideToLLM: Filter user input before sending to LLM ===
         to_llm_result = await filter_manager.process_to_llm(user_message, context)
@@ -381,7 +405,11 @@ class LLMService:
             parent_id=parent_id,  # Link to user message for conversation branching
         )
         db.add(assistant_message)
-        await db.flush()
+        # CRITICAL: Commit immediately to ensure message exists before any child messages
+        # are created. Without this, if the user sends another message before streaming
+        # completes, the child would reference a non-existent parent (orphaned message).
+        await db.commit()
+        await db.refresh(assistant_message)
         
         yield {
             "type": "message_start",
@@ -405,9 +433,10 @@ class LLMService:
             filtered_content = ""
             tool_results = []
             
-            # Check if we have search tools available
-            search_tools = [t for t in (tools or []) if 'search' in t.get('name', '').lower() or 'fetch' in t.get('name', '').lower()]
-            has_search = bool(search_tools) and tool_executor is not None
+            # Automatic search disabled - use filter chains for web search orchestration
+            # search_tools = [t for t in (tools or []) if 'search' in t.get('name', '').lower() or 'fetch' in t.get('name', '').lower()]
+            # has_search = bool(search_tools) and tool_executor is not None
+            has_search = False  # Disabled - filter chains handle search orchestration
             
             if has_search:
                 logger.debug(f"Search tools available: {[t.get('name') for t in search_tools]}")

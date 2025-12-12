@@ -206,11 +206,14 @@ def create_stream_start(message_id: str, chat_id: str) -> dict:
     }
 
 
-def create_stream_chunk(message_id: str, content: str) -> dict:
+def create_stream_chunk(message_id: str, content: str, chat_id: Optional[str] = None) -> dict:
     """Create a stream_chunk event"""
+    payload = {"message_id": message_id, "content": content}
+    if chat_id:
+        payload["chat_id"] = chat_id
     return {
         "type": "stream_chunk",
-        "payload": {"message_id": message_id, "content": content}
+        "payload": payload
     }
 
 

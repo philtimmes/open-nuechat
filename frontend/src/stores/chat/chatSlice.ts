@@ -84,10 +84,14 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
   },
 
   setCurrentChat: (chat) => {
+    // Clear ALL state when switching chats to prevent cross-chat contamination
     set({ 
       currentChat: chat, 
       messages: [], 
       streamingContent: '', 
+      streamingToolCall: null,
+      streamingArtifacts: [],
+      isSending: false,
       artifacts: [], 
       selectedArtifact: null, 
       codeSummary: null, 

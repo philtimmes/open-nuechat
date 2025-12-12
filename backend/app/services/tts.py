@@ -185,6 +185,28 @@ class TTSServiceClient:
         except Exception as e:
             logger.error(f"Failed to get queue stats: {e}")
             return {}
+    
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a specific TTS job"""
+        try:
+            response = await self.client.post(f"/tts/cancel/{job_id}")
+            response.raise_for_status()
+            data = response.json()
+            return data.get("status") == "cancelled"
+        except Exception as e:
+            logger.error(f"Failed to cancel job {job_id}: {e}")
+            return False
+    
+    async def cancel_all_jobs(self) -> int:
+        """Cancel all queued TTS jobs"""
+        try:
+            response = await self.client.post("/tts/cancel-all")
+            response.raise_for_status()
+            data = response.json()
+            return data.get("cancelled", 0)
+        except Exception as e:
+            logger.error(f"Failed to cancel all jobs: {e}")
+            return 0
 
 
 # ============ Service wrapper for API routes ============
@@ -282,6 +304,14 @@ class TTSService:
     async def get_queue_stats(self) -> Dict[str, Any]:
         """Get queue statistics"""
         return await self._client.get_queue_stats()
+    
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a specific TTS job"""
+        return await self._client.cancel_job(job_id)
+    
+    async def cancel_all_jobs(self) -> int:
+        """Cancel all queued TTS jobs"""
+        return await self._client.cancel_all_jobs()
     
     def get_backend_name(self) -> str:
         """Get backend name"""

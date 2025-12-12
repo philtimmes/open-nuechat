@@ -40,6 +40,7 @@ interface FeatureFlags {
   enable_registration: boolean;
   enable_billing: boolean;
   freeforall: boolean;
+  enable_safety_filters: boolean;
 }
 
 interface TierConfig {
@@ -1705,6 +1706,20 @@ export default function Admin() {
                         type="checkbox"
                         checked={featureFlags.freeforall}
                         onChange={(e) => setFeatureFlags({ ...featureFlags, freeforall: e.target.checked })}
+                        className="w-5 h-5 rounded"
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between p-3 bg-[var(--color-background)] rounded-lg border-2 border-red-500/30">
+                      <div>
+                        <p className="text-[var(--color-text)] font-medium">🛡️ Safety Filters</p>
+                        <p className="text-xs text-[var(--color-text-secondary)]">Enable prompt injection detection and content moderation filters</p>
+                        <p className="text-xs text-yellow-500/80 mt-1">⚠️ May cause false positives with code files containing patterns like "system:", "user:", etc.</p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={featureFlags.enable_safety_filters}
+                        onChange={(e) => setFeatureFlags({ ...featureFlags, enable_safety_filters: e.target.checked })}
                         className="w-5 h-5 rounded"
                       />
                     </div>

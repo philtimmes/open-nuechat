@@ -81,6 +81,7 @@ class JobStatus(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -338,6 +339,37 @@ class TTSQueueManager:
                 position += 1
         return position
     
+    async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a job. Returns True if cancelled, False if not found or already done."""
+        async with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                return False
+            
+            # Can only cancel queued jobs (processing jobs will finish)
+            if job.status == JobStatus.QUEUED:
+                job.status = JobStatus.CANCELLED
+                job.completed_at = time.time()
+                job.error = "Cancelled by user"
+                logger.info(f"Job {job_id} cancelled")
+                return True
+            
+            return False
+    
+    async def cancel_all_for_user(self) -> int:
+        """Cancel all queued jobs. Returns count cancelled."""
+        cancelled = 0
+        async with self.lock:
+            for job in self.jobs.values():
+                if job.status == JobStatus.QUEUED:
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = time.time()
+                    job.error = "Cancelled by user"
+                    cancelled += 1
+        if cancelled:
+            logger.info(f"Cancelled {cancelled} queued jobs")
+        return cancelled
+    
     async def _worker(self, worker_id: int):
         """Worker task that processes jobs from the queue"""
         logger.info(f"Worker {worker_id} started")
@@ -349,6 +381,12 @@ class TTSQueueManager:
                 job = self.jobs.get(job_id)
                 
                 if not job:
+                    self.queue.task_done()
+                    continue
+                
+                # Skip cancelled jobs
+                if job.status == JobStatus.CANCELLED:
+                    self.queue.task_done()
                     continue
                 
                 # Update status
@@ -394,7 +432,7 @@ class TTSQueueManager:
                 
                 async with self.lock:
                     for job_id, job in self.jobs.items():
-                        if job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+                        if job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
                             if job.completed_at and (now - job.completed_at) > RESULT_TTL_SECONDS:
                                 to_remove.append(job_id)
                     
@@ -687,16 +725,45 @@ async def get_queue_stats():
     processing = sum(1 for j in queue_manager.jobs.values() if j.status == JobStatus.PROCESSING)
     completed = sum(1 for j in queue_manager.jobs.values() if j.status == JobStatus.COMPLETED)
     failed = sum(1 for j in queue_manager.jobs.values() if j.status == JobStatus.FAILED)
+    cancelled = sum(1 for j in queue_manager.jobs.values() if j.status == JobStatus.CANCELLED)
     
     return {
         "queued": queued,
         "processing": processing,
         "completed": completed,
         "failed": failed,
+        "cancelled": cancelled,
         "total_jobs": len(queue_manager.jobs),
         "max_queue": MAX_QUEUE_SIZE,
         "max_concurrent": MAX_CONCURRENT
     }
+
+
+@app.post("/tts/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    """Cancel a specific TTS job"""
+    if not queue_manager:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    
+    cancelled = await queue_manager.cancel_job(job_id)
+    
+    if cancelled:
+        return {"status": "cancelled", "job_id": job_id}
+    else:
+        job = queue_manager.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"status": job.status.value, "job_id": job_id, "message": "Job already processing or completed"}
+
+
+@app.post("/tts/cancel-all")
+async def cancel_all_jobs():
+    """Cancel all queued TTS jobs"""
+    if not queue_manager:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    
+    count = await queue_manager.cancel_all_for_user()
+    return {"status": "ok", "cancelled": count}
 
 
 if __name__ == "__main__":

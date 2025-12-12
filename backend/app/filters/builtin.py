@@ -74,6 +74,9 @@ class PromptInjectionToLLM(OverrideToLLM):
     Detects and prevents prompt injection attempts.
     
     Priority: HIGHEST (security critical)
+    
+    Note: Skipped for user-uploaded file content (is_file_content=True in context)
+    since code files legitimately contain patterns like "system:", "user:", etc.
     """
     
     INJECTION_PATTERNS = [
@@ -94,6 +97,16 @@ class PromptInjectionToLLM(OverrideToLLM):
         self._patterns = [re.compile(p, re.IGNORECASE) for p in self.INJECTION_PATTERNS]
     
     async def process(self, content: str, context: FilterContext) -> FilterResult:
+        # Skip if safety filters are disabled by admin
+        if context.metadata.get("safety_filters_disabled", False):
+            return FilterResult.passthrough(content)
+        
+        # Skip injection detection for user-uploaded file content
+        # Files legitimately contain patterns like "system:", "user:", "#include <s>" etc.
+        if context.metadata.get("is_file_content", False):
+            logger.debug(f"Skipping prompt injection check for file content (user {context.user_id})")
+            return FilterResult.passthrough(content)
+        
         severity_score = 0
         detected_patterns = []
         
@@ -128,6 +141,9 @@ class ContentModerationToLLM(OverrideToLLM):
     Filters inappropriate or harmful content from user messages.
     
     Priority: HIGH (after rate limit and injection detection)
+    
+    Note: Skipped for user-uploaded file content (is_file_content=True in context)
+    since code files may legitimately discuss security concepts.
     """
     
     DEFAULT_BLOCKED_PATTERNS = [
@@ -156,6 +172,15 @@ class ContentModerationToLLM(OverrideToLLM):
         return self
     
     async def process(self, content: str, context: FilterContext) -> FilterResult:
+        # Skip if safety filters are disabled by admin
+        if context.metadata.get("safety_filters_disabled", False):
+            return FilterResult.passthrough(content)
+        
+        # Skip content moderation for user-uploaded file content
+        if context.metadata.get("is_file_content", False):
+            logger.debug(f"Skipping content moderation for file content (user {context.user_id})")
+            return FilterResult.passthrough(content)
+        
         content_lower = content.lower()
         for word in self._blocked_words:
             if word in content_lower:

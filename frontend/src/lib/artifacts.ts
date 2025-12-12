@@ -14,10 +14,18 @@ import type { Artifact } from '../types';
 // content
 // ```
 //
-// Pattern 3: XML-like format
+// Pattern 3: XML-like artifact tags
 // <artifact title="Title" type="code" language="python">
 // content
 // </artifact>
+//
+// Pattern 4: XML-style filename tags (for naive LLM output)
+// <Menu.cpp>content</Menu.cpp>
+// <artifact=Menu.cpp>content</artifact>
+// <file:src/utils.py>content</file>
+// <code name="app.js">content</code>
+//
+// Pattern 5: Large code blocks (500+ chars) auto-converted to artifacts
 
 let artifactCounter = 0;
 
@@ -238,7 +246,7 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
   // Parse code blocks with proper nesting support
   const codeBlocks = parseCodeBlocks(content);
   
-  // Process file path + code blocks as artifacts
+  // Pattern 1: File path + code blocks (e.g., "src/file.ts" followed by ```ts)
   for (const block of codeBlocks) {
     if (block.filepath) {
       const filename = block.filepath.split('/').pop() || block.filepath;
@@ -259,7 +267,7 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
     }
   }
   
-  // Pattern 1: ```artifact:title:type format
+  // Pattern 2: ```artifact:title:type format
   const codeBlockPattern = /```artifact:([^:\n]+):(\w+)(?::(\w+))?\n([\s\S]*?)```/g;
   let match;
   
@@ -280,7 +288,7 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
     cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${title.trim()}]`);
   }
   
-  // Pattern 2: XML-like <artifact> tags
+  // Pattern 3: XML-like <artifact> tags
   const xmlPattern = /<artifact\s+(?:title="([^"]+)")?\s*(?:type="([^"]+)")?\s*(?:language="([^"]+)")?\s*(?:filename="([^"]+)")?[^>]*>([\s\S]*?)<\/artifact>/gi;
   
   while ((match = xmlPattern.exec(content)) !== null) {
@@ -303,7 +311,92 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
     cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${artTitle}]`);
   }
   
-  // Pattern 3: Detect large code blocks and convert to artifacts
+  // Pattern 4: XML-style filename tags (multiple variations for naive LLM output)
+  // Supports:
+  //   <Menu.cpp>...</Menu.cpp>           - filename as tag
+  //   <artifact=Menu.cpp>...</artifact>  - artifact tag with = filename
+  //   <artifact:Menu.cpp>...</artifact>  - artifact tag with : filename
+  //   <file=Menu.cpp>...</file>          - file tag with = filename
+  //   <code=Menu.cpp>...</code>          - code tag with = filename
+  //   <artifact name="Menu.cpp">...</artifact> - attribute style
+  
+  // Pattern 4a: Direct filename as tag: <Menu.cpp>...</Menu.cpp>
+  const xmlFilenamePattern = /<([A-Za-z_][\w\-./]*\.\w+)>\s*([\s\S]*?)\s*<\/\1>/g;
+  
+  while ((match = xmlFilenamePattern.exec(content)) !== null) {
+    const [fullMatch, tagName, code] = match;
+    if (!cleanContent.includes(fullMatch)) continue;
+    
+    const filepath = tagName;
+    const filename = filepath.split('/').pop() || filepath;
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    const language = extToLang(ext);
+    const type = langToType(language);
+    
+    artifacts.push({
+      id: `artifact-${Date.now()}-${++artifactCounter}`,
+      title: filename,
+      type,
+      language,
+      content: code.trim(),
+      filename: filepath,
+      created_at: new Date().toISOString(),
+    });
+    cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${filename}]`);
+  }
+  
+  // Pattern 4b: <artifact=filename> or <file=filename> or <code=filename> style
+  // Closing tag can be </artifact>, </file>, </code>, or </filename>
+  const xmlAttrPattern = /<(artifact|file|code)[=:]([A-Za-z_][\w\-./]*\.\w+)>\s*([\s\S]*?)\s*<\/(?:\1|\2)>/gi;
+  
+  while ((match = xmlAttrPattern.exec(content)) !== null) {
+    const [fullMatch, tagType, tagFilename, code] = match;
+    if (!cleanContent.includes(fullMatch)) continue;
+    
+    const filepath = tagFilename;
+    const filename = filepath.split('/').pop() || filepath;
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    const language = extToLang(ext);
+    const type = langToType(language);
+    
+    artifacts.push({
+      id: `artifact-${Date.now()}-${++artifactCounter}`,
+      title: filename,
+      type,
+      language,
+      content: code.trim(),
+      filename: filepath,
+      created_at: new Date().toISOString(),
+    });
+    cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${filename}]`);
+  }
+  
+  // Pattern 4c: <artifact name="filename"> or <file name="filename"> attribute style
+  const xmlNameAttrPattern = /<(artifact|file|code)\s+(?:name|filename|file|path)=["']([A-Za-z_][\w\-./]*\.\w+)["'][^>]*>\s*([\s\S]*?)\s*<\/\1>/gi;
+  
+  while ((match = xmlNameAttrPattern.exec(content)) !== null) {
+    const [fullMatch, tagType, tagFilename, code] = match;
+    if (!cleanContent.includes(fullMatch)) continue;
+    
+    const filepath = tagFilename;
+    const filename = filepath.split('/').pop() || filepath;
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    const language = extToLang(ext);
+    const type = langToType(language);
+    
+    artifacts.push({
+      id: `artifact-${Date.now()}-${++artifactCounter}`,
+      title: filename,
+      type,
+      language,
+      content: code.trim(),
+      filename: filepath,
+      created_at: new Date().toISOString(),
+    });
+    cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${filename}]`);
+  }
+  
+  // Pattern 5: Detect large code blocks and convert to artifacts
   // Use the parsed blocks to handle this correctly
   for (const block of codeBlocks) {
     if (!block.filepath && block.code.length >= 500) {

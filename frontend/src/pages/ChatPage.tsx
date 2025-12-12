@@ -239,10 +239,33 @@ function buildConversationPath(
     }));
   }
   
-  // Tree mode: build children map and walk the tree
+  // Tree mode: build children map
+  // First, create a set of all message IDs for orphan detection
+  const messageIds = new Set(messages.map(m => m.id));
+  
+  // Sort messages by created_at for orphan re-parenting
+  const sortedByTime = [...messages].sort((a, b) => 
+    new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+  );
+  
+  // Detect and fix orphaned messages (messages whose parent doesn't exist)
+  // Re-parent them to the chronologically previous message for natural flow
+  const fixedMessages = sortedByTime.map((msg, index) => {
+    if (msg.parent_id && !messageIds.has(msg.parent_id)) {
+      // Find the chronologically previous message to use as new parent
+      let newParentId: string | null = null;
+      if (index > 0) {
+        newParentId = sortedByTime[index - 1].id;
+      }
+      console.warn(`[buildConversationPath] Orphaned message detected: ${msg.id} has missing parent ${msg.parent_id}, re-parenting to ${newParentId || 'root'}`);
+      return { ...msg, parent_id: newParentId };
+    }
+    return msg;
+  });
+  
   const childrenByParent = new Map<string, Message[]>();
   
-  for (const msg of messages) {
+  for (const msg of fixedMessages) {
     const parentKey = msg.parent_id || 'root';
     if (!childrenByParent.has(parentKey)) {
       childrenByParent.set(parentKey, []);
@@ -330,6 +353,8 @@ const MessageList = memo(function MessageList({
   // Track message IDs we knew about at last render to detect truly new messages
   const knownMessageIds = useRef<Set<string>>(new Set());
   const isInitialized = useRef(false);
+  const lastChatIdRef = useRef<string | undefined>(undefined);
+  const hasLoadedInitialVersions = useRef(false);
   
   // Build conversation path
   const path = useMemo(() => buildConversationPath(messages, selectedVersions), [messages, selectedVersions]);
@@ -344,12 +369,29 @@ const MessageList = memo(function MessageList({
     }
   }, [currentLeafAssistant, onCurrentLeafChange]);
   
-  // Re-initialize when chat changes
+  // Re-initialize when chat changes OR when initialSelectedVersions loads for current chat
   useEffect(() => {
-    setSelectedVersions(initialSelectedVersions || {});
-    knownMessageIds.current = new Set(messages.map(m => m.id));
-    isInitialized.current = true;
-  }, [chatId]); // Only reset on chat change, not on initialSelectedVersions change
+    const chatChanged = chatId !== lastChatIdRef.current;
+    
+    if (chatChanged) {
+      // Chat changed - reset everything
+      lastChatIdRef.current = chatId;
+      hasLoadedInitialVersions.current = false;
+      setSelectedVersions(initialSelectedVersions || {});
+      knownMessageIds.current = new Set(messages.map(m => m.id));
+      isInitialized.current = true;
+      
+      if (initialSelectedVersions && Object.keys(initialSelectedVersions).length > 0) {
+        hasLoadedInitialVersions.current = true;
+      }
+    } else if (!hasLoadedInitialVersions.current && initialSelectedVersions && 
+               Object.keys(initialSelectedVersions).length > 0) {
+      // Same chat but initialSelectedVersions just loaded (was undefined, now has data)
+      console.log('[MessageList] Loading saved selected versions:', initialSelectedVersions);
+      setSelectedVersions(initialSelectedVersions);
+      hasLoadedInitialVersions.current = true;
+    }
+  }, [chatId, initialSelectedVersions, messages]); // Include messages for knownMessageIds init
   
   // Initialize known messages on first load
   useEffect(() => {
@@ -899,20 +941,45 @@ export default function ChatPage() {
   }, [currentChat?.title, appName, chatId]);
   
   const handleSendMessage = async (content: string, _attachments?: File[]) => {
-    let targetChatId = currentChat?.id;
+    // Get currentChat from store directly to avoid stale closure issues
+    const { currentChat: storeCurrentChat, messages: storeMessages } = useChatStore.getState();
+    let targetChatId = storeCurrentChat?.id;
+    
+    console.log('[handleSendMessage] Starting:', {
+      targetChatId,
+      totalMessagesInStore: storeMessages.length,
+      content: content.substring(0, 50)
+    });
     
     // Calculate parentId directly from store to avoid stale closure issues
     // This is critical for voice mode which calls via ref
     let parentId: string | null = null;
     if (targetChatId) {
-      const { messages: storeMessages } = useChatStore.getState();
-      // Filter to current chat and sort by created_at
-      const chatMessages = storeMessages
-        .filter(m => m.chat_id === targetChatId)
-        .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-      // Find last assistant message - that's the leaf we continue from
-      const lastAssistant = [...chatMessages].reverse().find(m => m.role === 'assistant');
+      // Filter to current chat - CRITICAL for preventing cross-chat parent_id issues
+      const chatMessages = storeMessages.filter(m => m.chat_id === targetChatId);
+      
+      console.log('[handleSendMessage] Filtered messages:', {
+        totalInStore: storeMessages.length,
+        forThisChat: chatMessages.length,
+        targetChatId
+      });
+      
+      if (chatMessages.length !== storeMessages.length) {
+        // Log messages that don't belong to this chat - this helps debug cross-chat contamination
+        const otherChatMessages = storeMessages.filter(m => m.chat_id !== targetChatId);
+        console.warn('[handleSendMessage] Found messages from other chats:', 
+          otherChatMessages.map(m => ({ id: m.id?.substring(0, 8), chat_id: m.chat_id?.substring(0, 8) }))
+        );
+      }
+      
+      // Sort by created_at and find last assistant message
+      const sortedMessages = [...chatMessages].sort((a, b) => 
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+      const lastAssistant = [...sortedMessages].reverse().find(m => m.role === 'assistant');
       parentId = lastAssistant?.id || null;
+      
+      console.log('[handleSendMessage] Calculated parentId:', parentId?.substring(0, 8) || 'null');
     }
     
     // Create new chat if none exists
@@ -924,6 +991,7 @@ export default function ChatPage() {
       window.history.pushState({}, '', `/chat/${newChat.id}`);
       // New chat has no parent - first message is root
       parentId = null;
+      console.log('[handleSendMessage] Created new chat:', targetChatId);
     }
     
     // Pass the current leaf assistant ID as parent_id for linear conversation
@@ -1315,6 +1383,25 @@ export default function ChatPage() {
         onRetry={handleVoiceModeRetry}
         debugInfo={voiceModeDebugInfo}
       />
+      
+      {/* TTS Stop Overlay - tap anywhere to stop TTS (only when reading outside voice mode) */}
+      {isReading && !isVoiceMode && (
+        <div 
+          className="fixed inset-0 z-[90] cursor-pointer"
+          onClick={stopReading}
+          onTouchEnd={(e) => {
+            e.preventDefault();
+            stopReading();
+          }}
+          style={{ touchAction: 'none' }}
+        >
+          {/* Visual indicator at bottom */}
+          <div className="absolute bottom-24 left-1/2 -translate-x-1/2 px-4 py-2 bg-green-500/90 text-white rounded-full shadow-lg flex items-center gap-2 animate-pulse">
+            <div className="w-2 h-2 rounded-full bg-white animate-pulse"></div>
+            <span className="text-sm font-medium">Speaking... Tap anywhere to stop</span>
+          </div>
+        </div>
+      )}
       
       <div className="flex h-full">
       {/* Main chat area */}

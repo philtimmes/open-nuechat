@@ -27,6 +27,7 @@ backend/app/
 │   ├── billing.py       # TokenUsage
 │   ├── tool.py          # Tool, ToolUsage
 │   ├── filter.py        # ChatFilter
+│   ├── filter_chain.py  # FilterChain (JSON-based chain definitions)
 │   ├── upload.py        # UploadedFile, UploadedArchive
 │   └── settings.py      # SystemSetting, Theme
 ├── services/
@@ -38,6 +39,7 @@ backend/app/
 │   ├── stt.py           # Speech-to-text
 │   ├── token_manager.py # JWT blacklisting
 │   ├── rate_limiter.py  # Token bucket rate limiting
+│   ├── validators.py    # Input validation utilities
 │   ├── zip_processor.py # Secure zip extraction
 │   └── microservice_utils.py  # Shared microservice utilities
 ├── filters/             # Bidirectional stream filters
@@ -173,7 +175,7 @@ ServerMessage = Union[...]
 
 # Helper functions
 def create_stream_start(message_id, chat_id) -> dict
-def create_stream_chunk(message_id, content) -> dict
+def create_stream_chunk(message_id, content, chat_id?) -> dict
 def create_stream_end(message_id, chat_id, input_tokens, output_tokens, parent_id?) -> dict
 def create_stream_error(message_id, error) -> dict
 def create_error(message, code?) -> dict
@@ -197,9 +199,13 @@ def should_rotate_refresh_token(issued_at: datetime) -> bool
 def get_token_expiry(token_type: str = "access") -> datetime
 ```
 
-### app/services/rate_limiter.py (NEW)
+### app/services/rate_limiter.py (UPDATED)
 
 ```python
+class RateLimitExceeded(Exception):
+  retry_after: int
+  message: str
+
 @dataclass
 class RateLimitConfig:
   requests: int      # Per window
@@ -209,6 +215,8 @@ class RateLimitConfig:
 class TokenBucketRateLimiter:
   async def check(key: str, config: RateLimitConfig, cost: int = 1) -> Tuple[bool, Dict[str, int]]
     # Returns: (allowed, {X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After?})
+  async def check_rate_limit(action: str, identifier: str, cost: int = 1) -> None
+    # Raises RateLimitExceeded if limit exceeded
   async def reset(key: str)  # For testing
 
 rate_limiter = TokenBucketRateLimiter()  # Global instance
@@ -228,7 +236,7 @@ async def check_rate_limit(user_id: str, action: str, cost: int = 1) -> Tuple[bo
 async def check_rate_limit_ip(ip_address: str, action: str, cost: int = 1) -> Tuple[bool, Dict[str, int]]
 ```
 
-### app/core/logging.py (NEW)
+### app/core/logging.py (UPDATED)
 
 ```python
 class StructuredLogger:
@@ -239,17 +247,20 @@ class StructuredLogger:
   def debug(message: str, **fields)
   def with_fields(**fields) -> StructuredLogger  # Create child logger
 
+def get_logger(name: str) -> StructuredLogger
+  # Primary way to get a logger instance
+
 @contextmanager
-def log_duration(logger: StructuredLogger, operation: str, **extra_fields)
+def log_duration(operation: str, logger?: StructuredLogger, **extra_fields)
   # Context manager for timing operations
 
 def log_llm_request(
-  logger, model, input_tokens, output_tokens, duration_ms,
-  user_id, chat_id, filters_applied?, tool_calls?, error?, streaming?
+  model, input_tokens, output_tokens, duration_ms,
+  user_id, chat_id, filters_applied?, tool_calls?, error?, streaming?, logger?
 )
 
-def log_websocket_event(logger, event_type, user_id, chat_id?, **extra_fields)
-def log_security_event(logger, event_type, user_id?, ip_address?, success?, **extra_fields)
+def log_websocket_event(event_type, user_id, chat_id?, logger?, **extra_fields)
+def log_security_event(event_type, user_id?, ip_address?, success?, logger?, **extra_fields)
 ```
 
 ### app/services/zip_processor.py (SECURITY UPDATED)
@@ -285,6 +296,43 @@ def validate_zip_archive(zf: zipfile.ZipFile) -> None
 class ZipProcessor:
   def process(self, zip_data: bytes) -> ZipManifest
     # Now calls validate_zip_archive() first
+```
+
+### app/services/validators.py (INTEGRATED)
+
+```python
+# File size constants
+MAX_AVATAR_SIZE = 5 * 1024 * 1024   # 5 MB
+MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_ZIP_SIZE = 100 * 1024 * 1024   # 100 MB
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+# Allowed extensions
+ALLOWED_IMAGE_EXTENSIONS: Set[str]
+ALLOWED_DOCUMENT_EXTENSIONS: Set[str]
+ALLOWED_ARCHIVE_EXTENSIONS: Set[str]
+
+class FileValidationError(Exception):
+  message: str
+  details: dict
+
+def validate_file_extension(filename: str, allowed: Set[str], category: str) -> Tuple[str, str]
+  # Returns (basename, extension) or raises FileValidationError
+
+def validate_file_size(size: int, max_size: int, category: str) -> None
+  # Raises FileValidationError if size > max_size
+
+def is_dangerous_file(filename: str) -> bool
+  # Checks against DANGEROUS_PATTERNS (.exe, .dll, .bat, etc.)
+
+# Text validators (available but not yet integrated)
+def sanitize_string(s: str, max_length: int, strip_html: bool) -> str
+def validate_username(username: str) -> str
+def validate_email(email: str) -> str
+def validate_slug(slug: str) -> str
+def validate_password(password: str, min_length: int) -> str
+def validate_hex_color(color: str) -> str
+def validate_url(url: str, allowed_schemes: Set[str]) -> str
 ```
 
 ---
