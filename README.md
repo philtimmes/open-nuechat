@@ -32,27 +32,54 @@ cp .env.example .env
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Open-NueChat                                │
-├─────────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐    ┌─────────────────────────────────────────┐    │
-│  │   React     │    │              FastAPI Backend            │    │
-│  │  Frontend   │◄──►│  ┌─────────┐ ┌─────────┐ ┌──────────┐  │    │
-│  │  (Vite)     │    │  │  Auth   │ │  Chat   │ │   RAG    │  │    │
-│  └─────────────┘    │  │ Service │ │ Service │ │ Service  │  │    │
-│                     │  └────┬────┘ └────┬────┘ └────┬─────┘  │    │
-│                     │       │           │           │        │    │
-│                     │  ┌────▼───────────▼───────────▼─────┐  │    │
-│                     │  │           SQLite + FAISS         │  │    │
-│                     │  └──────────────────────────────────┘  │    │
-│                     └─────────────────────────────────────────┘    │
-│                                       │                            │
-│  ┌─────────────┐    ┌─────────────┐   │   ┌─────────────────────┐  │
-│  │ TTS Service │    │ Image Gen   │   │   │    LLM Backend      │  │
-│  │  (Kokoro)   │    │ (Diffusers) │   └──►│ (Ollama/vLLM/etc.)  │  │
-│  └─────────────┘    └─────────────┘       └─────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    %% ===== External LLMs =====
+    subgraph EXT[LLM Backend - External]
+        Ollama[Ollama]
+        vLLM[vLLM]
+        OpenAI[OpenAI-Compatible]
+    end
+
+    %% ===== Frontend =====
+    FE[React Frontend - Vite<br/>• Chat UI<br/>• Voice Mode<br/>• Artifacts<br/>• Documents<br/>• Admin Panel<br/>• Version Trees]
+
+    %% ===== Backend =====
+    API[FastAPI]
+    Auth[Auth Service<br/>JWT / OAuth]
+
+    %% ===== LLM Core =====
+    LLM[LLM Service<br/>• Streaming<br/>• History Compression<br/>• Tool Calls]
+
+    %% ===== Filters =====
+    Filter[Filter System<br/>• Chains<br/>• Injection Detection<br/>• Web Search]
+
+    %% ===== RAG =====
+    RAG[RAG Service<br/>• Documents<br/>• Knowledge DB<br/>• DOCX / XLSX / RTF]
+    Store[Storage<br/>• SQLite<br/>• FAISS Vectors]
+
+    %% ===== Optional Microservices =====
+    subgraph MS[Optional Microservices]
+        TTS[TTS]
+        STT[STT]
+        IMG[Image Gen]
+    end
+
+    %% ===== Connections =====
+    FE <--> |WebSocket / REST| API
+    API --> Auth
+    API --> LLM
+
+    EXT --> API
+
+    LLM --> Filter
+    Filter --> RAG
+
+    TTS --> RAG
+    STT --> RAG
+    IMG --> RAG
+
+    RAG --> Store
 ```
 
 ---
@@ -62,7 +89,7 @@ cp .env.example .env
 | Category | Features |
 |----------|----------|
 | 🤖 **Custom GPTs** | Create AI assistants with custom prompts, attach knowledge bases, publish to marketplace |
-| 📚 **Knowledge Bases** | RAG with local embeddings, FAISS vector search, 40+ file types supported |
+| 📚 **Knowledge Bases** | RAG with local embeddings, FAISS vector search, 50+ file types including DOCX/XLSX/RTF |
 | 💬 **Real-time Chat** | WebSocket streaming, conversation branching, retry/regenerate, zip file uploads |
 | 🎙️ **Voice** | TTS (Kokoro), STT (Whisper), hands-free conversation mode |
 | 🖼️ **Image Gen** | Integrated diffusion model, queue-based generation |
@@ -118,7 +145,7 @@ cp .env.example .env
 
 ### 📚 Knowledge Bases (RAG)
 - Create personal or shared knowledge stores
-- Upload documents: PDF, TXT, MD, JSON, CSV, DOCX, and 40+ file types
+- Upload documents: PDF, TXT, MD, JSON, CSV, DOCX, XLSX, RTF, and 50+ file types
 - Local embeddings using sentence-transformers (no external API)
 - FAISS vector search with GPU acceleration (ROCm, CUDA, or CPU)
 - Configurable chunk size and overlap
@@ -540,14 +567,16 @@ For detailed instructions on using Open-NueChat features, see **[USAGE.md](USAGE
 
 ## Schema Version
 
-**Current: NC-0.6.28**
+**Current: NC-0.6.32**
 
 The database schema is automatically migrated on startup.
 
-### Recent Changes (NC-0.6.28)
-- **Security**: Enhanced zip file validation, rate limiting, JWT token blacklisting
-- **Architecture**: Models split into domain modules, chat store split into slices
-- **DX**: Keyboard shortcuts, structured logging, improved error handling
+### Recent Changes (NC-0.6.32)
+- **History Compression**: Automatic summarization of long conversations to manage context
+- **Office Documents**: Support for DOCX, XLSX, XLS, RTF file ingestion
+- **Version Trees**: Fixed branch selection to persist across sessions
+- **TTS Controls**: Tap-to-stop overlay for speech playback
+- **Safety Filters**: Admin toggle for prompt injection/content moderation
 
 ---
 
