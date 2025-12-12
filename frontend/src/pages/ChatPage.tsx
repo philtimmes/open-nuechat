@@ -355,6 +355,7 @@ const MessageList = memo(function MessageList({
   const isInitialized = useRef(false);
   const lastChatIdRef = useRef<string | undefined>(undefined);
   const hasLoadedInitialVersions = useRef(false);
+  const messagesLoadedRef = useRef(false);  // Track if initial messages have loaded
   
   // Build conversation path
   const path = useMemo(() => buildConversationPath(messages, selectedVersions), [messages, selectedVersions]);
@@ -377,9 +378,10 @@ const MessageList = memo(function MessageList({
       // Chat changed - reset everything
       lastChatIdRef.current = chatId;
       hasLoadedInitialVersions.current = false;
+      messagesLoadedRef.current = false;  // Reset - messages need to load fresh
       setSelectedVersions(initialSelectedVersions || {});
-      knownMessageIds.current = new Set(messages.map(m => m.id));
-      isInitialized.current = true;
+      // DON'T initialize knownMessageIds yet - wait for messages to actually load
+      isInitialized.current = false;
       
       if (initialSelectedVersions && Object.keys(initialSelectedVersions).length > 0) {
         hasLoadedInitialVersions.current = true;
@@ -391,19 +393,24 @@ const MessageList = memo(function MessageList({
       setSelectedVersions(initialSelectedVersions);
       hasLoadedInitialVersions.current = true;
     }
-  }, [chatId, initialSelectedVersions, messages]); // Include messages for knownMessageIds init
+  }, [chatId, initialSelectedVersions]);
   
-  // Initialize known messages on first load
+  // Initialize known messages ONLY when messages actually load (not empty)
   useEffect(() => {
-    if (!isInitialized.current) {
+    // Wait for messages to actually load (not empty array)
+    if (messages.length > 0 && !messagesLoadedRef.current) {
+      console.log('[MessageList] Initial messages loaded:', messages.length);
       knownMessageIds.current = new Set(messages.map(m => m.id));
+      messagesLoadedRef.current = true;
       isInitialized.current = true;
     }
   }, [messages]);
   
   // Auto-select ONLY for messages created during this session (retry/edit)
+  // This should NOT run during initial load
   useEffect(() => {
-    if (!isInitialized.current) return;
+    // Don't run until initial messages have loaded
+    if (!messagesLoadedRef.current || !isInitialized.current) return;
     
     // Find messages we haven't seen before
     const newMessages = messages.filter(m => !knownMessageIds.current.has(m.id));
