@@ -89,6 +89,8 @@ class ChatResponse(BaseModel):
     id: str
     title: str
     model: str
+    assistant_id: Optional[str] = None
+    assistant_name: Optional[str] = None
     system_prompt: Optional[str]
     is_shared: bool
     total_input_tokens: int

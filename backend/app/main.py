@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.34"
+SCHEMA_VERSION = "NC-0.6.35"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -215,6 +215,11 @@ async def run_migrations(conn):
         "NC-0.6.34": [
             # Add artifacts column to messages for persisting extracted code artifacts with timestamps
             ("ALTER TABLE messages ADD COLUMN artifacts JSON", "messages.artifacts"),
+        ],
+        "NC-0.6.35": [
+            # Add assistant_id and assistant_name to chats for Custom GPT association
+            ("ALTER TABLE chats ADD COLUMN assistant_id VARCHAR(36)", "chats.assistant_id"),
+            ("ALTER TABLE chats ADD COLUMN assistant_name VARCHAR(255)", "chats.assistant_name"),
         ],
     }
     

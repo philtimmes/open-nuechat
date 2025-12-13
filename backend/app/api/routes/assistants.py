@@ -977,6 +977,8 @@ async def start_conversation(
         title=f"Chat with {assistant.name}",
         model=assistant.model,
         system_prompt=assistant.system_prompt,
+        assistant_id=assistant.id,
+        assistant_name=assistant.name,
     )
     
     db.add(chat)

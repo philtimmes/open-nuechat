@@ -1428,7 +1428,16 @@ export default function ChatPage() {
                 title="Change model"
               >
                 <span className="truncate max-w-[120px]">
-                  {currentChat?.model ? getModelDisplayName(currentChat.model) : 'Select Model'}
+                  {(() => {
+                    // Check if chat is using a Custom GPT
+                    if (currentChat?.assistant_id) {
+                      // Use stored name first, then lookup in subscribed
+                      if (currentChat.assistant_name) return currentChat.assistant_name;
+                      const gpt = subscribedAssistants.find(a => a.assistant_id === currentChat.assistant_id);
+                      if (gpt) return gpt.name;
+                    }
+                    return currentChat?.model ? getModelDisplayName(currentChat.model) : 'Select Model';
+                  })()}
                 </span>
                 <svg className={`w-3 h-3 transition-transform ${showModelSelector ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -1474,14 +1483,14 @@ export default function ChatPage() {
                           key={assistant.id}
                           onClick={() => handleModelChange(assistant.id)}
                           className={`w-full px-3 py-2 text-left text-sm hover:bg-[var(--color-background)] flex items-center justify-between ${
-                            currentChat?.model === assistant.id ? 'text-[var(--color-primary)]' : 'text-[var(--color-text)]'
+                            currentChat?.assistant_id === assistant.assistant_id ? 'text-[var(--color-primary)]' : 'text-[var(--color-text)]'
                           }`}
                         >
                           <span className="flex items-center gap-2 truncate">
                             <span>{assistant.icon || 'AI'}</span>
                             <span className="truncate">{assistant.name}</span>
                           </span>
-                          {currentChat?.model === assistant.id && (
+                          {currentChat?.assistant_id === assistant.assistant_id && (
                             <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                               <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                             </svg>

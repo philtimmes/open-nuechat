@@ -35,6 +35,10 @@ class Chat(Base):
     model = Column(String(100), default="claude-sonnet-4-20250514")
     system_prompt = Column(Text, nullable=True)
     
+    # Custom GPT / Assistant association (no FK constraint to avoid circular dependency)
+    assistant_id = Column(String(36), nullable=True)
+    assistant_name = Column(String(255), nullable=True)  # Denormalized for display
+    
     # Chat type
     is_shared = Column(Boolean, default=False)  # For client-to-client chat
     

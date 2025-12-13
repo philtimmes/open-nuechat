@@ -22,6 +22,8 @@ export interface Chat {
   id: string;
   title: string;
   model: string;
+  assistant_id?: string;  // Custom GPT association
+  assistant_name?: string;  // Custom GPT name (denormalized)
   system_prompt?: string;
   is_shared: boolean;
   created_at: string;
