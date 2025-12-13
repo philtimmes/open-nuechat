@@ -19,6 +19,8 @@ interface SharedChatData {
   id: string;
   title: string;
   model: string;
+  assistant_id?: string;
+  assistant_name?: string;
   created_at: string;
   messages: SharedMessage[];
 }
@@ -29,7 +31,7 @@ export default function SharedChat() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
-  const { config, loadConfig } = useBrandingStore();
+  const { config, loadConfig, isLoaded: brandingLoaded } = useBrandingStore();
   
   useEffect(() => {
     loadConfig();
@@ -64,8 +66,11 @@ export default function SharedChat() {
   }, [shareId]);
   
   const appName = config?.app_name || 'Open-NueChat';
+  // Use chat's assistant_name (Custom GPT name) first, then model name
+  const assistantDisplayName = chat?.assistant_name || chat?.model || 'Assistant';
   
-  if (loading) {
+  // Wait for both chat and branding to load
+  if (loading || !brandingLoaded) {
     return (
       <div className="min-h-screen bg-[var(--color-background)] flex items-center justify-center">
         <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
@@ -121,7 +126,7 @@ export default function SharedChat() {
         <div className="max-w-4xl mx-auto">
           <h1 className="text-lg font-medium text-[var(--color-text)]">{chat.title}</h1>
           <p className="text-xs text-[var(--color-text-secondary)]">
-            {new Date(chat.created_at).toLocaleDateString()} • {chat.model}
+            {new Date(chat.created_at).toLocaleDateString()} • {assistantDisplayName}
           </p>
         </div>
       </div>
@@ -145,7 +150,7 @@ export default function SharedChat() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-sm font-medium text-[var(--color-text)]">
-                      {message.role === 'user' ? 'User' : chat.model}
+                      {message.role === 'user' ? 'User' : assistantDisplayName}
                     </span>
                     {message.output_tokens && (
                       <span className="text-xs text-[var(--color-text-secondary)]">

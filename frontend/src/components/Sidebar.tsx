@@ -285,6 +285,21 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
           </Link>
           
           <Link
+            to="/vibe"
+            onClick={handleNavClick}
+            className={`flex items-center gap-3 px-3 py-3 md:py-2 rounded-lg text-base md:text-sm transition-colors ${
+              isActive('/vibe')
+                ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-zinc-700/30'
+            }`}
+          >
+            <svg className="w-6 h-6 md:w-5 md:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+            </svg>
+            Vibe Code
+          </Link>
+          
+          <Link
             to="/documents"
             onClick={handleNavClick}
             className={`flex items-center gap-3 px-3 py-3 md:py-2 rounded-lg text-base md:text-sm transition-colors ${

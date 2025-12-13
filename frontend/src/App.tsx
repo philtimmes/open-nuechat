@@ -18,6 +18,7 @@ import CustomGPTs from './pages/CustomGPTs';
 import SharedChat from './pages/SharedChat';
 import OAuthCallback from './pages/OAuthCallback';
 import AgentFlows from './pages/AgentFlows';
+import VibeCode from './pages/VibeCode';
 
 // Components
 import Layout from './components/Layout';
@@ -230,6 +231,7 @@ function App() {
                     <Route path="/admin" element={<Admin />} />
                     <Route path="/gpts" element={<CustomGPTs />} />
                     <Route path="/agents" element={<AgentFlows />} />
+                    <Route path="/vibe" element={<VibeCode />} />
                   </Routes>
                 </Layout>
               </WebSocketProvider>

@@ -598,7 +598,16 @@ class RAGService:
         document_ids: Optional[List[str]] = None,
         top_k: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Search for relevant chunks using FAISS"""
+        """
+        Search for relevant chunks using FAISS.
+        
+        Args:
+            document_ids: If provided, search only in these specific documents.
+                         If None, search user's unitemized documents (not in any knowledge store).
+        
+        Note: Documents in knowledge stores are only searched via search_knowledge_stores(),
+        which requires explicit knowledge store IDs.
+        """
         top_k = top_k or self.top_k
         
         # Check if debug logging is enabled
@@ -692,12 +701,21 @@ class RAGService:
         query_embedding: np.ndarray,
         top_k: int,
     ) -> List[Dict[str, Any]]:
-        """Search all user's documents"""
-        # Get user's documents
+        """
+        Search user's unitemized documents (not in any knowledge store).
+        
+        Documents in knowledge stores are only searched when:
+        - A custom GPT with that knowledge store is selected
+        - The user explicitly searches a knowledge store
+        
+        This prevents searching subscribed GPT knowledge stores when no GPT is selected.
+        """
+        # Get user's documents that are NOT in any knowledge store
         result = await db.execute(
             select(Document)
             .where(Document.owner_id == user.id)
             .where(Document.is_processed == True)
+            .where(Document.knowledge_store_id.is_(None))  # Only unitemized documents
         )
         documents = result.scalars().all()
         
@@ -921,7 +939,12 @@ class RAGService:
         document_ids: Optional[List[str]],
         top_k: int,
     ) -> List[Dict[str, Any]]:
-        """Fallback keyword-based search"""
+        """
+        Fallback keyword-based search.
+        
+        When document_ids is not specified, only searches unitemized documents
+        (documents not in any knowledge store).
+        """
         keywords = query.lower().split()
         
         query_builder = (
@@ -933,6 +956,9 @@ class RAGService:
         
         if document_ids:
             query_builder = query_builder.where(Document.id.in_(document_ids))
+        else:
+            # Only search unitemized documents (not in any knowledge store)
+            query_builder = query_builder.where(Document.knowledge_store_id.is_(None))
         
         result = await db.execute(query_builder)
         rows = result.all()
@@ -1002,16 +1028,21 @@ class RAGService:
         top_k: int = 5,
     ) -> str:
         """
-        Get formatted context from user's documents for LLM prompt.
+        Get formatted context from user's UNITEMIZED documents for LLM prompt.
         This is the main entry point for RAG context retrieval.
+        
+        Only searches documents that are NOT in any knowledge store.
+        Documents in knowledge stores are only accessed when:
+        - A custom GPT with that knowledge store is selected (uses get_knowledge_store_context)
+        - The user explicitly provides document_ids
+        
+        This prevents searching subscribed GPTs' knowledge stores when no GPT is selected.
         """
-        # If specific document IDs provided, use those
+        # If specific document IDs provided, search only those
         if document_ids:
-            results = await self._user_document_search(
-                db, user, query, document_ids, top_k
-            )
+            results = await self.search(db, user, query, document_ids, top_k)
         else:
-            # Search across all user's documents
+            # Search user's unitemized documents (not in any knowledge store)
             results = await self.search(db, user, query, None, top_k)
         
         if not results:

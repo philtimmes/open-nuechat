@@ -18,6 +18,7 @@ from . import (
     stt,
     images,
     filter_chains,
+    vibe,
 )
 
 __all__ = [
@@ -39,4 +40,5 @@ __all__ = [
     "stt",
     "images",
     "filter_chains",
+    "vibe",
 ]

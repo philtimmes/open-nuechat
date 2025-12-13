@@ -14,6 +14,11 @@
  * - streamSlice: Streaming state
  * - artifactSlice: Artifacts and file uploads
  * - codeSummarySlice: Code tracking for LLM context
+ * 
+ * NEW (v2): Clean message system with proper state machine
+ * - messageSystem.ts: Types and utilities
+ * - messageStore.ts: New store implementation
+ * See ARCHITECTURE.md for design details
  */
 import { create } from 'zustand';
 import type { ChatStore } from './types';
@@ -25,6 +30,7 @@ import { createCodeSummarySlice } from './codeSummarySlice';
 
 /**
  * Main chat store - combines all slices
+ * @deprecated Consider using useMessageStore for message operations
  */
 export const useChatStore = create<ChatStore>((set, get) => ({
   // Compose all slices
@@ -37,3 +43,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
 // Re-export types for convenience
 export type { ChatStore } from './types';
+
+// ============================================
+// NEW MESSAGE SYSTEM (v2)
+// ============================================
+
+// Export the new message store
+export { useMessageStore, useConversation, useIsStreaming, useStreamingContent, useArtifacts } from './messageStore';
+
+// Export message system utilities
+export {
+  type ChatMessage,
+  type MessageState,
+  type PendingRequest,
+  generateMessageId,
+  generateRequestId,
+  createUserMessage,
+  createAssistantPlaceholder,
+  fromServerMessage,
+  canTransition,
+  assertTransition,
+  StreamAccumulator,
+  buildMessageTree,
+  getConversationPath,
+  findSiblings,
+} from './messageSystem';

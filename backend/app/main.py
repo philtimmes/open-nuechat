@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.api.routes import (
     auth, chats, billing, documents, themes, websocket, filters,
     api_keys, knowledge_stores, assistants, branding, admin, tools, utils, tts, stt, images,
-    filter_chains
+    filter_chains, vibe
 )
 from app.api.routes.v1 import router as v1_router
 from app.services.rag import RAGService
@@ -480,6 +480,7 @@ app.include_router(tts.router, prefix="/api/tts", tags=["TTS"])
 app.include_router(stt.router, prefix="/api/stt", tags=["STT"])
 app.include_router(images.router, prefix="/api", tags=["Images"])  # Routes /api/images/*
 app.include_router(filter_chains.router, prefix="/api/admin", tags=["Filter Chains"])  # Routes /api/admin/filter-chains/*
+app.include_router(vibe.router, prefix="/api/vibe", tags=["VibeCode"])  # AI code editor endpoints
 
 # OpenAI-compatible API (v1)
 app.include_router(v1_router)  # Routes /v1/* (models, chat/completions, images/generations, embeddings)
@@ -781,6 +782,8 @@ async def get_shared_chat(share_id: str):
             "id": chat.id,
             "title": chat.title,
             "model": chat.model,
+            "assistant_id": chat.assistant_id,
+            "assistant_name": chat.assistant_name,
             "created_at": chat.created_at.isoformat(),
             "messages": messages,
         }
