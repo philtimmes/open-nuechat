@@ -6,8 +6,9 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime, timezone
+from pydantic import BaseModel
 
 from app.db.database import get_db
 from app.api.dependencies import get_current_user
@@ -586,6 +587,42 @@ async def edit_message(
     await db.refresh(new_message)
     
     return MessageResponse.model_validate(new_message)
+
+
+class MessageArtifactsUpdate(BaseModel):
+    """Update artifacts on a message"""
+    artifacts: List[Dict]
+
+
+@router.put("/{chat_id}/messages/{message_id}/artifacts", response_model=MessageResponse)
+async def update_message_artifacts(
+    chat_id: str,
+    message_id: str,
+    data: MessageArtifactsUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update the artifacts array on a message.
+    Used to persist extracted code artifacts with timestamps after stream_end.
+    """
+    chat = await _get_user_chat(db, user, chat_id)
+    
+    # Get the message
+    result = await db.execute(
+        select(Message).where(Message.id == message_id, Message.chat_id == chat_id)
+    )
+    message = result.scalar_one_or_none()
+    
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    # Update artifacts
+    message.artifacts = data.artifacts
+    await db.commit()
+    await db.refresh(message)
+    
+    return MessageResponse.model_validate(message)
 
 
 @router.delete("/{chat_id}/messages/{message_id}")

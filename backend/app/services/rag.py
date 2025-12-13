@@ -32,6 +32,33 @@ logger = logging.getLogger(__name__)
 # Thread pool for CPU-bound operations
 _executor = ThreadPoolExecutor(max_workers=4)
 
+# Cache for debug_rag setting (refreshed on each search)
+_debug_rag_cache: Dict[str, bool] = {"enabled": False}
+
+
+async def _is_debug_rag_enabled(db: AsyncSession) -> bool:
+    """Check if debug RAG logging is enabled."""
+    from app.models.models import SystemSetting
+    try:
+        result = await db.execute(
+            select(SystemSetting).where(SystemSetting.key == "debug_rag")
+        )
+        setting = result.scalar_one_or_none()
+        enabled = setting and setting.value == "true"
+        _debug_rag_cache["enabled"] = enabled
+        return enabled
+    except Exception:
+        return _debug_rag_cache.get("enabled", False)
+
+
+def _log_rag_debug(message: str, **kwargs):
+    """Log RAG debug message with optional structured data."""
+    if kwargs:
+        data_str = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+        logger.info(f"[RAG DEBUG] {message} | {data_str}")
+    else:
+        logger.info(f"[RAG DEBUG] {message}")
+
 
 class FAISSIndexManager:
     """
@@ -368,6 +395,21 @@ class RAGService:
         embedding = model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
         return embedding
     
+    async def get_embedding(self, text: str) -> List[float]:
+        """
+        Async wrapper for embed_text that returns a list of floats.
+        Used by the OpenAI-compatible /v1/embeddings endpoint.
+        """
+        import asyncio
+        
+        loop = asyncio.get_event_loop()
+        embedding = await loop.run_in_executor(None, self.embed_text, text)
+        
+        if embedding is None:
+            raise RuntimeError("Embedding model not available")
+        
+        return embedding.tolist()
+    
     def embed_texts(self, texts: List[str], batch_size: int = 64) -> Optional[np.ndarray]:
         """Generate embeddings for multiple texts with batching"""
         model = self.get_model()
@@ -559,20 +601,48 @@ class RAGService:
         """Search for relevant chunks using FAISS"""
         top_k = top_k or self.top_k
         
+        # Check if debug logging is enabled
+        debug_enabled = await _is_debug_rag_enabled(db)
+        
+        if debug_enabled:
+            _log_rag_debug(
+                "Search started",
+                user_id=user.id,
+                query=query[:100] + "..." if len(query) > 100 else query,
+                document_ids=document_ids,
+                top_k=top_k
+            )
+        
         # Generate query embedding
         query_embedding = await asyncio.get_event_loop().run_in_executor(
             _executor, self.embed_text, query
         )
         
         if query_embedding is None:
+            if debug_enabled:
+                _log_rag_debug("Falling back to keyword search (embedding failed)")
             return await self._keyword_search(db, user, query, document_ids, top_k)
         
         # If document_ids specified, do direct search
         if document_ids:
-            return await self._direct_search(db, query_embedding, document_ids, top_k)
+            results = await self._direct_search(db, query_embedding, document_ids, top_k)
+            if debug_enabled:
+                _log_rag_debug(
+                    "Direct search completed",
+                    results_count=len(results),
+                    top_scores=[r.get("score", 0) for r in results[:3]]
+                )
+            return results
         
         # Otherwise search user's documents
-        return await self._user_document_search(db, user, query_embedding, top_k)
+        results = await self._user_document_search(db, user, query_embedding, top_k)
+        if debug_enabled:
+            _log_rag_debug(
+                "User document search completed",
+                results_count=len(results),
+                top_scores=[r.get("score", 0) for r in results[:3]]
+            )
+        return results
     
     async def _direct_search(
         self,
@@ -658,6 +728,25 @@ class RAGService:
         
         top_k = top_k or self.top_k
         
+        # Check if debug logging is enabled
+        debug_enabled = await _is_debug_rag_enabled(db)
+        
+        if debug_enabled:
+            # Get knowledge store names for logging
+            kb_result = await db.execute(
+                select(KnowledgeStore).where(KnowledgeStore.id.in_(knowledge_store_ids))
+            )
+            kb_names = {str(kb.id): kb.name for kb in kb_result.scalars().all()}
+            
+            _log_rag_debug(
+                "Knowledge store search started",
+                user_id=user.id,
+                query=query[:100] + "..." if len(query) > 100 else query,
+                knowledge_stores=[kb_names.get(kid, kid) for kid in knowledge_store_ids],
+                top_k=top_k,
+                bypass_access_check=bypass_access_check
+            )
+        
         # Verify access (unless bypassed for assistant access)
         if bypass_access_check:
             accessible_stores = knowledge_store_ids
@@ -665,7 +754,16 @@ class RAGService:
             accessible_stores = await self._get_accessible_store_ids(db, user, knowledge_store_ids)
         
         if not accessible_stores:
+            if debug_enabled:
+                _log_rag_debug("No accessible knowledge stores found")
             return []
+        
+        if debug_enabled and len(accessible_stores) != len(knowledge_store_ids):
+            _log_rag_debug(
+                "Access filtered stores",
+                requested=len(knowledge_store_ids),
+                accessible=len(accessible_stores)
+            )
         
         # Generate query embedding
         query_embedding = await asyncio.get_event_loop().run_in_executor(
@@ -673,6 +771,8 @@ class RAGService:
         )
         
         if query_embedding is None:
+            if debug_enabled:
+                _log_rag_debug("Falling back to keyword search (embedding failed)")
             # Fallback to keyword search
             doc_ids = await self._get_store_document_ids(db, accessible_stores)
             return await self._keyword_search_documents(db, doc_ids, query, top_k)
@@ -690,10 +790,20 @@ class RAGService:
                 top_k
             )
             
+            if debug_enabled and results:
+                _log_rag_debug(
+                    f"FAISS index search for store",
+                    store_id=store_id,
+                    results_count=len(results),
+                    top_score=results[0][1] if results else 0
+                )
+            
             for chunk_id, score in results:
                 all_results.append((chunk_id, score, store_id))
         
         if not all_results:
+            if debug_enabled:
+                _log_rag_debug("No FAISS results, falling back to direct search")
             # Fallback to direct search
             doc_ids = await self._get_store_document_ids(db, accessible_stores)
             return await self._direct_search(db, query_embedding, doc_ids, top_k)
@@ -702,9 +812,29 @@ class RAGService:
         all_results.sort(key=lambda x: x[1], reverse=True)
         top_results = all_results[:top_k]
         
+        if debug_enabled:
+            _log_rag_debug(
+                "Knowledge store search completed",
+                total_results=len(all_results),
+                returned_results=len(top_results),
+                top_scores=[round(r[1], 4) for r in top_results[:5]]
+            )
+        
         # Fetch chunk details
         chunk_ids = [r[0] for r in top_results]
-        return await self._get_chunks_by_ids(db, chunk_ids, {r[0]: r[1] for r in top_results})
+        final_results = await self._get_chunks_by_ids(db, chunk_ids, {r[0]: r[1] for r in top_results})
+        
+        if debug_enabled and final_results:
+            _log_rag_debug(
+                "Retrieved context chunks",
+                chunks=[{
+                    "doc": r.get("document_name", "?"),
+                    "score": round(r.get("similarity", 0), 4),
+                    "preview": r.get("content", "")[:80] + "..."
+                } for r in final_results[:3]]
+            )
+        
+        return final_results
     
     async def _get_chunks_by_ids(
         self,
@@ -925,7 +1055,19 @@ class RAGService:
                 f"[Source {i}: {result['document_name']}]\n{result['content']}"
             )
         
-        return "\n\n---\n\n".join(context_parts)
+        context = "\n\n---\n\n".join(context_parts)
+        
+        # Log final context length if debug enabled
+        debug_enabled = await _is_debug_rag_enabled(db)
+        if debug_enabled:
+            _log_rag_debug(
+                "Context built for LLM prompt",
+                sources=len(results),
+                context_length=len(context),
+                context_preview=context[:200] + "..." if len(context) > 200 else context
+            )
+        
+        return context
     
     async def rebuild_all_indexes(self, db: AsyncSession) -> Dict[str, int]:
         """Rebuild all knowledge store FAISS indexes"""

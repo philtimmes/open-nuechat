@@ -3,6 +3,7 @@ import { useAuthStore } from '../stores/authStore';
 import { useChatStore } from '../stores/chatStore';
 import { useBrandingStore } from '../stores/brandingStore';
 import { chatApi } from '../lib/api';
+import api from '../lib/api';
 import { extractArtifacts, cleanFilePath } from '../lib/artifacts';
 import { createFileChangeFromCode } from '../lib/signatures';
 import { 
@@ -381,6 +382,17 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           addMessage(assistantMessage);
           
           console.log('Added assistant message with', extractedArtifacts.length, 'artifacts');
+          
+          // Persist artifacts to backend for proper versioning on reload
+          if (extractedArtifacts.length > 0 && chunk.chat_id && chunk.message_id) {
+            api.put(`/chats/${chunk.chat_id}/messages/${chunk.message_id}/artifacts`, {
+              artifacts: extractedArtifacts
+            }).then(() => {
+              console.log('[ARTIFACTS] Saved', extractedArtifacts.length, 'artifacts to backend');
+            }).catch(err => {
+              console.error('[ARTIFACTS] Failed to save artifacts:', err);
+            });
+          }
           
           // Update code summary with extracted artifacts
           if (extractedArtifacts.length > 0) {

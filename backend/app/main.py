@@ -20,6 +20,7 @@ from app.api.routes import (
     api_keys, knowledge_stores, assistants, branding, admin, tools, utils, tts, stt, images,
     filter_chains
 )
+from app.api.routes.v1 import router as v1_router
 from app.services.rag import RAGService
 from app.filters import setup_default_filters, get_filter_registry
 from app.api.exception_handlers import setup_exception_handlers
@@ -48,6 +49,7 @@ logging.getLogger("app.api.routes.websocket").setLevel(logging.INFO)
 logging.getLogger("app.services.llm").setLevel(logging.INFO)
 logging.getLogger("app.services.billing").setLevel(logging.INFO)
 logging.getLogger("app.services.document_queue").setLevel(logging.INFO)
+logging.getLogger("app.services.rag").setLevel(logging.INFO)  # For debug RAG logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)  # Keep main app logger at INFO for startup messages
@@ -57,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.32"
+SCHEMA_VERSION = "NC-0.6.34"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -200,6 +202,19 @@ async def run_migrations(conn):
             ("INSERT INTO system_settings (key, value) VALUES ('history_compression_threshold', '20')", "history_compression_threshold"),
             ("INSERT INTO system_settings (key, value) VALUES ('history_compression_keep_recent', '6')", "history_compression_keep_recent"),
             ("INSERT INTO system_settings (key, value) VALUES ('history_compression_target_tokens', '8000')", "history_compression_target_tokens"),
+        ],
+        "NC-0.6.33": [
+            # API rate limits for OpenAI-compatible v1 endpoints
+            ("INSERT INTO system_settings (key, value) VALUES ('api_rate_limit_completions', '60')", "api_rate_limit_completions"),
+            ("INSERT INTO system_settings (key, value) VALUES ('api_rate_limit_embeddings', '200')", "api_rate_limit_embeddings"),
+            ("INSERT INTO system_settings (key, value) VALUES ('api_rate_limit_images', '10')", "api_rate_limit_images"),
+            ("INSERT INTO system_settings (key, value) VALUES ('api_rate_limit_models', '100')", "api_rate_limit_models"),
+            # Debug RAG setting
+            ("INSERT INTO system_settings (key, value) VALUES ('debug_rag', 'false')", "debug_rag"),
+        ],
+        "NC-0.6.34": [
+            # Add artifacts column to messages for persisting extracted code artifacts with timestamps
+            ("ALTER TABLE messages ADD COLUMN artifacts JSON", "messages.artifacts"),
         ],
     }
     
@@ -460,6 +475,9 @@ app.include_router(tts.router, prefix="/api/tts", tags=["TTS"])
 app.include_router(stt.router, prefix="/api/stt", tags=["STT"])
 app.include_router(images.router, prefix="/api", tags=["Images"])  # Routes /api/images/*
 app.include_router(filter_chains.router, prefix="/api/admin", tags=["Filter Chains"])  # Routes /api/admin/filter-chains/*
+
+# OpenAI-compatible API (v1)
+app.include_router(v1_router)  # Routes /v1/* (models, chat/completions, images/generations, embeddings)
 
 
 @app.get("/api/debug/test-admin")

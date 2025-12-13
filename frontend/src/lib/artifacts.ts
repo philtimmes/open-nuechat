@@ -71,8 +71,9 @@ function parseCodeBlocks(content: string): Array<{
     // Also check if this line itself starts a code fence
     const directFenceMatch = line.match(/^```(\w+)$/);
     
-    if (isFilePath && fenceMatch) {
+    if (isFilePath && fenceMatch && !isXmlStyleFileTag(line)) {
       // Pattern: filepath\n```lang\ncode\n```
+      // Skip if line looks like an XML tag (e.g., <Menu.cpp>) - those are handled by Pattern 4
       const filepath = cleanFilePath(line);
       const lang = fenceMatch[1] || '';
       const fenceLineStart = charIndex + line.length + 1; // +1 for newline
@@ -239,189 +240,378 @@ function looksLikeFilePath(line: string): boolean {
   return true;
 }
 
+// Check if a line is an XML-style opening tag for a file (e.g., <Menu.cpp>, <file:test.py>)
+// These should be handled by Pattern 4, not Pattern 1
+function isXmlStyleFileTag(line: string): boolean {
+  const trimmed = line.trim();
+  // Match: <filename.ext> or <tag:filename.ext> or <tag=filename.ext>
+  return /^<(?:artifact|file|code)?[=:]?[A-Za-z_][\w\-./]*\.\w+>$/.test(trimmed);
+}
+
 export function extractArtifacts(content: string): { cleanContent: string; artifacts: Artifact[] } {
   const artifacts: Artifact[] = [];
-  let cleanContent = content;
+  const lines = content.split('\n');
+  const outputLines: string[] = [];
   
-  // Parse code blocks with proper nesting support
-  const codeBlocks = parseCodeBlocks(content);
+  // State machine - only one parse method active at a time
+  // 0 = none, 1 = filepath+fence, 2 = artifact:title:type, 3 = <artifact>, 4 = <filename.ext>, 5 = large code block
+  let activeMethod = 0;
+  let buffer: string[] = [];
+  let metadata: {
+    filepath?: string;
+    filename?: string;
+    language?: string;
+    title?: string;
+    type?: string;
+    tagName?: string;
+    fenceDepth?: number;
+    startLine?: number;
+  } = {};
   
-  // Pattern 1: File path + code blocks (e.g., "src/file.ts" followed by ```ts)
-  for (const block of codeBlocks) {
-    if (block.filepath) {
-      const filename = block.filepath.split('/').pop() || block.filepath;
-      const ext = filename.split('.').pop()?.toLowerCase() || '';
-      const language = block.language || extToLang(ext);
-      const type = langToType(language);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const nextLine = lines[i + 1];
+    
+    // If no active method, try to detect pattern starts
+    if (activeMethod === 0) {
+      // Pattern 4a: <filename.ext> (direct filename as tag)
+      const xmlFileTagMatch = line.match(/^<([A-Za-z_][\w\-./]*\.\w+)>\s*$/);
+      if (xmlFileTagMatch) {
+        activeMethod = 4;
+        metadata = { 
+          tagName: xmlFileTagMatch[1],
+          filepath: xmlFileTagMatch[1],
+          filename: xmlFileTagMatch[1].split('/').pop() || xmlFileTagMatch[1],
+          startLine: i
+        };
+        buffer = [];
+        continue;
+      }
       
-      artifacts.push({
-        id: `artifact-${Date.now()}-${++artifactCounter}`,
-        title: filename,
-        type,
-        language,
-        content: block.code,
-        filename: block.filepath,
-        created_at: new Date().toISOString(),
-      });
-      cleanContent = cleanContent.replace(block.fullMatch, `\n[📦 Artifact: ${filename}]`);
+      // Pattern 4b: <artifact=filename> or <file:filename> etc
+      const xmlAttrTagMatch = line.match(/^<(artifact|file|code)[=:]([A-Za-z_][\w\-./]*\.\w+)>\s*$/i);
+      if (xmlAttrTagMatch) {
+        activeMethod = 4;
+        metadata = {
+          tagName: xmlAttrTagMatch[1].toLowerCase(),
+          filepath: xmlAttrTagMatch[2],
+          filename: xmlAttrTagMatch[2].split('/').pop() || xmlAttrTagMatch[2],
+          startLine: i
+        };
+        buffer = [];
+        continue;
+      }
+      
+      // Pattern 4c: <artifact name="filename"> attribute style
+      const xmlNameAttrMatch = line.match(/^<(artifact|file|code)\s+(?:name|filename|file|path)=["']([A-Za-z_][\w\-./]*\.\w+)["'][^>]*>\s*$/i);
+      if (xmlNameAttrMatch) {
+        activeMethod = 4;
+        metadata = {
+          tagName: xmlNameAttrMatch[1].toLowerCase(),
+          filepath: xmlNameAttrMatch[2],
+          filename: xmlNameAttrMatch[2].split('/').pop() || xmlNameAttrMatch[2],
+          startLine: i
+        };
+        buffer = [];
+        continue;
+      }
+      
+      // Pattern 3: <artifact title="..." type="...">
+      const xmlArtifactMatch = line.match(/^<artifact\s+(?:title="([^"]*)")?\s*(?:type="([^"]*)")?\s*(?:language="([^"]*)")?\s*(?:filename="([^"]*)")?[^>]*>\s*$/i);
+      if (xmlArtifactMatch) {
+        activeMethod = 3;
+        metadata = {
+          title: xmlArtifactMatch[1] || 'Untitled',
+          type: xmlArtifactMatch[2] || 'code',
+          language: xmlArtifactMatch[3],
+          filename: xmlArtifactMatch[4],
+          startLine: i
+        };
+        buffer = [];
+        continue;
+      }
+      
+      // Pattern 2: ```artifact:title:type
+      const artifactFenceMatch = line.match(/^```artifact:([^:\n]+):(\w+)(?::(\w+))?$/);
+      if (artifactFenceMatch) {
+        activeMethod = 2;
+        metadata = {
+          title: artifactFenceMatch[1].trim(),
+          type: artifactFenceMatch[2],
+          language: artifactFenceMatch[3],
+          fenceDepth: 1,
+          startLine: i
+        };
+        buffer = [];
+        continue;
+      }
+      
+      // Pattern 1: filepath followed by code fence on next line
+      // Skip if line looks like XML tag
+      if (nextLine && looksLikeFilePath(line) && !isXmlStyleFileTag(line)) {
+        const fenceMatch = nextLine.match(/^```(\w*)$/);
+        if (fenceMatch) {
+          activeMethod = 1;
+          metadata = {
+            filepath: cleanFilePath(line),
+            filename: cleanFilePath(line).split('/').pop() || cleanFilePath(line),
+            language: fenceMatch[1] || '',
+            fenceDepth: 1,
+            startLine: i
+          };
+          buffer = [];
+          i++; // Skip the fence line
+          continue;
+        }
+      }
+      
+      // Pattern 5: Standalone code fence (will check size at end)
+      const standaloneFenceMatch = line.match(/^```(\w+)$/);
+      if (standaloneFenceMatch) {
+        activeMethod = 5;
+        metadata = {
+          language: standaloneFenceMatch[1],
+          fenceDepth: 1,
+          startLine: i
+        };
+        buffer = [];
+        continue;
+      }
+      
+      // No pattern matched, output line as-is
+      outputLines.push(line);
+      continue;
+    }
+    
+    // Active method - look for closing
+    
+    // Pattern 4: XML-style tags - look for closing tag
+    if (activeMethod === 4) {
+      // Check for various closing tag formats
+      // Escape special regex chars in filepath/filename
+      const escapedPath = (metadata.filepath || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapedName = (metadata.filename || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapedTag = (metadata.tagName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      
+      const closePatterns = [
+        new RegExp(`^<\\/${escapedPath}>\\s*$`),              // </path/to/filename.ext>
+        new RegExp(`^<\\/${escapedName}>\\s*$`),              // </filename.ext>
+        new RegExp(`^<\\/${escapedTag}>\\s*$`, 'i'),          // </artifact>, </file>, </code>
+        new RegExp(`^<\\/${escapedTag}[=:]${escapedPath}>\\s*$`, 'i'),  // </file:filename>
+        new RegExp(`^<\\/${escapedTag}[=:]${escapedName}>\\s*$`, 'i'),  // </file:filename> (just name)
+      ];
+      
+      const isClosing = closePatterns.some(p => p.test(line));
+      
+      if (isClosing) {
+        // Extract artifact
+        let code = buffer.join('\n').trim();
+        // Strip code fences if present inside
+        const fenceMatch = code.match(/^```\w*\n([\s\S]*?)\n?```$/);
+        if (fenceMatch) {
+          code = fenceMatch[1].trim();
+        }
+        
+        const ext = metadata.filename?.split('.').pop()?.toLowerCase() || '';
+        const language = extToLang(ext);
+        const type = langToType(language);
+        
+        if (code.length > 0) {
+          artifacts.push({
+            id: `artifact-${Date.now()}-${++artifactCounter}`,
+            title: metadata.filename || 'Untitled',
+            type,
+            language,
+            content: code,
+            filename: metadata.filepath,
+            created_at: new Date().toISOString(),
+          });
+          outputLines.push(`[📦 Artifact: ${metadata.filename}]`);
+        }
+        
+        activeMethod = 0;
+        metadata = {};
+        buffer = [];
+        continue;
+      }
+      
+      buffer.push(line);
+      continue;
+    }
+    
+    // Pattern 3: <artifact> tags
+    if (activeMethod === 3) {
+      if (line.match(/^<\/artifact>\s*$/i)) {
+        const code = buffer.join('\n').trim();
+        const artType = normalizeType(metadata.type || 'code');
+        
+        if (code.length > 0) {
+          artifacts.push({
+            id: `artifact-${Date.now()}-${++artifactCounter}`,
+            title: metadata.title || 'Untitled',
+            type: artType,
+            language: metadata.language || inferLanguage(artType, code),
+            content: code,
+            filename: metadata.filename || generateFilename(metadata.title || 'Untitled', artType, metadata.language),
+            created_at: new Date().toISOString(),
+          });
+          outputLines.push(`[📦 Artifact: ${metadata.title}]`);
+        }
+        
+        activeMethod = 0;
+        metadata = {};
+        buffer = [];
+        continue;
+      }
+      
+      buffer.push(line);
+      continue;
+    }
+    
+    // Pattern 2: artifact:title:type fence
+    if (activeMethod === 2) {
+      // Track nested fences
+      if (line.match(/^```\w+$/)) {
+        metadata.fenceDepth = (metadata.fenceDepth || 1) + 1;
+        buffer.push(line);
+        continue;
+      }
+      if (line.match(/^```\s*$/)) {
+        metadata.fenceDepth = (metadata.fenceDepth || 1) - 1;
+        if (metadata.fenceDepth === 0) {
+          const code = buffer.join('\n').trim();
+          const artType = normalizeType(metadata.type || 'code');
+          
+          if (code.length > 0) {
+            artifacts.push({
+              id: `artifact-${Date.now()}-${++artifactCounter}`,
+              title: metadata.title || 'Untitled',
+              type: artType,
+              language: metadata.language || inferLanguage(artType, code),
+              content: code,
+              filename: generateFilename(metadata.title || 'Untitled', artType, metadata.language),
+              created_at: new Date().toISOString(),
+            });
+            outputLines.push(`[📦 Artifact: ${metadata.title}]`);
+          }
+          
+          activeMethod = 0;
+          metadata = {};
+          buffer = [];
+          continue;
+        }
+      }
+      
+      buffer.push(line);
+      continue;
+    }
+    
+    // Pattern 1: filepath + code fence
+    if (activeMethod === 1) {
+      // Track nested fences
+      if (line.match(/^```\w+$/)) {
+        metadata.fenceDepth = (metadata.fenceDepth || 1) + 1;
+        buffer.push(line);
+        continue;
+      }
+      if (line.match(/^```\s*$/)) {
+        metadata.fenceDepth = (metadata.fenceDepth || 1) - 1;
+        if (metadata.fenceDepth === 0) {
+          const code = buffer.join('\n').trim();
+          const ext = metadata.filename?.split('.').pop()?.toLowerCase() || '';
+          const language = metadata.language || extToLang(ext);
+          const type = langToType(language);
+          
+          if (code.length > 0) {
+            artifacts.push({
+              id: `artifact-${Date.now()}-${++artifactCounter}`,
+              title: metadata.filename || 'Untitled',
+              type,
+              language,
+              content: code,
+              filename: metadata.filepath,
+              created_at: new Date().toISOString(),
+            });
+            outputLines.push(`[📦 Artifact: ${metadata.filename}]`);
+          }
+          
+          activeMethod = 0;
+          metadata = {};
+          buffer = [];
+          continue;
+        }
+      }
+      
+      buffer.push(line);
+      continue;
+    }
+    
+    // Pattern 5: Standalone code fence (large blocks)
+    if (activeMethod === 5) {
+      // Track nested fences
+      if (line.match(/^```\w+$/)) {
+        metadata.fenceDepth = (metadata.fenceDepth || 1) + 1;
+        buffer.push(line);
+        continue;
+      }
+      if (line.match(/^```\s*$/)) {
+        metadata.fenceDepth = (metadata.fenceDepth || 1) - 1;
+        if (metadata.fenceDepth === 0) {
+          const code = buffer.join('\n').trim();
+          const language = metadata.language || 'text';
+          const type = langToType(language);
+          
+          // Only convert to artifact if large enough (500+ chars)
+          if (code.length >= 500) {
+            const title = `${language.charAt(0).toUpperCase() + language.slice(1)} Code`;
+            artifacts.push({
+              id: `artifact-${Date.now()}-${++artifactCounter}`,
+              title,
+              type,
+              language,
+              content: code,
+              filename: generateFilename(title, type, language),
+              created_at: new Date().toISOString(),
+            });
+            outputLines.push(`[📦 Artifact: ${title}]`);
+          } else {
+            // Small code block - output as-is
+            outputLines.push(`\`\`\`${metadata.language}`);
+            outputLines.push(...buffer);
+            outputLines.push('```');
+          }
+          
+          activeMethod = 0;
+          metadata = {};
+          buffer = [];
+          continue;
+        }
+      }
+      
+      buffer.push(line);
+      continue;
     }
   }
   
-  // Pattern 2: ```artifact:title:type format
-  const codeBlockPattern = /```artifact:([^:\n]+):(\w+)(?::(\w+))?\n([\s\S]*?)```/g;
-  let match;
-  
-  while ((match = codeBlockPattern.exec(content)) !== null) {
-    const [fullMatch, title, type, language, code] = match;
-    // Skip if already processed
-    if (!cleanContent.includes(fullMatch)) continue;
-    
-    artifacts.push({
-      id: `artifact-${Date.now()}-${++artifactCounter}`,
-      title: title.trim(),
-      type: normalizeType(type),
-      language: language || inferLanguage(type, code),
-      content: code.trim(),
-      filename: generateFilename(title, type, language),
-      created_at: new Date().toISOString(),
-    });
-    cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${title.trim()}]`);
-  }
-  
-  // Pattern 3: XML-like <artifact> tags
-  const xmlPattern = /<artifact\s+(?:title="([^"]+)")?\s*(?:type="([^"]+)")?\s*(?:language="([^"]+)")?\s*(?:filename="([^"]+)")?[^>]*>([\s\S]*?)<\/artifact>/gi;
-  
-  while ((match = xmlPattern.exec(content)) !== null) {
-    const [fullMatch, title, type, language, filename, code] = match;
-    // Skip if already processed
-    if (!cleanContent.includes(fullMatch)) continue;
-    
-    const artTitle = title || 'Untitled';
-    const artType = normalizeType(type || 'code');
-    
-    artifacts.push({
-      id: `artifact-${Date.now()}-${++artifactCounter}`,
-      title: artTitle,
-      type: artType,
-      language: language || inferLanguage(artType, code),
-      content: code.trim(),
-      filename: filename || generateFilename(artTitle, artType, language),
-      created_at: new Date().toISOString(),
-    });
-    cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${artTitle}]`);
-  }
-  
-  // Pattern 4: XML-style filename tags (multiple variations for naive LLM output)
-  // Supports:
-  //   <Menu.cpp>...</Menu.cpp>           - filename as tag
-  //   <artifact=Menu.cpp>...</artifact>  - artifact tag with = filename
-  //   <artifact:Menu.cpp>...</artifact>  - artifact tag with : filename
-  //   <file=Menu.cpp>...</file>          - file tag with = filename
-  //   <code=Menu.cpp>...</code>          - code tag with = filename
-  //   <artifact name="Menu.cpp">...</artifact> - attribute style
-  
-  // Pattern 4a: Direct filename as tag: <Menu.cpp>...</Menu.cpp>
-  const xmlFilenamePattern = /<([A-Za-z_][\w\-./]*\.\w+)>\s*([\s\S]*?)\s*<\/\1>/g;
-  
-  while ((match = xmlFilenamePattern.exec(content)) !== null) {
-    const [fullMatch, tagName, code] = match;
-    if (!cleanContent.includes(fullMatch)) continue;
-    
-    const filepath = tagName;
-    const filename = filepath.split('/').pop() || filepath;
-    const ext = filename.split('.').pop()?.toLowerCase() || '';
-    const language = extToLang(ext);
-    const type = langToType(language);
-    
-    artifacts.push({
-      id: `artifact-${Date.now()}-${++artifactCounter}`,
-      title: filename,
-      type,
-      language,
-      content: code.trim(),
-      filename: filepath,
-      created_at: new Date().toISOString(),
-    });
-    cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${filename}]`);
-  }
-  
-  // Pattern 4b: <artifact=filename> or <file=filename> or <code=filename> style
-  // Closing tag can be </artifact>, </file>, </code>, or </filename>
-  const xmlAttrPattern = /<(artifact|file|code)[=:]([A-Za-z_][\w\-./]*\.\w+)>\s*([\s\S]*?)\s*<\/(?:\1|\2)>/gi;
-  
-  while ((match = xmlAttrPattern.exec(content)) !== null) {
-    const [fullMatch, tagType, tagFilename, code] = match;
-    if (!cleanContent.includes(fullMatch)) continue;
-    
-    const filepath = tagFilename;
-    const filename = filepath.split('/').pop() || filepath;
-    const ext = filename.split('.').pop()?.toLowerCase() || '';
-    const language = extToLang(ext);
-    const type = langToType(language);
-    
-    artifacts.push({
-      id: `artifact-${Date.now()}-${++artifactCounter}`,
-      title: filename,
-      type,
-      language,
-      content: code.trim(),
-      filename: filepath,
-      created_at: new Date().toISOString(),
-    });
-    cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${filename}]`);
-  }
-  
-  // Pattern 4c: <artifact name="filename"> or <file name="filename"> attribute style
-  const xmlNameAttrPattern = /<(artifact|file|code)\s+(?:name|filename|file|path)=["']([A-Za-z_][\w\-./]*\.\w+)["'][^>]*>\s*([\s\S]*?)\s*<\/\1>/gi;
-  
-  while ((match = xmlNameAttrPattern.exec(content)) !== null) {
-    const [fullMatch, tagType, tagFilename, code] = match;
-    if (!cleanContent.includes(fullMatch)) continue;
-    
-    const filepath = tagFilename;
-    const filename = filepath.split('/').pop() || filepath;
-    const ext = filename.split('.').pop()?.toLowerCase() || '';
-    const language = extToLang(ext);
-    const type = langToType(language);
-    
-    artifacts.push({
-      id: `artifact-${Date.now()}-${++artifactCounter}`,
-      title: filename,
-      type,
-      language,
-      content: code.trim(),
-      filename: filepath,
-      created_at: new Date().toISOString(),
-    });
-    cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${filename}]`);
-  }
-  
-  // Pattern 5: Detect large code blocks and convert to artifacts
-  // Use the parsed blocks to handle this correctly
-  for (const block of codeBlocks) {
-    if (!block.filepath && block.code.length >= 500) {
-      const fullMatch = block.fullMatch;
-      // Skip if already processed
-      if (!cleanContent.includes(fullMatch)) continue;
-      
-      const language = block.language || 'text';
-      const type = langToType(language);
-      const title = `${language.charAt(0).toUpperCase() + language.slice(1)} Code`;
-      
-      artifacts.push({
-        id: `artifact-${Date.now()}-${++artifactCounter}`,
-        title,
-        type,
-        language,
-        content: block.code,
-        filename: generateFilename(title, type, language),
-        created_at: new Date().toISOString(),
-      });
-      cleanContent = cleanContent.replace(fullMatch, `[📦 Artifact: ${title}]`);
+  // Handle unclosed patterns - output remaining buffer as-is
+  if (activeMethod !== 0 && buffer.length > 0) {
+    // Reconstruct the original content
+    if (activeMethod === 4) {
+      outputLines.push(`<${metadata.tagName || metadata.filepath}>`);
+    } else if (activeMethod === 3) {
+      outputLines.push(`<artifact>`);
+    } else if (activeMethod === 2) {
+      outputLines.push(`\`\`\`artifact:${metadata.title}:${metadata.type}`);
+    } else if (activeMethod === 1) {
+      outputLines.push(metadata.filepath || '');
+      outputLines.push(`\`\`\`${metadata.language || ''}`);
+    } else if (activeMethod === 5) {
+      outputLines.push(`\`\`\`${metadata.language || ''}`);
     }
+    outputLines.push(...buffer);
   }
   
-  return { cleanContent, artifacts };
+  return { cleanContent: outputLines.join('\n'), artifacts };
 }
 
 function normalizeType(type: string): Artifact['type'] {

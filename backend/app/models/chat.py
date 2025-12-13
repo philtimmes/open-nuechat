@@ -99,6 +99,10 @@ class Message(Base):
     # For multimodal content
     attachments = Column(JSON, default=list)  # [{type, url, name, size, mime_type}]
     
+    # Extracted code artifacts with timestamps
+    # [{id, title, type, language, content, filename, created_at}]
+    artifacts = Column(JSON, nullable=True)
+    
     # For tool calls
     tool_calls = Column(JSON, nullable=True)  # [{id, name, arguments}]
     tool_call_id = Column(String(100), nullable=True)  # For tool results

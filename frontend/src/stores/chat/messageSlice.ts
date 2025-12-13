@@ -17,14 +17,24 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
       const messages: Message[] = Array.isArray(response.data) ? response.data : [];
       
       // Collect artifacts from all messages
+      // Always extract from content to ensure we don't miss any
+      // Use stored artifacts' timestamps when available
       const allArtifacts: Artifact[] = [];
+      
       for (const msg of messages) {
-        if (msg.artifacts) {
+        // Always extract from content to catch everything
+        const { artifacts: extractedArtifacts } = extractArtifacts(msg.content || '');
+        
+        if (msg.artifacts && msg.artifacts.length > 0) {
+          // Use stored artifacts (they have correct timestamps)
+          // They should match extracted artifacts by content
           allArtifacts.push(...msg.artifacts);
-        }
-        if (msg.content) {
-          const { artifacts } = extractArtifacts(msg.content);
-          allArtifacts.push(...artifacts);
+        } else if (extractedArtifacts.length > 0) {
+          // No stored artifacts - use extracted with message timestamp
+          for (const art of extractedArtifacts) {
+            art.created_at = msg.created_at || art.created_at;
+          }
+          allArtifacts.push(...extractedArtifacts);
         }
       }
       
@@ -62,13 +72,22 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
       return;
     }
     
-    // Extract artifacts from new message
-    const { artifacts: newArtifacts } = extractArtifacts(message.content || '');
-    const allNewArtifacts = [...(message.artifacts || []), ...newArtifacts];
+    // Use artifacts passed with message (from stream_end extraction)
+    // Only extract from content if message.artifacts is not already set
+    let newArtifacts: Artifact[] = [];
+    if (message.artifacts && message.artifacts.length > 0) {
+      // Use the already-extracted artifacts (with correct timestamps)
+      newArtifacts = message.artifacts;
+    } else if (message.content) {
+      // Fallback: extract from content if no artifacts provided
+      const { artifacts: extracted } = extractArtifacts(message.content);
+      newArtifacts = extracted;
+    }
     
     set((state) => ({
       messages: [...state.messages, message],
-      artifacts: [...state.artifacts, ...allNewArtifacts],
+      // Append new artifacts to existing - don't replace!
+      artifacts: [...state.artifacts, ...newArtifacts],
     }));
   },
 

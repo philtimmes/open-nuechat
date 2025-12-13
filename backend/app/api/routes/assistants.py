@@ -562,8 +562,8 @@ async def list_subscribed_assistants(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all assistants you're subscribed to"""
-    from sqlalchemy import text
+    """List all assistants you're subscribed to (including your own)"""
+    from sqlalchemy import text, or_
     import json
     import logging
     logger = logging.getLogger(__name__)
@@ -577,30 +577,45 @@ async def list_subscribed_assistants(
     
     logger.debug(f"list_subscribed: Raw preferences for user {current_user.id}: {row[0] if row else 'NOT FOUND'}")
     
-    if not row or not row[0]:
-        return []
-    
-    prefs_raw = row[0]
-    if isinstance(prefs_raw, str):
-        prefs = json.loads(prefs_raw)
-    else:
-        prefs = dict(prefs_raw)
+    prefs = {}
+    if row and row[0]:
+        prefs_raw = row[0]
+        if isinstance(prefs_raw, str):
+            prefs = json.loads(prefs_raw)
+        else:
+            prefs = dict(prefs_raw)
     
     subscribed_ids = prefs.get("subscribed_assistants", [])
     logger.debug(f"list_subscribed: Subscribed IDs: {subscribed_ids}")
     
-    if not subscribed_ids:
-        return []
-    
-    result = await db.execute(
+    # Build query: either subscribed OR owned by current user
+    query = (
         select(CustomAssistant, User)
         .join(User, CustomAssistant.owner_id == User.id)
-        .where(CustomAssistant.id.in_(subscribed_ids))
-        .order_by(CustomAssistant.name)
     )
     
+    if subscribed_ids:
+        # Include subscribed assistants AND owned assistants
+        query = query.where(
+            or_(
+                CustomAssistant.id.in_(subscribed_ids),
+                CustomAssistant.owner_id == current_user.id
+            )
+        )
+    else:
+        # Only owned assistants
+        query = query.where(CustomAssistant.owner_id == current_user.id)
+    
+    query = query.order_by(CustomAssistant.name)
+    result = await db.execute(query)
+    
     responses = []
+    seen_ids = set()  # Avoid duplicates
     for assistant, owner in result:
+        if assistant.id in seen_ids:
+            continue
+        seen_ids.add(assistant.id)
+        
         responses.append(AssistantPublicInfo(
             id=assistant.id,
             name=assistant.name,
@@ -626,8 +641,8 @@ async def get_subscription_stats(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get usage statistics for subscribed assistants"""
-    from sqlalchemy import text, func as sql_func
+    """Get usage statistics for subscribed assistants (including owned)"""
+    from sqlalchemy import text, func as sql_func, or_
     import json
     import logging
     logger = logging.getLogger(__name__)
@@ -639,40 +654,47 @@ async def get_subscription_stats(
     )
     row = result.fetchone()
     
-    if not row or not row[0]:
-        return []
-    
-    prefs_raw = row[0]
-    if isinstance(prefs_raw, str):
-        prefs = json.loads(prefs_raw)
-    else:
-        prefs = dict(prefs_raw)
+    prefs = {}
+    if row and row[0]:
+        prefs_raw = row[0]
+        if isinstance(prefs_raw, str):
+            prefs = json.loads(prefs_raw)
+        else:
+            prefs = dict(prefs_raw)
     
     subscribed_ids = prefs.get("subscribed_assistants", [])
     
-    if not subscribed_ids:
-        return []
+    # Get assistants: either subscribed OR owned by current user
+    query = (
+        select(CustomAssistant, User)
+        .join(User, CustomAssistant.owner_id == User.id)
+    )
+    
+    if subscribed_ids:
+        query = query.where(
+            or_(
+                CustomAssistant.id.in_(subscribed_ids),
+                CustomAssistant.owner_id == current_user.id
+            )
+        )
+    else:
+        query = query.where(CustomAssistant.owner_id == current_user.id)
+    
+    assistants_result = await db.execute(query)
     
     # Get assistant details with usage stats
     stats = []
-    for assistant_id in subscribed_ids:
-        # Get assistant info
-        result = await db.execute(
-            select(CustomAssistant, User)
-            .join(User, CustomAssistant.owner_id == User.id)
-            .where(CustomAssistant.id == assistant_id)
-        )
-        row = result.first()
-        if not row:
+    seen_ids = set()
+    for assistant, owner in assistants_result:
+        if assistant.id in seen_ids:
             continue
-            
-        assistant, owner = row
+        seen_ids.add(assistant.id)
         
         # Get user's conversation count with this assistant
         conv_result = await db.execute(
             select(sql_func.count(AssistantConversation.id))
             .where(
-                AssistantConversation.assistant_id == assistant_id,
+                AssistantConversation.assistant_id == assistant.id,
                 AssistantConversation.user_id == current_user.id
             )
         )
@@ -686,7 +708,7 @@ async def get_subscription_stats(
                 JOIN assistant_conversations ac ON m.chat_id = ac.chat_id
                 WHERE ac.assistant_id = :assistant_id AND ac.user_id = :user_id
             """),
-            {"assistant_id": assistant_id, "user_id": current_user.id}
+            {"assistant_id": assistant.id, "user_id": current_user.id}
         )
         msg_row = message_result.first()
         message_count = msg_row[0] if msg_row else 0

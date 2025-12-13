@@ -178,6 +178,19 @@ flowchart TB
 - Role-based access control
 - API key management with scopes
 
+### 🔌 OpenAI-Compatible API
+- Drop-in replacement for OpenAI API clients
+- Full streaming support for chat completions
+- Custom GPT access via `model: "gpt:<assistant-id>"`
+- Knowledge base RAG automatically applied
+- Endpoints:
+  - `GET /v1/models` - List models and Custom GPTs
+  - `POST /v1/chat/completions` - Chat with streaming
+  - `POST /v1/images/generations` - Image generation
+  - `POST /v1/embeddings` - Text embeddings
+- Scoped API keys (completions, images, embeddings, models)
+- Configurable rate limits per endpoint
+
 ### 🔧 Tool System
 Built-in tools that the LLM can use:
 - **calculator**: Safe math evaluation
@@ -567,11 +580,23 @@ For detailed instructions on using Open-NueChat features, see **[USAGE.md](USAGE
 
 ## Schema Version
 
-**Current: NC-0.6.32**
+**Current: NC-0.6.33**
 
 The database schema is automatically migrated on startup.
 
-### Recent Changes (NC-0.6.32)
+### Recent Changes (NC-0.6.33)
+- **OpenAI-Compatible API**: Drop-in replacement for OpenAI API at `/v1/*`
+  - `GET /v1/models` - List available models and Custom GPTs
+  - `POST /v1/chat/completions` - Chat completions with streaming support
+  - `POST /v1/images/generations` - Image generation
+  - `POST /v1/embeddings` - Text embeddings
+- **API Key Management**: Full CRUD with scoped permissions (completions, images, embeddings, models)
+- **Custom GPT via API**: Use your Custom GPTs programmatically with `model: "gpt:<assistant-id>"`
+- **Rate Limiting**: Configurable per-endpoint limits in Admin panel
+- **Knowledge Base Access**: RAG search available through API when using Custom GPTs
+- **Debug RAG**: Admin toggle to log all knowledge base queries, search results, and retrieved context
+
+### Previous (NC-0.6.32)
 - **History Compression**: Automatic summarization of long conversations to manage context
 - **Office Documents**: Support for DOCX, XLSX, XLS, RTF file ingestion
 - **Version Trees**: Fixed branch selection to persist across sessions

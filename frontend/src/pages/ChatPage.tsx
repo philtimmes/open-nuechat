@@ -1443,7 +1443,7 @@ export default function ChatPage() {
                       <div className="px-3 py-1.5 text-xs text-[var(--color-text-secondary)] uppercase tracking-wide">
                         Models
                       </div>
-                      {models.map((model) => (
+                      {models.filter(model => model.id).map((model) => (
                         <button
                           key={model.id}
                           onClick={() => handleModelChange(model.id)}

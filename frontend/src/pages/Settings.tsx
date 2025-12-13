@@ -21,6 +21,35 @@ interface SubscriptionStats {
   total_tokens: number;
 }
 
+interface APIKey {
+  id: string;
+  name: string;
+  key_prefix: string;
+  scopes: string[];
+  rate_limit: number;
+  allowed_ips: string[];
+  is_active: boolean;
+  last_used_at: string | null;
+  usage_count: number;
+  expires_at: string | null;
+  created_at: string;
+}
+
+interface NewAPIKey {
+  name: string;
+  scopes: string[];
+  rate_limit: number;
+  expires_in_days: number | null;
+}
+
+const API_SCOPES = [
+  { id: 'models', label: 'List Models', description: 'GET /v1/models' },
+  { id: 'completions', label: 'Chat Completions', description: 'POST /v1/chat/completions' },
+  { id: 'images', label: 'Image Generation', description: 'POST /v1/images/generations' },
+  { id: 'embeddings', label: 'Embeddings', description: 'POST /v1/embeddings' },
+  { id: 'full', label: 'Full Access', description: 'All API endpoints' },
+];
+
 export default function Settings() {
   const { user } = useAuthStore();
   const { themes, currentTheme, applyTheme, applyThemeToAccount, isLoading } = useThemeStore();
@@ -35,10 +64,24 @@ export default function Settings() {
     setSttEnabled, setSelectedLanguage,
     fetchVoices, fetchLocalVoices, fetchLanguages, checkServiceStatus
   } = useVoiceStore();
-  const [activeTab, setActiveTab] = useState<'appearance' | 'account' | 'subscriptions' | 'preferences' | 'voice'>('appearance');
+  const [activeTab, setActiveTab] = useState<'appearance' | 'account' | 'apikeys' | 'subscriptions' | 'preferences' | 'voice'>('appearance');
   const [subscriptionStats, setSubscriptionStats] = useState<SubscriptionStats[]>([]);
   const [loadingStats, setLoadingStats] = useState(false);
   const [unsubscribing, setUnsubscribing] = useState<string | null>(null);
+  
+  // API Keys state
+  const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
+  const [loadingKeys, setLoadingKeys] = useState(false);
+  const [showNewKeyForm, setShowNewKeyForm] = useState(false);
+  const [newKeyData, setNewKeyData] = useState<NewAPIKey>({
+    name: '',
+    scopes: ['completions'],
+    rate_limit: 100,
+    expires_in_days: null,
+  });
+  const [createdKey, setCreatedKey] = useState<string | null>(null);
+  const [savingKey, setSavingKey] = useState(false);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
   
   // Fetch models on mount
   useEffect(() => {
@@ -61,6 +104,83 @@ export default function Settings() {
       fetchLanguages();
     }
   }, [activeTab, checkServiceStatus, fetchVoices, fetchLocalVoices, fetchLanguages]);
+  
+  // Fetch API keys when tab is active
+  useEffect(() => {
+    if (activeTab === 'apikeys') {
+      loadApiKeys();
+    }
+  }, [activeTab]);
+  
+  const loadApiKeys = async () => {
+    setLoadingKeys(true);
+    try {
+      const res = await api.get('/keys');
+      setApiKeys(res.data || []);
+    } catch (err) {
+      console.error('Failed to load API keys:', err);
+    } finally {
+      setLoadingKeys(false);
+    }
+  };
+  
+  const handleCreateKey = async () => {
+    if (!newKeyData.name.trim()) return;
+    
+    setSavingKey(true);
+    try {
+      const res = await api.post('/keys', newKeyData);
+      setCreatedKey(res.data.key);
+      setApiKeys(prev => [res.data, ...prev]);
+      setNewKeyData({
+        name: '',
+        scopes: ['completions'],
+        rate_limit: 100,
+        expires_in_days: null,
+      });
+    } catch (err) {
+      console.error('Failed to create API key:', err);
+      alert('Failed to create API key');
+    } finally {
+      setSavingKey(false);
+    }
+  };
+  
+  const handleDeleteKey = async (keyId: string) => {
+    if (!confirm('Are you sure you want to delete this API key? This action cannot be undone.')) return;
+    
+    setDeletingKey(keyId);
+    try {
+      await api.delete(`/keys/${keyId}`);
+      setApiKeys(prev => prev.filter(k => k.id !== keyId));
+    } catch (err) {
+      console.error('Failed to delete API key:', err);
+    } finally {
+      setDeletingKey(null);
+    }
+  };
+  
+  const handleToggleKeyActive = async (keyId: string, isActive: boolean) => {
+    try {
+      await api.patch(`/keys/${keyId}`, { is_active: !isActive });
+      setApiKeys(prev => prev.map(k => k.id === keyId ? { ...k, is_active: !isActive } : k));
+    } catch (err) {
+      console.error('Failed to toggle API key:', err);
+    }
+  };
+  
+  const handleScopeToggle = (scope: string) => {
+    setNewKeyData(prev => ({
+      ...prev,
+      scopes: prev.scopes.includes(scope)
+        ? prev.scopes.filter(s => s !== scope)
+        : [...prev.scopes, scope],
+    }));
+  };
+  
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+  };
   
   const loadSubscriptionStats = async () => {
     setLoadingStats(true);
@@ -109,6 +229,7 @@ export default function Settings() {
   const tabs = [
     { id: 'appearance', label: 'Appearance', iconType: 'appearance' },
     { id: 'account', label: 'Account', iconType: 'account' },
+    { id: 'apikeys', label: 'API Keys', iconType: 'apikeys' },
     { id: 'voice', label: 'Voice', iconType: 'voice' },
     { id: 'subscriptions', label: 'Subscriptions', iconType: 'subscriptions' },
     { id: 'preferences', label: 'Preferences', iconType: 'preferences' },
@@ -121,6 +242,8 @@ export default function Settings() {
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" /></svg>;
       case 'account':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>;
+      case 'apikeys':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>;
       case 'voice':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>;
       case 'subscriptions':
@@ -323,6 +446,266 @@ export default function Settings() {
               <button className="px-4 py-2 rounded-lg border border-[var(--color-error)] text-[var(--color-error)] hover:bg-red-500/10 transition-colors">
                 Delete Account
               </button>
+            </section>
+          </div>
+        )}
+        
+        {/* API Keys tab */}
+        {activeTab === 'apikeys' && (
+          <div className="space-y-6">
+            {/* Created key display */}
+            {createdKey && (
+              <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-6">
+                <h3 className="text-lg font-semibold text-green-400 mb-2">🔑 API Key Created</h3>
+                <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                  Copy this key now. You won't be able to see it again!
+                </p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 bg-[var(--color-bg)] p-3 rounded-lg text-[var(--color-text)] font-mono text-sm break-all">
+                    {createdKey}
+                  </code>
+                  <button
+                    onClick={() => {
+                      copyToClipboard(createdKey);
+                      setCreatedKey(null);
+                    }}
+                    className="px-4 py-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90"
+                  >
+                    Copy & Close
+                  </button>
+                </div>
+              </div>
+            )}
+            
+            {/* Create new key section */}
+            <section className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold text-[var(--color-text)]">API Keys</h2>
+                  <p className="text-sm text-[var(--color-text-secondary)]">
+                    Use API keys for programmatic access to the OpenAI-compatible API.
+                  </p>
+                </div>
+                {!showNewKeyForm && (
+                  <button
+                    onClick={() => setShowNewKeyForm(true)}
+                    className="px-4 py-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 flex items-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                    Create Key
+                  </button>
+                )}
+              </div>
+              
+              {showNewKeyForm && (
+                <div className="bg-[var(--color-bg)] rounded-lg p-4 mb-6 border border-[var(--color-border)]">
+                  <h3 className="font-medium text-[var(--color-text)] mb-4">New API Key</h3>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Name</label>
+                      <input
+                        type="text"
+                        value={newKeyData.name}
+                        onChange={(e) => setNewKeyData(prev => ({ ...prev, name: e.target.value }))}
+                        placeholder="My App API Key"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:border-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-2">Scopes (Permissions)</label>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                        {API_SCOPES.map((scope) => (
+                          <label
+                            key={scope.id}
+                            className={`flex items-start gap-2 p-3 rounded-lg border cursor-pointer transition-colors ${
+                              newKeyData.scopes.includes(scope.id)
+                                ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10'
+                                : 'border-[var(--color-border)] hover:border-zinc-500'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={newKeyData.scopes.includes(scope.id)}
+                              onChange={() => handleScopeToggle(scope.id)}
+                              className="mt-0.5"
+                            />
+                            <div>
+                              <div className="text-sm font-medium text-[var(--color-text)]">{scope.label}</div>
+                              <div className="text-xs text-[var(--color-text-secondary)]">{scope.description}</div>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Rate Limit (req/min)</label>
+                        <input
+                          type="number"
+                          value={newKeyData.rate_limit}
+                          onChange={(e) => setNewKeyData(prev => ({ ...prev, rate_limit: parseInt(e.target.value) || 100 }))}
+                          min={1}
+                          max={1000}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:border-[var(--color-primary)]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Expires In (days)</label>
+                        <input
+                          type="number"
+                          value={newKeyData.expires_in_days || ''}
+                          onChange={(e) => setNewKeyData(prev => ({ ...prev, expires_in_days: e.target.value ? parseInt(e.target.value) : null }))}
+                          placeholder="Never"
+                          min={1}
+                          max={365}
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:border-[var(--color-primary)]"
+                        />
+                      </div>
+                    </div>
+                    
+                    <div className="flex gap-2 pt-2">
+                      <button
+                        onClick={handleCreateKey}
+                        disabled={!newKeyData.name.trim() || newKeyData.scopes.length === 0 || savingKey}
+                        className="px-4 py-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {savingKey ? 'Creating...' : 'Create Key'}
+                      </button>
+                      <button
+                        onClick={() => setShowNewKeyForm(false)}
+                        className="px-4 py-2 rounded-lg border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-surface)]"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* Existing keys list */}
+              {loadingKeys ? (
+                <div className="flex items-center justify-center py-8">
+                  <svg className="animate-spin h-6 w-6 text-[var(--color-text-secondary)]" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                </div>
+              ) : apiKeys.length === 0 ? (
+                <div className="text-center py-8 text-[var(--color-text-secondary)]">
+                  <svg className="w-12 h-12 mx-auto mb-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                  </svg>
+                  <p>No API keys yet. Create one to get started.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {apiKeys.map((key) => (
+                    <div
+                      key={key.id}
+                      className={`p-4 rounded-lg border transition-colors ${
+                        key.is_active
+                          ? 'bg-[var(--color-bg)] border-[var(--color-border)]'
+                          : 'bg-zinc-500/5 border-zinc-500/20 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <h3 className="font-medium text-[var(--color-text)] truncate">{key.name}</h3>
+                            <span className={`px-2 py-0.5 text-xs rounded-full ${
+                              key.is_active
+                                ? 'bg-green-500/20 text-green-400'
+                                : 'bg-zinc-500/20 text-zinc-400'
+                            }`}>
+                              {key.is_active ? 'Active' : 'Disabled'}
+                            </span>
+                          </div>
+                          <code className="text-sm text-[var(--color-text-secondary)] font-mono">
+                            {key.key_prefix}...
+                          </code>
+                          <div className="flex flex-wrap gap-1 mt-2">
+                            {key.scopes.map((scope) => (
+                              <span
+                                key={scope}
+                                className="px-2 py-0.5 text-xs rounded bg-[var(--color-surface)] text-[var(--color-text-secondary)] border border-[var(--color-border)]"
+                              >
+                                {scope}
+                              </span>
+                            ))}
+                          </div>
+                          <div className="flex flex-wrap gap-4 mt-2 text-xs text-[var(--color-text-secondary)]">
+                            <span>Rate: {key.rate_limit}/min</span>
+                            <span>Used: {key.usage_count} times</span>
+                            {key.last_used_at && (
+                              <span>Last used: {new Date(key.last_used_at).toLocaleDateString()}</span>
+                            )}
+                            {key.expires_at && (
+                              <span>Expires: {new Date(key.expires_at).toLocaleDateString()}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleToggleKeyActive(key.id, key.is_active)}
+                            className="p-2 rounded-lg hover:bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                            title={key.is_active ? 'Disable' : 'Enable'}
+                          >
+                            {key.is_active ? (
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                            ) : (
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                            )}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteKey(key.id)}
+                            disabled={deletingKey === key.id}
+                            className="p-2 rounded-lg hover:bg-red-500/10 text-[var(--color-text-secondary)] hover:text-[var(--color-error)]"
+                            title="Delete"
+                          >
+                            {deletingKey === key.id ? (
+                              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                              </svg>
+                            ) : (
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+            
+            {/* API Documentation */}
+            <section className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+              <h2 className="text-lg font-semibold text-[var(--color-text)] mb-2">API Usage</h2>
+              <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                Use your API key with any OpenAI-compatible client:
+              </p>
+              <pre className="bg-[var(--color-bg)] p-4 rounded-lg text-sm text-[var(--color-text)] overflow-x-auto font-mono">
+{`curl ${window.location.origin}/v1/chat/completions \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "llama3.2",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'`}
+              </pre>
             </section>
           </div>
         )}

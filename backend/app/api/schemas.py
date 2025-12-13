@@ -133,6 +133,7 @@ class MessageResponse(BaseModel):
     content: Optional[str]
     content_type: str
     attachments: Optional[List[Dict]]
+    artifacts: Optional[List[Dict]] = None  # Extracted code artifacts with timestamps
     tool_calls: Optional[List[Dict]]
     input_tokens: int
     output_tokens: int
@@ -158,6 +159,7 @@ class MessageResponse(BaseModel):
                 'content': obj.content,
                 'content_type': obj.content_type.value if hasattr(obj.content_type, 'value') else obj.content_type,
                 'attachments': obj.attachments,
+                'artifacts': obj.artifacts,  # Include artifacts
                 'tool_calls': obj.tool_calls,
                 'input_tokens': obj.input_tokens,
                 'output_tokens': obj.output_tokens,

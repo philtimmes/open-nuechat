@@ -55,11 +55,18 @@ class SharePermission(str, enum.Enum):
 
 class APIKeyScope(str, enum.Enum):
     """Scopes for API key permissions"""
+    # Legacy scopes (for internal API)
     CHAT = "chat"               # Create messages, stream responses
     KNOWLEDGE = "knowledge"     # Access knowledge stores
     ASSISTANTS = "assistants"   # Use custom assistants
     BILLING = "billing"         # View usage/billing
     FULL = "full"               # All permissions
+    
+    # OpenAI-compatible API scopes (v1/)
+    MODELS = "models"           # GET /v1/models
+    COMPLETIONS = "completions" # POST /v1/chat/completions
+    IMAGES = "images"           # POST /v1/images/generations
+    EMBEDDINGS = "embeddings"   # POST /v1/embeddings
 
 
 class ToolType(str, enum.Enum):

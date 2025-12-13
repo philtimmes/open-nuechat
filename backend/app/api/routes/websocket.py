@@ -673,44 +673,43 @@ async def handle_chat_message(
         default_prompt = await get_system_setting(db, "default_system_prompt")
         system_prompt = chat.system_prompt or default_prompt
         
-        # Get RAG context if enabled
+        # Check if this chat is associated with an assistant (for RAG auto-enable)
+        assistant_result = await db.execute(
+            select(AssistantConversation)
+            .where(AssistantConversation.chat_id == chat_id)
+        )
+        assistant_conv = assistant_result.scalar_one_or_none()
+        assistant_ks_ids = []
+        
+        if assistant_conv:
+            # Get the assistant's knowledge stores
+            assistant_result = await db.execute(
+                select(CustomAssistant)
+                .where(CustomAssistant.id == assistant_conv.assistant_id)
+                .options(selectinload(CustomAssistant.knowledge_stores))
+            )
+            assistant = assistant_result.scalar_one_or_none()
+            
+            if assistant and assistant.knowledge_stores:
+                assistant_ks_ids = [str(ks.id) for ks in assistant.knowledge_stores]
+                # Auto-enable RAG for assistants with knowledge stores
+                enable_rag = True
+                logger.info(f"Auto-enabled RAG for assistant with knowledge stores: {assistant_ks_ids}")
+        
+        # Get RAG context if enabled (or auto-enabled for assistants)
         if enable_rag:
             rag_service = RAGService()
             
-            # Check if this chat is associated with an assistant
-            assistant_result = await db.execute(
-                select(AssistantConversation)
-                .where(AssistantConversation.chat_id == chat_id)
-            )
-            assistant_conv = assistant_result.scalar_one_or_none()
-            
-            if assistant_conv:
-                # Get the assistant's knowledge stores
-                assistant_result = await db.execute(
-                    select(CustomAssistant)
-                    .where(CustomAssistant.id == assistant_conv.assistant_id)
-                    .options(selectinload(CustomAssistant.knowledge_stores))
+            if assistant_ks_ids:
+                # Use assistant's knowledge stores (allows private KB access through public GPT)
+                context = await rag_service.get_knowledge_store_context(
+                    db=db,
+                    user=user,
+                    query=content,
+                    knowledge_store_ids=assistant_ks_ids,
+                    bypass_access_check=True,  # Allow access through assistant
                 )
-                assistant = assistant_result.scalar_one_or_none()
-                
-                if assistant and assistant.knowledge_stores:
-                    # Use assistant's knowledge stores (allows private KB access through public GPT)
-                    ks_ids = [str(ks.id) for ks in assistant.knowledge_stores]
-                    context = await rag_service.get_knowledge_store_context(
-                        db=db,
-                        user=user,
-                        query=content,
-                        knowledge_store_ids=ks_ids,
-                        bypass_access_check=True,  # Allow access through assistant
-                    )
-                    logger.debug(f"Using assistant knowledge stores for chat {chat_id}: {ks_ids}")
-                else:
-                    context = await rag_service.get_context_for_query(
-                        db=db,
-                        user=user,
-                        query=content,
-                        document_ids=document_ids,
-                    )
+                logger.debug(f"Using assistant knowledge stores for chat {chat_id}: {assistant_ks_ids}")
             else:
                 # Regular user documents
                 context = await rag_service.get_context_for_query(

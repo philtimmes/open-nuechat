@@ -117,6 +117,11 @@ export const useModelsStore = create<ModelsState>()(
       },
       
       getDisplayName: (modelId: string) => {
+        // Handle undefined/null modelId
+        if (!modelId) {
+          return 'Unknown Model';
+        }
+        
         const { models, subscribedAssistants } = get();
         
         // Check if it's a subscribed assistant

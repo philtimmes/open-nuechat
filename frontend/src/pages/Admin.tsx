@@ -48,6 +48,13 @@ interface FeatureFlags {
   enable_safety_filters: boolean;
 }
 
+interface APIRateLimits {
+  api_rate_limit_completions: number;
+  api_rate_limit_embeddings: number;
+  api_rate_limit_images: number;
+  api_rate_limit_models: number;
+}
+
 interface TierConfig {
   id: string;
   name: string;
@@ -163,6 +170,7 @@ export default function Admin() {
   const [oauthSettings, setOAuthSettings] = useState<OAuthSettings | null>(null);
   const [llmSettings, setLLMSettings] = useState<LLMSettings | null>(null);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags | null>(null);
+  const [apiRateLimits, setApiRateLimits] = useState<APIRateLimits | null>(null);
   const [tiers, setTiers] = useState<TierConfig[]>([]);
   
   // Dev settings (stored in localStorage)
@@ -173,6 +181,7 @@ export default function Admin() {
   // Dev settings (stored in backend)
   const [debugTokenResets, setDebugTokenResets] = useState(false);
   const [debugDocumentQueue, setDebugDocumentQueue] = useState(false);
+  const [debugRag, setDebugRag] = useState(false);
   const [lastTokenReset, setLastTokenReset] = useState<string | null>(null);
   const [tokenRefillHours, setTokenRefillHours] = useState(720);
   const [debugSettingsLoading, setDebugSettingsLoading] = useState(false);
@@ -373,6 +382,7 @@ export default function Admin() {
       const res = await api.get('/admin/debug-settings');
       setDebugTokenResets(res.data.debug_token_resets);
       setDebugDocumentQueue(res.data.debug_document_queue);
+      setDebugRag(res.data.debug_rag);
       setLastTokenReset(res.data.last_token_reset_timestamp);
       setTokenRefillHours(res.data.token_refill_interval_hours);
     } catch (err: any) {
@@ -404,20 +414,33 @@ export default function Admin() {
     }
   };
   
+  const saveDebugRag = async (value: boolean) => {
+    try {
+      await api.put('/admin/debug-settings', { debug_rag: value });
+      setDebugRag(value);
+      setSuccess('Debug setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save debug setting');
+    }
+  };
+  
   const fetchData = async () => {
     try {
-      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes] = await Promise.all([
+      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes, rateLimitsRes] = await Promise.all([
         api.get('/admin/settings'),
         api.get('/admin/oauth-settings'),
         api.get('/admin/llm-settings'),
         api.get('/admin/feature-flags'),
         api.get('/admin/tiers'),
+        api.get('/admin/api-rate-limits'),
       ]);
       setSystemSettings(systemRes.data);
       setOAuthSettings(oauthRes.data);
       setLLMSettings(llmRes.data);
       setFeatureFlags(featuresRes.data);
       setTiers(tiersRes.data.tiers);
+      setApiRateLimits(rateLimitsRes.data);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to load settings');
     } finally {
@@ -497,6 +520,21 @@ export default function Admin() {
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to save feature flags');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  const saveApiRateLimits = async () => {
+    if (!apiRateLimits) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      await api.put('/admin/api-rate-limits', apiRateLimits);
+      setSuccess('API rate limits saved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save API rate limits');
     } finally {
       setIsSaving(false);
     }
@@ -1813,6 +1851,82 @@ export default function Admin() {
                 >
                   {isSaving ? 'Saving...' : 'Save Feature Flags'}
                 </button>
+                
+                {/* API Rate Limits */}
+                {apiRateLimits && (
+                  <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                    <h2 className="text-lg font-semibold text-[var(--color-text)] mb-2">API Rate Limits</h2>
+                    <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                      Configure rate limits for the OpenAI-compatible /v1 API endpoints (requests per minute per API key)
+                    </p>
+                    
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                          Chat Completions (/v1/chat/completions)
+                        </label>
+                        <input
+                          type="number"
+                          value={apiRateLimits.api_rate_limit_completions}
+                          onChange={(e) => setApiRateLimits({ ...apiRateLimits, api_rate_limit_completions: parseInt(e.target.value) || 60 })}
+                          min={1}
+                          max={1000}
+                          className="w-full px-3 py-2 bg-[var(--color-background)] text-[var(--color-text)] border border-[var(--color-border)] rounded-lg"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                          Embeddings (/v1/embeddings)
+                        </label>
+                        <input
+                          type="number"
+                          value={apiRateLimits.api_rate_limit_embeddings}
+                          onChange={(e) => setApiRateLimits({ ...apiRateLimits, api_rate_limit_embeddings: parseInt(e.target.value) || 200 })}
+                          min={1}
+                          max={1000}
+                          className="w-full px-3 py-2 bg-[var(--color-background)] text-[var(--color-text)] border border-[var(--color-border)] rounded-lg"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                          Image Generations (/v1/images/generations)
+                        </label>
+                        <input
+                          type="number"
+                          value={apiRateLimits.api_rate_limit_images}
+                          onChange={(e) => setApiRateLimits({ ...apiRateLimits, api_rate_limit_images: parseInt(e.target.value) || 10 })}
+                          min={1}
+                          max={100}
+                          className="w-full px-3 py-2 bg-[var(--color-background)] text-[var(--color-text)] border border-[var(--color-border)] rounded-lg"
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                          Models List (/v1/models)
+                        </label>
+                        <input
+                          type="number"
+                          value={apiRateLimits.api_rate_limit_models}
+                          onChange={(e) => setApiRateLimits({ ...apiRateLimits, api_rate_limit_models: parseInt(e.target.value) || 100 })}
+                          min={1}
+                          max={1000}
+                          className="w-full px-3 py-2 bg-[var(--color-background)] text-[var(--color-text)] border border-[var(--color-border)] rounded-lg"
+                        />
+                      </div>
+                    </div>
+                    
+                    <button
+                      onClick={saveApiRateLimits}
+                      disabled={isSaving}
+                      className="mt-4 px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                    >
+                      {isSaving ? 'Saving...' : 'Save Rate Limits'}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
             
@@ -3935,6 +4049,21 @@ export default function Admin() {
                           <div className="text-[var(--color-text)] font-medium">Debug Document Queue</div>
                           <div className="text-sm text-[var(--color-text-secondary)]">
                             Logs document processing queue activity (task added, processing, completed)
+                          </div>
+                        </div>
+                      </label>
+                      
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={debugRag}
+                          onChange={(e) => saveDebugRag(e.target.checked)}
+                          className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                        />
+                        <div>
+                          <div className="text-[var(--color-text)] font-medium">Debug RAG</div>
+                          <div className="text-sm text-[var(--color-text-secondary)]">
+                            Logs all knowledge base queries: search terms, matched documents, relevance scores, and retrieved context
                           </div>
                         </div>
                       </label>

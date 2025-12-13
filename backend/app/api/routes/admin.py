@@ -92,6 +92,12 @@ SETTING_DEFAULTS = {
     "enable_registration": str(settings.ENABLE_REGISTRATION).lower(),
     "enable_billing": str(settings.ENABLE_BILLING).lower(),
     "freeforall": str(settings.FREEFORALL).lower(),
+    
+    # API Rate Limits (per minute, per API key)
+    "api_rate_limit_completions": "60",
+    "api_rate_limit_embeddings": "200",
+    "api_rate_limit_images": "10",
+    "api_rate_limit_models": "100",
 }
 
 
@@ -112,22 +118,22 @@ async def get_system_setting_bool(db: AsyncSession, key: str) -> bool:
     return value.lower() in ("true", "1", "yes", "on")
 
 
-async def get_system_setting_int(db: AsyncSession, key: str) -> int:
+async def get_system_setting_int(db: AsyncSession, key: str, default: int = 0) -> int:
     """Get an integer system setting."""
     value = await get_system_setting(db, key)
     try:
         return int(value)
     except (ValueError, TypeError):
-        return int(SETTING_DEFAULTS.get(key, "0"))
+        return default
 
 
-async def get_system_setting_float(db: AsyncSession, key: str) -> float:
+async def get_system_setting_float(db: AsyncSession, key: str, default: float = 0.0) -> float:
     """Get a float system setting."""
     value = await get_system_setting(db, key)
     try:
         return float(value)
     except (ValueError, TypeError):
-        return float(SETTING_DEFAULTS.get(key, "0.0"))
+        return default
 
 
 class TierConfig(BaseModel):
@@ -197,6 +203,14 @@ class FeatureFlagsSchema(BaseModel):
     enable_billing: bool = True
     freeforall: bool = False
     enable_safety_filters: bool = False  # Prompt injection & content moderation filters
+
+
+class APIRateLimitsSchema(BaseModel):
+    """API rate limit settings (requests per minute)"""
+    api_rate_limit_completions: int = Field(default=60, ge=1, le=1000, description="Chat completions per minute")
+    api_rate_limit_embeddings: int = Field(default=200, ge=1, le=1000, description="Embeddings per minute")
+    api_rate_limit_images: int = Field(default=10, ge=1, le=100, description="Image generations per minute")
+    api_rate_limit_models: int = Field(default=100, ge=1, le=1000, description="Model list requests per minute")
 
 
 class TiersSchema(BaseModel):
@@ -446,6 +460,41 @@ async def update_feature_flags(
     await set_setting(db, "enable_billing", str(data.enable_billing).lower())
     await set_setting(db, "freeforall", str(data.freeforall).lower())
     await set_setting(db, "enable_safety_filters", str(data.enable_safety_filters).lower())
+    
+    await db.commit()
+    
+    return data
+
+
+# =============================================================================
+# API RATE LIMITS
+# =============================================================================
+
+@router.get("/api-rate-limits", response_model=APIRateLimitsSchema)
+async def get_api_rate_limits(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get API rate limit settings"""
+    return APIRateLimitsSchema(
+        api_rate_limit_completions=await get_system_setting_int(db, "api_rate_limit_completions", 60),
+        api_rate_limit_embeddings=await get_system_setting_int(db, "api_rate_limit_embeddings", 200),
+        api_rate_limit_images=await get_system_setting_int(db, "api_rate_limit_images", 10),
+        api_rate_limit_models=await get_system_setting_int(db, "api_rate_limit_models", 100),
+    )
+
+
+@router.put("/api-rate-limits", response_model=APIRateLimitsSchema)
+async def update_api_rate_limits(
+    data: APIRateLimitsSchema,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update API rate limit settings"""
+    await set_setting(db, "api_rate_limit_completions", str(data.api_rate_limit_completions))
+    await set_setting(db, "api_rate_limit_embeddings", str(data.api_rate_limit_embeddings))
+    await set_setting(db, "api_rate_limit_images", str(data.api_rate_limit_images))
+    await set_setting(db, "api_rate_limit_models", str(data.api_rate_limit_models))
     
     await db.commit()
     
@@ -1363,6 +1412,7 @@ async def test_filter(
 class DebugSettingsResponse(BaseModel):
     debug_token_resets: bool
     debug_document_queue: bool
+    debug_rag: bool
     last_token_reset_timestamp: Optional[str] = None
     token_refill_interval_hours: int
 
@@ -1370,6 +1420,7 @@ class DebugSettingsResponse(BaseModel):
 class DebugSettingsUpdate(BaseModel):
     debug_token_resets: Optional[bool] = None
     debug_document_queue: Optional[bool] = None
+    debug_rag: Optional[bool] = None
 
 
 @router.get("/debug-settings", response_model=DebugSettingsResponse)
@@ -1380,12 +1431,14 @@ async def get_debug_settings(
     """Get debug settings for the Site Dev tab."""
     debug_token_resets = await get_system_setting(db, "debug_token_resets") == "true"
     debug_document_queue = await get_system_setting(db, "debug_document_queue") == "true"
+    debug_rag = await get_system_setting(db, "debug_rag") == "true"
     last_token_reset = await get_system_setting(db, "last_token_reset_timestamp")
     refill_hours = await get_system_setting_int(db, "token_refill_interval_hours")
     
     return DebugSettingsResponse(
         debug_token_resets=debug_token_resets,
         debug_document_queue=debug_document_queue,
+        debug_rag=debug_rag,
         last_token_reset_timestamp=last_token_reset if last_token_reset else None,
         token_refill_interval_hours=refill_hours,
     )
@@ -1402,6 +1455,8 @@ async def update_debug_settings(
         await set_setting(db, "debug_token_resets", "true" if data.debug_token_resets else "false")
     if data.debug_document_queue is not None:
         await set_setting(db, "debug_document_queue", "true" if data.debug_document_queue else "false")
+    if data.debug_rag is not None:
+        await set_setting(db, "debug_rag", "true" if data.debug_rag else "false")
     
     await db.commit()
     

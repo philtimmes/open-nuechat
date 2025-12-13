@@ -109,6 +109,140 @@ class LLMService:
             logger.error(f"simple_completion error: {e}")
             return ""
     
+    async def complete(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict]] = None,
+        tool_choice: Optional[Any] = None,
+        stop: Optional[Any] = None,
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Create a chat completion (non-streaming).
+        
+        Used by the OpenAI-compatible v1 API.
+        
+        Returns:
+            Dict with 'content', 'tool_calls', 'finish_reason'
+        """
+        effective_model = await self._get_effective_model(model)
+        
+        kwargs = {
+            "model": effective_model,
+            "messages": messages,
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "stream": False,
+        }
+        
+        if tools:
+            kwargs["tools"] = tools
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
+        if stop:
+            kwargs["stop"] = stop
+        
+        try:
+            response = await self.client.chat.completions.create(**kwargs)
+            choice = response.choices[0]
+            
+            result = {
+                "content": choice.message.content or "",
+                "finish_reason": choice.finish_reason,
+            }
+            
+            # Handle tool calls
+            if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
+                result["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        }
+                    }
+                    for tc in choice.message.tool_calls
+                ]
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"complete error: {e}")
+            raise
+    
+    async def stream_complete(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict]] = None,
+        tool_choice: Optional[Any] = None,
+        stop: Optional[Any] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Create a streaming chat completion.
+        
+        Used by the OpenAI-compatible v1 API.
+        
+        Yields:
+            Dict with 'content' and/or 'tool_calls' chunks
+        """
+        effective_model = await self._get_effective_model(model)
+        
+        kwargs = {
+            "model": effective_model,
+            "messages": messages,
+            "temperature": temperature if temperature is not None else self.temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "stream": True,
+        }
+        
+        if tools:
+            kwargs["tools"] = tools
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
+        if stop:
+            kwargs["stop"] = stop
+        
+        try:
+            stream = await self.client.chat.completions.create(**kwargs)
+            
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                
+                delta = chunk.choices[0].delta
+                result = {}
+                
+                if hasattr(delta, "content") and delta.content:
+                    result["content"] = delta.content
+                
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    result["tool_calls"] = [
+                        {
+                            "index": tc.index,
+                            "id": getattr(tc, "id", None),
+                            "type": getattr(tc, "type", None),
+                            "function": {
+                                "name": getattr(tc.function, "name", None) if tc.function else None,
+                                "arguments": getattr(tc.function, "arguments", None) if tc.function else None,
+                            }
+                        }
+                        for tc in delta.tool_calls
+                    ]
+                
+                if result:
+                    yield result
+                    
+        except Exception as e:
+            logger.error(f"stream_complete error: {e}")
+            raise
+    
     async def _get_effective_model(self, requested_model: Optional[str] = None) -> str:
         """Get the effective model to use, resolving 'default' if needed"""
         model = requested_model or settings.LLM_MODEL
@@ -984,7 +1118,7 @@ When you receive search results or external data in the conversation, follow the
                 messages=messages,
                 llm_client=None,  # We'll use our own client
                 model=await self._get_effective_model(None),
-                api_base=self.api_base,
+                api_base=self.base_url,
                 api_key=self.api_key,
             )
             return compressed

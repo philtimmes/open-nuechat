@@ -32,6 +32,7 @@ SETTING_DEFAULTS = {
     # Debug settings
     "debug_token_resets": "false",  # Log detailed token info on reset checks
     "debug_document_queue": "false",  # Log document queue processing
+    "debug_rag": "false",  # Log all RAG queries, results, and context retrieval
     
     # OAuth - Google
     "google_client_id": config_settings.GOOGLE_CLIENT_ID or "",
@@ -67,6 +68,12 @@ SETTING_DEFAULTS = {
     "history_compression_threshold": "20",  # Compress after this many messages
     "history_compression_keep_recent": "6",  # Keep this many recent message pairs intact
     "history_compression_target_tokens": "8000",  # Target total tokens after compression
+    
+    # API Rate Limits (per minute, per API key)
+    "api_rate_limit_completions": "60",  # Chat completions per minute
+    "api_rate_limit_embeddings": "200",  # Embeddings requests per minute
+    "api_rate_limit_images": "10",  # Image generations per minute
+    "api_rate_limit_models": "100",  # Model list requests per minute
 }
 
 
