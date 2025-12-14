@@ -536,6 +536,9 @@ async def handle_chat_message(
             if mcp_tools_cache:
                 logger.debug(f"MCP tools cache has {len(mcp_tools_cache)} tools: {list(mcp_tools_cache.keys())}")
             
+            # Create tool service for MCP tool execution
+            tool_service = ToolService()
+            
             # Create executor with LLM and tool execution functions
             async def filter_llm_func(prompt: str, system: str = None) -> str:
                 """Simple LLM call for filter chain decisions."""
@@ -853,7 +856,7 @@ async def handle_chat_message(
                     # (e.g., file content requests that immediately follow)
                     try:
                         await db.commit()
-                        logger.info(f"Committed message before stream_end")
+                        logger.debug(f"Committed assistant message to DB")
                     except Exception as commit_err:
                         logger.warning(f"Failed to commit before stream_end: {commit_err}")
                         # Don't fail - the message may still be usable
