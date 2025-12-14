@@ -115,15 +115,15 @@ class APIKey(Base):
     key_hash = Column(String(255), nullable=False)  # Hashed full key
     
     # Permissions
-    scopes = Column(JSON, default=list)  # List of APIKeyScope values
+    scopes = Column(JSON, default=lambda: [])  # List of APIKeyScope values
     
     # Rate limiting
     rate_limit = Column(Integer, default=100)  # Requests per minute
     
     # Restrictions
-    allowed_ips = Column(JSON, default=list)  # Empty = allow all
-    allowed_assistants = Column(JSON, default=list)  # Empty = allow all
-    allowed_knowledge_stores = Column(JSON, default=list)  # Empty = allow all
+    allowed_ips = Column(JSON, default=lambda: [])  # Empty = allow all
+    allowed_assistants = Column(JSON, default=lambda: [])  # Empty = allow all
+    allowed_knowledge_stores = Column(JSON, default=lambda: [])  # Empty = allow all
     
     # Status
     is_active = Column(Boolean, default=True)

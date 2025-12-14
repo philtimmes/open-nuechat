@@ -18,8 +18,9 @@ from app.services.websocket import ws_manager, StreamingHandler
 from app.services.llm import LLMService
 from app.services.rag import RAGService
 from app.services.billing import BillingService
+from app.services.procedural_memory import ProceduralMemoryService, get_procedural_context
 from app.services.tool_service import ToolService
-from app.services.image_gen import detect_image_request
+from app.services.image_gen import detect_image_request, detect_image_request_async
 from app.tools.registry import tool_registry
 from app.models.models import User, Chat, Message, MessageRole, ContentType, AssistantConversation, CustomAssistant
 from app.core.config import settings
@@ -222,8 +223,8 @@ async def handle_chat_message(
             })
             return
         
-        # Check if this is an image generation request
-        is_image_request, image_prompt = detect_image_request(content)
+        # Check if this is an image generation request (with LLM confirmation)
+        is_image_request, image_prompt = await detect_image_request_async(content, db)
         if is_image_request:
             logger.debug(f"Image generation request detected: {content[:100]}...")
             
@@ -723,6 +724,17 @@ async def handle_chat_message(
                 rag_prompt = await get_system_setting(db, "rag_context_prompt")
                 system_prompt = f"{system_prompt}\n\n{rag_prompt}\n\n{context}"
         
+        # Get Procedural Memory context (learned skills)
+        enable_procedural_memory = payload.get("enable_procedural_memory", settings.PROCEDURAL_MEMORY_ENABLED)
+        if enable_procedural_memory:
+            try:
+                procedural_context = await get_procedural_context(str(user.id), content)
+                if procedural_context:
+                    system_prompt = f"{system_prompt}\n\n{procedural_context}"
+                    logger.debug(f"Injected procedural memory context for chat {chat_id}")
+            except Exception as e:
+                logger.warning(f"Failed to get procedural memory context: {e}")
+        
         # Inject zip manifest if provided in payload (preferred) or from DB (fallback)
         zip_context = payload.get("zip_context")
         if zip_context:
@@ -895,6 +907,37 @@ async def handle_chat_message(
                 pass
         
         # Note: chat was expunged from session, so we use direct SQL for any updates
+        
+        # Learn skill from successful interaction (async, non-blocking)
+        if enable_procedural_memory:
+            try:
+                # Get the assistant message content
+                msg_result = await db.execute(
+                    select(Message.content, Message.id)
+                    .where(Message.chat_id == chat_id)
+                    .where(Message.role == MessageRole.ASSISTANT)
+                    .order_by(Message.created_at.desc())
+                    .limit(1)
+                )
+                msg_row = msg_result.first()
+                
+                if msg_row and msg_row.content and len(msg_row.content) > 50:
+                    # Only learn from substantial responses
+                    model_used = await llm._get_effective_model() if llm else None
+                    asyncio.create_task(
+                        ProceduralMemoryService.learn_skill_from_interaction(
+                            user_id=str(user.id),
+                            input_text=content,
+                            output_text=msg_row.content,
+                            chat_id=chat_id,
+                            message_id=str(msg_row.id),
+                            model_used=model_used,
+                            quality_score=0.8,  # Default quality, updated by feedback
+                        )
+                    )
+                    logger.debug(f"Queued skill learning from chat {chat_id}")
+            except Exception as skill_err:
+                logger.debug(f"Skill learning skipped: {skill_err}")
         
         # Auto-generate title using LLM
         # Check current title with direct SQL

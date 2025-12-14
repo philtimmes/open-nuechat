@@ -12,12 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 import secrets
 import hashlib
+import logging
 
 from app.db.database import get_db
 from app.api.dependencies import get_current_user
 from app.models.models import User, APIKey, APIKeyScope
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # === Schemas ===
@@ -25,11 +27,11 @@ router = APIRouter()
 class APIKeyCreate(BaseModel):
     """Request to create a new API key"""
     name: str = Field(..., min_length=1, max_length=100)
-    scopes: List[str] = Field(default=["chat"])  # chat, knowledge, assistants, billing, full
+    scopes: List[str] = Field(default_factory=lambda: ["completions"])
     rate_limit: int = Field(default=100, ge=1, le=1000)
-    allowed_ips: List[str] = Field(default=[])
-    allowed_assistants: List[str] = Field(default=[])
-    allowed_knowledge_stores: List[str] = Field(default=[])
+    allowed_ips: List[str] = Field(default_factory=list)
+    allowed_assistants: List[str] = Field(default_factory=list)
+    allowed_knowledge_stores: List[str] = Field(default_factory=list)
     expires_in_days: Optional[int] = Field(default=None, ge=1, le=365)
 
 
@@ -99,7 +101,14 @@ def hash_api_key(key: str) -> str:
 
 # === Endpoints ===
 
-@router.post("/", response_model=APIKeyCreatedResponse)
+# Health check - no auth required
+@router.get("/health")
+async def api_keys_health():
+    """Health check for API keys router"""
+    return {"status": "ok", "router": "api_keys"}
+
+
+@router.post("", response_model=APIKeyCreatedResponse)
 async def create_api_key(
     request: APIKeyCreate,
     current_user: User = Depends(get_current_user),
@@ -118,6 +127,9 @@ async def create_api_key(
     - `billing`: View usage and billing info
     - `full`: All permissions
     """
+    logger.info(f"=== create_api_key called for user {current_user.id} ===")
+    logger.info(f"Request: name='{request.name}', scopes={request.scopes}")
+    
     # Validate scopes
     valid_scopes = {s.value for s in APIKeyScope}
     for scope in request.scopes:
@@ -136,12 +148,14 @@ async def create_api_key(
         existing_keys = result.scalars().all()
         
         limits = {"free": 3, "pro": 10, "enterprise": 100}
-        tier_limit = limits.get(current_user.tier.value, 3)
+        # Handle case where tier might be None (for legacy users)
+        tier_value = current_user.tier.value if current_user.tier else "free"
+        tier_limit = limits.get(tier_value, 3)
         
         if len(existing_keys) >= tier_limit:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"API key limit reached ({tier_limit} keys for {current_user.tier.value} tier)"
+                detail=f"API key limit reached ({tier_limit} keys for {tier_value} tier)"
             )
     
     # Generate key
@@ -152,36 +166,46 @@ async def create_api_key(
     if request.expires_in_days:
         expires_at = datetime.now(timezone.utc) + timedelta(days=request.expires_in_days)
     
-    # Create key record
-    api_key = APIKey(
-        user_id=current_user.id,
-        name=request.name,
-        key_prefix=prefix,
-        key_hash=key_hash,
-        scopes=request.scopes,
-        rate_limit=request.rate_limit,
-        allowed_ips=request.allowed_ips,
-        allowed_assistants=request.allowed_assistants,
-        allowed_knowledge_stores=request.allowed_knowledge_stores,
-        expires_at=expires_at,
-    )
-    
-    db.add(api_key)
-    await db.commit()
-    await db.refresh(api_key)
-    
-    return APIKeyCreatedResponse(
-        id=api_key.id,
-        name=api_key.name,
-        key=full_key,  # Only time the full key is returned!
-        key_prefix=prefix,
-        scopes=api_key.scopes,
-        expires_at=api_key.expires_at,
-        created_at=api_key.created_at,
-    )
+    try:
+        # Create key record
+        api_key = APIKey(
+            user_id=current_user.id,
+            name=request.name,
+            key_prefix=prefix,
+            key_hash=key_hash,
+            scopes=request.scopes,
+            rate_limit=request.rate_limit,
+            allowed_ips=request.allowed_ips,
+            allowed_assistants=request.allowed_assistants,
+            allowed_knowledge_stores=request.allowed_knowledge_stores,
+            expires_at=expires_at,
+        )
+        
+        db.add(api_key)
+        await db.commit()
+        await db.refresh(api_key)
+        
+        logger.info(f"Created API key '{api_key.name}' for user {current_user.id}")
+        
+        return APIKeyCreatedResponse(
+            id=api_key.id,
+            name=api_key.name,
+            key=full_key,  # Only time the full key is returned!
+            key_prefix=prefix,
+            scopes=api_key.scopes,
+            expires_at=api_key.expires_at,
+            created_at=api_key.created_at,
+        )
+    except Exception as e:
+        logger.error(f"Failed to create API key for user {current_user.id}: {e}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create API key: {str(e)}"
+        )
 
 
-@router.get("/", response_model=List[APIKeyResponse])
+@router.get("", response_model=List[APIKeyResponse])
 async def list_api_keys(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

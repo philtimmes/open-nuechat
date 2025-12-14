@@ -958,36 +958,12 @@ export default function ChatPage() {
       content: content.substring(0, 50)
     });
     
-    // Calculate parentId directly from store to avoid stale closure issues
-    // This is critical for voice mode which calls via ref
-    let parentId: string | null = null;
-    if (targetChatId) {
-      // Filter to current chat - CRITICAL for preventing cross-chat parent_id issues
-      const chatMessages = storeMessages.filter(m => m.chat_id === targetChatId);
-      
-      console.log('[handleSendMessage] Filtered messages:', {
-        totalInStore: storeMessages.length,
-        forThisChat: chatMessages.length,
-        targetChatId
-      });
-      
-      if (chatMessages.length !== storeMessages.length) {
-        // Log messages that don't belong to this chat - this helps debug cross-chat contamination
-        const otherChatMessages = storeMessages.filter(m => m.chat_id !== targetChatId);
-        console.warn('[handleSendMessage] Found messages from other chats:', 
-          otherChatMessages.map(m => ({ id: m.id?.substring(0, 8), chat_id: m.chat_id?.substring(0, 8) }))
-        );
-      }
-      
-      // Sort by created_at and find last assistant message
-      const sortedMessages = [...chatMessages].sort((a, b) => 
-        new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-      );
-      const lastAssistant = [...sortedMessages].reverse().find(m => m.role === 'assistant');
-      parentId = lastAssistant?.id || null;
-      
-      console.log('[handleSendMessage] Calculated parentId:', parentId?.substring(0, 8) || 'null');
-    }
+    // Calculate parentId from the currently displayed leaf assistant
+    // This is critical - we must use the DISPLAYED path, not just the most recent message
+    // The currentLeafAssistantIdRef tracks which assistant message is at the end of the current branch
+    let parentId: string | null = currentLeafAssistantIdRef.current;
+    
+    console.log('[handleSendMessage] Using currentLeafAssistantId as parentId:', parentId?.substring(0, 8) || 'null');
     
     // Create new chat if none exists
     if (!targetChatId) {

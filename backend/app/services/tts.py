@@ -78,7 +78,7 @@ class TTSServiceClient:
             logger.error(f"Failed to get voices: {e}")
             return []
     
-    async def generate_sync(self, text: str, voice: str = "af_heart") -> bytes:
+    async def generate_sync(self, text: str, voice: str = "af_heart", speed: float = 1.0) -> bytes:
         """
         Generate speech synchronously (blocks until complete).
         Good for short text.
@@ -86,7 +86,7 @@ class TTSServiceClient:
         try:
             response = await self.client.post(
                 "/tts/generate",
-                json={"text": text, "voice": voice}
+                json={"text": text, "voice": voice, "speed": speed}
             )
             response.raise_for_status()
             return response.content
@@ -97,7 +97,7 @@ class TTSServiceClient:
             logger.error(f"TTS generation error: {e}")
             raise
     
-    async def submit_job(self, text: str, voice: str = "af_heart") -> str:
+    async def submit_job(self, text: str, voice: str = "af_heart", speed: float = 1.0) -> str:
         """
         Submit TTS job to queue.
         Returns job ID.
@@ -105,7 +105,7 @@ class TTSServiceClient:
         try:
             response = await self.client.post(
                 "/tts/submit",
-                json={"text": text, "voice": voice}
+                json={"text": text, "voice": voice, "speed": speed}
             )
             response.raise_for_status()
             data = response.json()
@@ -145,6 +145,7 @@ class TTSServiceClient:
         self, 
         text: str, 
         voice: str = "af_heart",
+        speed: float = 1.0,
         timeout: float = TTS_TIMEOUT
     ) -> bytes:
         """
@@ -152,7 +153,7 @@ class TTSServiceClient:
         Submits job and polls until complete.
         """
         # Submit job
-        job_id = await self.submit_job(text, voice)
+        job_id = await self.submit_job(text, voice, speed)
         logger.info(f"Submitted TTS job {job_id}")
         
         # Poll for completion
@@ -228,6 +229,7 @@ class TTSService:
         self, 
         text: str, 
         voice: Optional[str] = None,
+        speed: float = 1.0,
         use_queue: bool = True
     ) -> bytes:
         """
@@ -236,6 +238,7 @@ class TTSService:
         Args:
             text: Text to convert to speech
             voice: Voice ID (default: af_heart)
+            speed: Speech speed (0.5-2.0, default: 1.0)
             use_queue: Use queued generation for reliability
             
         Returns:
@@ -245,6 +248,7 @@ class TTSService:
             raise ValueError("Text cannot be empty")
         
         voice = voice or "af_heart"
+        speed = max(0.5, min(2.0, speed))  # Clamp to valid range
         
         # Validate voice
         voices = await self.get_available_voices()
@@ -254,14 +258,15 @@ class TTSService:
             voice = "af_heart"
         
         if use_queue:
-            return await self._client.generate_queued(text, voice)
+            return await self._client.generate_queued(text, voice, speed)
         else:
-            return await self._client.generate_sync(text, voice)
+            return await self._client.generate_sync(text, voice, speed)
     
     async def stream_speech(
         self, 
         text: str, 
-        voice: Optional[str] = None
+        voice: Optional[str] = None,
+        speed: float = 1.0
     ):
         """
         Stream speech generation - yields audio chunks as they're generated.
@@ -269,6 +274,7 @@ class TTSService:
         Args:
             text: Text to convert to speech
             voice: Voice ID (default: af_heart)
+            speed: Speech speed (0.5-2.0, default: 1.0)
             
         Yields:
             Audio chunks (4-byte length prefix + WAV data)
@@ -277,6 +283,7 @@ class TTSService:
             raise ValueError("Text cannot be empty")
         
         voice = voice or "af_heart"
+        speed = max(0.5, min(2.0, speed))  # Clamp to valid range
         
         # Validate voice
         voices = await self.get_available_voices()
@@ -290,7 +297,7 @@ class TTSService:
             async with client.stream(
                 "POST",
                 "/tts/stream",
-                json={"text": text, "voice": voice},
+                json={"text": text, "voice": voice, "speed": speed},
                 timeout=TTS_TIMEOUT
             ) as response:
                 response.raise_for_status()

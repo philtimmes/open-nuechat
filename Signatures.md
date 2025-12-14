@@ -1,5 +1,18 @@
 # Open-NueChat - API & Function Signatures
 
+## ⚠️ Development Rule: Software Switches
+
+**ALL software switches/toggles NOT related to deployment should be in the Admin Panel.**
+
+| Goes in .env | Goes in Admin Panel |
+|--------------|---------------------|
+| URLs, ports, API keys | Feature toggles |
+| Database paths | Behavior switches |
+| Secrets, credentials | Runtime configuration |
+| Debug flags | User-facing options |
+
+---
+
 ## Architecture Overview
 
 ### Backend Structure (Refactored)
@@ -82,18 +95,18 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.28"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.37"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
 async def lifespan(app: FastAPI)
-  # Startup: run_migrations, load filters, warmup STT
+  # Startup: imports all models, create_all, run_migrations, load filters, warmup STT
   # Starts: token_reset_checker (hourly), document_queue.worker
   # Shutdown: stops workers
 async def health_check() -> { status, service, version, schema_version }
 async def list_models(request: Request) -> { api_base, default_model, models, subscribed_assistants }
 async def api_info() -> { ..., schema_version, ... }
-async def get_shared_chat(share_id: str) -> { id, title, model, created_at, messages }
+async def get_shared_chat(share_id: str) -> { id, title, model, created_at, messages, all_messages?, has_branches? }
 async def serve_spa(request: Request, full_path: str)  # SPA catch-all
 ```
 
@@ -333,6 +346,75 @@ def validate_slug(slug: str) -> str
 def validate_password(password: str, min_length: int) -> str
 def validate_hex_color(color: str) -> str
 def validate_url(url: str, allowed_schemes: Set[str]) -> str
+```
+
+### app/services/image_gen.py (UPDATED NC-0.6.37)
+
+```python
+# Configuration
+IMAGE_GEN_SERVICE_URL = os.getenv("IMAGE_GEN_SERVICE_URL", "http://localhost:8034")
+IMAGE_GEN_TIMEOUT = float(os.getenv("IMAGE_GEN_TIMEOUT", "600"))
+IMAGE_CONFIRM_WITH_LLM = os.getenv("IMAGE_CONFIRM_WITH_LLM", "true").lower() == "true"
+
+# Pattern detection (regex pre-filter)
+IMAGE_GEN_PATTERNS = [...]  # Wide net - catches potential image requests
+NEGATIVE_PATTERNS = [...]   # Quick exclusions for obvious non-requests
+# LLM confirmation is the authoritative check for intent
+
+# Detection functions
+async def confirm_image_request_with_llm(text: str) -> Tuple[bool, Optional[str]]
+  # Uses direct AsyncOpenAI client (NOT LLMService)
+  # Does NOT save to chat history
+  # Does NOT track tokens against user quota
+  # On error: returns (False, None) - SAFE DEFAULT, no image generated
+  # Returns: (is_image_request, extracted_prompt)
+
+def detect_image_request_regex(text: str) -> Tuple[bool, Optional[str]]
+  # Quick regex-only detection (no LLM)
+  # Returns: (is_image_request, extracted_prompt)
+
+def detect_image_request(text: str) -> Tuple[bool, Optional[str]]
+  # Synchronous, regex-only (legacy compatibility)
+  # Alias for detect_image_request_regex
+
+async def detect_image_request_async(text: str, use_llm: bool = None) -> Tuple[bool, Optional[str]]
+  # Main entry point with optional LLM confirmation
+  # 1. Regex pre-filter (fast)
+  # 2. If regex matches and use_llm=True, confirm with LLM
+  # use_llm defaults to IMAGE_CONFIRM_WITH_LLM env var
+
+# Prompt extraction
+def extract_image_prompt(text: str) -> str
+  # Clean prompt by removing prefixes like "create an image of"
+
+def extract_size_from_text(text: str) -> Tuple[Optional[int], Optional[int]]
+  # Extract WIDTHxHEIGHT from text (e.g., "1280x720")
+
+def extract_aspect_ratio_from_text(text: str) -> Tuple[Optional[int], Optional[int]]
+  # Extract size from aspect ratio (e.g., "16:9" -> 1280x720)
+
+# Service client
+class ImageGenServiceClient:
+  def __init__(base_url: str = IMAGE_GEN_SERVICE_URL)
+  async def health_check() -> Dict[str, Any]
+  async def is_available() -> bool
+  async def generate_image(prompt, width=1024, height=1024, seed=None, **kwargs) -> Dict[str, Any]
+  async def close()
+
+def get_image_gen_client() -> ImageGenServiceClient  # Singleton
+async def reset_image_gen_client()  # Reset on timeout errors
+
+async def handle_image_request(
+    prompt: str,
+    user_id: str,
+    chat_id: str,
+    width: int = 1024,
+    height: int = 1024,
+    seed: Optional[int] = None,
+    **kwargs
+) -> Dict[str, Any]
+  # Main entry point for image generation
+  # Extracts size from prompt, checks service availability, generates image
 ```
 
 ---
@@ -688,14 +770,12 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.28**
+**NC-0.6.37**
 
 Changes:
-- Split models.py into domain modules
-- Added security validation to zip processor
-- Added rate limiting and token blacklisting services
-- Added structured logging utilities
-- Added WebSocket type definitions
-- Split frontend chatStore into slices
-- Added keyboard shortcuts hook
-- Added formatting utilities
+- NC-0.6.37: LLM confirmation for image generation (safe fallback on error - returns False, not regex)
+- NC-0.6.36: API keys table with proper migration, parent_id branching fixes
+- NC-0.6.35: Custom assistant chat association (assistant_id, assistant_name on chats)
+- NC-0.6.34: Message artifacts JSON column
+- NC-0.6.33: Procedural memory skill learning system
+- NC-0.6.28: Split models.py into domain modules, security hardening

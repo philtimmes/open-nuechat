@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/nuechat.db"
     
+    # Procedural Memory (separate database for skill learning)
+    PROCEDURAL_DATABASE_URL: Optional[str] = None  # If not set, derives from DATABASE_URL
+    PROCEDURAL_MEMORY_ENABLED: bool = True  # Enable/disable procedural memory feature
+    
     # ===========================================
     # SECURITY
     # ===========================================

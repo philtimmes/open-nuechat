@@ -368,6 +368,7 @@ services:
       - TTS_USE_GPU=true
       - HSA_OVERRIDE_GFX_VERSION=9.0.10
       - PYTORCH_ROCM_ARCH=gfx90a
+      - MIOPEN_FIND_MODE=FAST
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${TTS_PORT:-8033}/health"]
       interval: 30s

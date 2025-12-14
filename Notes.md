@@ -10,7 +10,7 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.28
+**Current Version:** NC-0.6.37
 
 ---
 
@@ -194,6 +194,64 @@ Enhanced zip extraction security:
 
 ---
 
+## Image Generation
+
+Image generation is triggered when the user's message appears to request image creation.
+
+### Detection Flow (NC-0.6.37)
+
+1. **Regex Pre-filter**: Quick pattern matching for image-related keywords
+2. **LLM Confirmation**: If regex matches, ask the LLM to confirm the intent
+3. **Queue Task**: If confirmed, add to image generation queue
+
+**Important**: The LLM confirmation:
+- Does NOT save to chat history
+- Does NOT count against user's token quota
+- Uses a direct API call with short timeout
+- **On error, defaults to NOT generating** (safe fallback)
+
+### Supported Keywords
+
+The regex pre-filter catches potential image requests. The **LLM confirmation** is what actually determines intent.
+
+**Regex triggers on:**
+- Image words: image, picture, photo, illustration, artwork, graphic, icon, logo, banner, poster, avatar, thumbnail, pic, img, gfx
+- Creation verbs + image words: "create an image", "generate a picture"
+- Art verbs with object: "paint me a...", "draw a picture of..."
+
+**LLM handles false positives like:**
+- "to illustrate this point" → LLM says NO
+- "draw conclusions from the data" → LLM says NO
+- "the picture of health" → LLM says NO
+- Long documents containing image-related words in non-generative context → LLM says NO
+
+### Configuration
+
+```bash
+# Enable/disable LLM confirmation (default: true)
+IMAGE_CONFIRM_WITH_LLM=true
+
+# Image generation service URL
+IMAGE_GEN_SERVICE_URL=http://localhost:8034
+
+# Timeout for image generation (default: 600 seconds)
+IMAGE_GEN_TIMEOUT=600
+```
+
+### LLM Confirmation Prompt
+
+The LLM is asked to classify whether the user wants to generate an image:
+- Returns `YES: <prompt>` if image generation is requested
+- Returns `NO` if not an image request
+
+This prevents false positives like:
+- "What's in this picture?" (analyzing, not generating)
+- "How do I upload an image?" (asking about images, not creating)
+- "Tell me about image processing" (discussing the concept)
+- "This pic is great" (referring to existing image)
+
+---
+
 ## Token Refill System
 
 User token counts (`tokens_used_this_month`) are automatically reset based on the configurable `token_refill_interval_hours` setting.
@@ -365,19 +423,37 @@ Admin-configurable message processing flows (Admin → Filter Chains tab).
 
 | Version | Date | Summary |
 |---------|------|---------|
-| NC-0.6.28 | 2024-12-11 | Model split, security hardening, rate limiting, keyboard shortcuts |
-| NC-0.6.27 | 2024-12-11 | Voice mode parent_id fix, token reset automation, admin bypasses |
-| NC-0.6.26 | 2024-12-10 | Talk to Me voice mode debug panel |
-| NC-0.6.25 | 2024-12-10 | Swipe gestures for retry/branch navigation |
-| NC-0.6.24 | 2024-12-09 | Filter chain debug mode |
-| NC-0.6.23 | 2024-12-09 | Configurable filter chains |
-| NC-0.6.22 | 2024-12-09 | Error handling & file request fixes |
-| NC-0.6.21 | 2024-12-09 | Image generation queue |
-| NC-0.6.20 | 2024-12-09 | Image persistence |
+| NC-0.6.37 | 2025-12-13 | LLM confirmation for image generation (safe fallback on error) |
+| NC-0.6.36 | 2025-12-13 | API keys table migration, parent_id branching fix, shared chat "Show All" toggle, TTS ROCm MIOPEN_FIND_MODE |
+| NC-0.6.35 | 2025-12-13 | Custom assistant chat association |
+| NC-0.6.34 | 2025-12-13 | Message artifacts JSON column |
+| NC-0.6.33 | 2025-12-13 | Procedural memory system |
+| NC-0.6.28 | 2025-12-11 | Model split, security hardening, rate limiting, keyboard shortcuts |
+| NC-0.6.27 | 2025-12-11 | Voice mode parent_id fix, token reset automation, admin bypasses |
+| NC-0.6.26 | 2025-12-10 | Talk to Me voice mode debug panel |
+| NC-0.6.25 | 2025-12-10 | Swipe gestures for retry/branch navigation |
+| NC-0.6.24 | 2025-12-09 | Filter chain debug mode |
+| NC-0.6.23 | 2025-12-09 | Configurable filter chains |
+| NC-0.6.22 | 2025-12-09 | Error handling & file request fixes |
+| NC-0.6.21 | 2025-12-09 | Image generation queue |
+| NC-0.6.20 | 2025-12-09 | Image persistence |
 
 ---
 
 ## Development Guidelines
+
+### ⚠️ IMPORTANT: Software Switches
+
+**ALL software switches/toggles NOT related to deployment configuration should be in the Admin Panel, not in environment variables.**
+
+- ✅ Admin Panel: Feature toggles, behavior switches, runtime configuration
+- ✅ .env: Deployment-specific (URLs, ports, API keys, secrets, database paths)
+- ❌ .env: `ENABLE_SOME_FEATURE=true` (should be admin toggle)
+
+Examples:
+- `IMAGE_CONFIRM_WITH_LLM` → Should be admin toggle, not .env
+- `LLM_API_BASE_URL` → Correct as .env (deployment config)
+- `DEBUG` → Acceptable in .env (deployment-specific)
 
 ### Adding New Models
 
@@ -420,9 +496,12 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.28**
+Current: **NC-0.6.36**
 
 Migrations run automatically on startup in `backend/app/main.py`.
+
+Key tables added/modified:
+- `api_keys` - User-generated API keys for programmatic access (NC-0.6.36)
 
 ---
 

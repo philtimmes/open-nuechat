@@ -555,7 +555,7 @@ function MessageBubbleInner({
             </div>
           ) : (
             // After streaming complete: full markdown rendering
-            <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)]">
+            <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)] whitespace-pre-wrap">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
@@ -669,7 +669,7 @@ function MessageBubbleInner({
                     );
                   },
                   p({ children }) {
-                    return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>;
+                    return <p className="mb-3 last:mb-0 leading-relaxed whitespace-pre-wrap">{children}</p>;
                   },
                   ul({ children }) {
                     return <ul className="list-disc list-outside ml-4 mb-3 space-y-1">{children}</ul>;

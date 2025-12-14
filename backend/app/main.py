@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.api.routes import (
     auth, chats, billing, documents, themes, websocket, filters,
     api_keys, knowledge_stores, assistants, branding, admin, tools, utils, tts, stt, images,
-    filter_chains, vibe
+    filter_chains, vibe, procedural_memory
 )
 from app.api.routes.v1 import router as v1_router
 from app.services.rag import RAGService
@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.35"
+SCHEMA_VERSION = "NC-0.6.37"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -221,6 +221,31 @@ async def run_migrations(conn):
             ("ALTER TABLE chats ADD COLUMN assistant_id VARCHAR(36)", "chats.assistant_id"),
             ("ALTER TABLE chats ADD COLUMN assistant_name VARCHAR(255)", "chats.assistant_name"),
         ],
+        "NC-0.6.36": [
+            # Create api_keys table for user-generated API keys
+            ("""CREATE TABLE IF NOT EXISTS api_keys (
+                id VARCHAR(36) PRIMARY KEY,
+                user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name VARCHAR(100) NOT NULL,
+                key_prefix VARCHAR(8) NOT NULL,
+                key_hash VARCHAR(255) NOT NULL,
+                scopes JSON DEFAULT '[]',
+                rate_limit INTEGER DEFAULT 100,
+                allowed_ips JSON DEFAULT '[]',
+                allowed_assistants JSON DEFAULT '[]',
+                allowed_knowledge_stores JSON DEFAULT '[]',
+                is_active BOOLEAN DEFAULT 1,
+                last_used_at TIMESTAMP,
+                last_used_ip VARCHAR(45),
+                usage_count INTEGER DEFAULT 0,
+                expires_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""", "api_keys table"),
+            ("CREATE INDEX IF NOT EXISTS idx_api_key_prefix ON api_keys(key_prefix)", "api_keys.idx_prefix"),
+            ("CREATE INDEX IF NOT EXISTS idx_api_key_user ON api_keys(user_id)", "api_keys.idx_user"),
+            ("CREATE INDEX IF NOT EXISTS idx_api_key_hash ON api_keys(key_hash)", "api_keys.idx_hash"),
+        ],
     }
     
     # Sort versions and run migrations in order
@@ -290,6 +315,16 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting Open-NueChat v{settings.APP_VERSION} (schema {SCHEMA_VERSION})...")
     
+    # Import all models to ensure they're registered with Base.metadata
+    # This must happen BEFORE create_all
+    from app.models import (
+        User, OAuthAccount, APIKey, Chat, Message, ChatParticipant,
+        Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare,
+        CustomAssistant, AssistantConversation, TokenUsage, Tool, ToolUsage,
+        ChatFilter, FilterChain, UploadedFile, UploadedArchive, SystemSetting, Theme
+    )
+    logger.info("All models imported for table creation")
+    
     # Create database tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -305,6 +340,14 @@ async def lifespan(app: FastAPI):
         logger.info(f"RAG service initialized with model: {settings.EMBEDDING_MODEL}")
     except Exception as e:
         logger.warning(f"RAG service initialization deferred: {e}")
+    
+    # Initialize Procedural Memory service (separate database)
+    try:
+        from app.services.procedural_memory import ProceduralMemoryService
+        await ProceduralMemoryService.initialize()
+        logger.info("Procedural Memory service initialized")
+    except Exception as e:
+        logger.warning(f"Procedural Memory service initialization deferred: {e}")
     
     # Seed default themes
     from app.db.database import async_session_maker
@@ -452,13 +495,16 @@ app.add_middleware(
 setup_exception_handlers(app)
 
 
-# Request logging middleware - disabled for cleaner logs
-# @app.middleware("http")
-# async def log_requests(request: Request, call_next):
-#     logger.info(f"REQUEST: {request.method} {request.url.path}")
-#     response = await call_next(request)
-#     logger.info(f"RESPONSE: {request.method} {request.url.path} -> {response.status_code}")
-#     return response
+# Request logging middleware for debugging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if request.url.path.startswith("/api/keys"):
+        logger.info(f"=== API Keys Request: {request.method} {request.url.path} ===")
+    response = await call_next(request)
+    if request.url.path.startswith("/api/keys"):
+        logger.info(f"=== API Keys Response: {response.status_code} ===")
+    return response
+
 
 # Include routers
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
@@ -469,6 +515,12 @@ app.include_router(themes.router, prefix="/api/themes", tags=["Themes"])
 app.include_router(websocket.router, prefix="/ws", tags=["WebSocket"])  # Routes /ws/ws
 app.include_router(filters.router, prefix="/api/filters", tags=["Filters"])
 app.include_router(api_keys.router, prefix="/api/keys", tags=["API Keys"])
+# Log registered routes for debugging
+logger.info(f"API Keys router registered with {len(api_keys.router.routes)} routes:")
+for route in api_keys.router.routes:
+    methods = getattr(route, 'methods', {'WS'})
+    path = getattr(route, 'path', 'unknown')
+    logger.info(f"  {methods} /api/keys{path}")
 app.include_router(knowledge_stores.router, prefix="/api/knowledge-stores", tags=["Knowledge Stores"])
 app.include_router(assistants.router, prefix="/api/assistants", tags=["Custom Assistants"])
 logger.info(f"Assistants router registered with {len(assistants.router.routes)} routes")
@@ -481,6 +533,7 @@ app.include_router(stt.router, prefix="/api/stt", tags=["STT"])
 app.include_router(images.router, prefix="/api", tags=["Images"])  # Routes /api/images/*
 app.include_router(filter_chains.router, prefix="/api/admin", tags=["Filter Chains"])  # Routes /api/admin/filter-chains/*
 app.include_router(vibe.router, prefix="/api/vibe", tags=["VibeCode"])  # AI code editor endpoints
+app.include_router(procedural_memory.router, prefix="/api", tags=["Procedural Memory"])  # Skill learning endpoints
 
 # OpenAI-compatible API (v1)
 app.include_router(v1_router)  # Routes /v1/* (models, chat/completions, images/generations, embeddings)
@@ -734,39 +787,46 @@ async def get_shared_chat(share_id: str):
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Shared chat not found")
         
-        # Build conversation path using tree structure
-        selected_versions = chat.selected_versions or {}
+        # Sort messages chronologically
+        sorted_messages = sorted(chat.messages, key=lambda m: m.created_at)
         
-        # Build children map: parent_id -> children
+        # Build children map for tree structure
         children_by_parent = {}
-        for msg in chat.messages:
+        for msg in sorted_messages:
             parent_key = msg.parent_id or 'root'
             if parent_key not in children_by_parent:
                 children_by_parent[parent_key] = []
             children_by_parent[parent_key].append(msg)
         
-        # Sort children by created_at
-        for children in children_by_parent.values():
-            children.sort(key=lambda m: m.created_at)
+        # Check if there are branches (any parent has multiple children)
+        has_branches = any(len(children) > 1 for children in children_by_parent.values())
+        
+        # Use selected_versions to determine which branch to follow
+        selected_versions = chat.selected_versions or {}
         
         # Walk the tree from root, following selected branches
-        messages = []
+        path_messages = []
         current_parent = 'root'
+        visited = set()
         
-        while True:
+        while current_parent not in visited:
+            visited.add(current_parent)
             children = children_by_parent.get(current_parent, [])
             if not children:
                 break
             
+            # Sort children by created_at
+            children.sort(key=lambda m: m.created_at)
+            
             # Find selected child or default to newest
-            selected = children[-1]  # Default to newest
+            selected = children[-1]
             selected_id = selected_versions.get(current_parent)
             if selected_id:
                 found = next((c for c in children if c.id == selected_id), None)
                 if found:
                     selected = found
             
-            messages.append({
+            path_messages.append({
                 "id": selected.id,
                 "role": selected.role.value if hasattr(selected.role, 'value') else selected.role,
                 "content": selected.content,
@@ -774,9 +834,21 @@ async def get_shared_chat(share_id: str):
                 "created_at": selected.created_at.isoformat(),
                 "input_tokens": selected.input_tokens,
                 "output_tokens": selected.output_tokens,
+                "sibling_count": len(children),
             })
             
             current_parent = selected.id
+        
+        # Also include all messages chronologically for "show all" view
+        all_messages = [{
+            "id": msg.id,
+            "role": msg.role.value if hasattr(msg.role, 'value') else msg.role,
+            "content": msg.content,
+            "parent_id": msg.parent_id,
+            "created_at": msg.created_at.isoformat(),
+            "input_tokens": msg.input_tokens,
+            "output_tokens": msg.output_tokens,
+        } for msg in sorted_messages]
         
         return {
             "id": chat.id,
@@ -785,7 +857,9 @@ async def get_shared_chat(share_id: str):
             "assistant_id": chat.assistant_id,
             "assistant_name": chat.assistant_name,
             "created_at": chat.created_at.isoformat(),
-            "messages": messages,
+            "messages": path_messages,
+            "all_messages": all_messages,
+            "has_branches": has_branches,
         }
 
 

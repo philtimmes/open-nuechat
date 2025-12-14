@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { useBrandingStore } from '../stores/brandingStore';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,8 +11,10 @@ interface SharedMessage {
   role: 'user' | 'assistant';
   content: string;
   created_at: string;
+  parent_id?: string | null;
   input_tokens?: number;
   output_tokens?: number;
+  sibling_count?: number;
 }
 
 interface SharedChatData {
@@ -23,13 +25,17 @@ interface SharedChatData {
   assistant_name?: string;
   created_at: string;
   messages: SharedMessage[];
+  all_messages?: SharedMessage[];
+  has_branches?: boolean;
 }
 
 export default function SharedChat() {
   const { shareId } = useParams<{ shareId: string }>();
+  const [searchParams] = useSearchParams();
   const [chat, setChat] = useState<SharedChatData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showAllMessages, setShowAllMessages] = useState(searchParams.get('view') === 'all');
   
   const { config, loadConfig, isLoaded: brandingLoaded } = useBrandingStore();
   
@@ -125,16 +131,31 @@ export default function SharedChat() {
       <div className="border-b border-[var(--color-border)] px-4 py-2">
         <div className="max-w-4xl mx-auto">
           <h1 className="text-lg font-medium text-[var(--color-text)]">{chat.title}</h1>
-          <p className="text-xs text-[var(--color-text-secondary)]">
-            {new Date(chat.created_at).toLocaleDateString()} • {assistantDisplayName}
-          </p>
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              {new Date(chat.created_at).toLocaleDateString()} • {assistantDisplayName}
+            </p>
+            {chat.has_branches && chat.all_messages && (
+              <button
+                onClick={() => setShowAllMessages(!showAllMessages)}
+                className="text-xs px-2 py-1 rounded bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)] border border-[var(--color-border)] transition-colors"
+              >
+                {showAllMessages ? '🌲 Show Branch' : '📋 Show All Messages'}
+              </button>
+            )}
+          </div>
+          {showAllMessages && chat.has_branches && (
+            <p className="text-xs text-[var(--color-text-secondary)] mt-1 italic">
+              Showing all {chat.all_messages?.length || 0} messages chronologically
+            </p>
+          )}
         </div>
       </div>
       
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto divide-y divide-[var(--color-border)]/50">
-          {chat.messages.map((message) => (
+          {(showAllMessages && chat.all_messages ? chat.all_messages : chat.messages).map((message) => (
             <div key={message.id} className="py-4 px-4">
               <div className="flex items-start gap-3">
                 {/* Avatar */}

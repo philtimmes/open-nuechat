@@ -127,9 +127,15 @@ export default function Settings() {
   const handleCreateKey = async () => {
     if (!newKeyData.name.trim()) return;
     
+    console.log('=== API Key Creation Debug ===');
+    console.log('Request URL: /keys');
+    console.log('Request Method: POST');
+    console.log('Request Data:', JSON.stringify(newKeyData, null, 2));
+    
     setSavingKey(true);
     try {
       const res = await api.post('/keys', newKeyData);
+      console.log('Success Response:', res.data);
       setCreatedKey(res.data.key);
       setApiKeys(prev => [res.data, ...prev]);
       setNewKeyData({
@@ -138,9 +144,29 @@ export default function Settings() {
         rate_limit: 100,
         expires_in_days: null,
       });
-    } catch (err) {
-      console.error('Failed to create API key:', err);
-      alert('Failed to create API key');
+    } catch (err: unknown) {
+      console.error('=== API Key Creation Error ===');
+      console.error('Full error object:', err);
+      if (err && typeof err === 'object') {
+        const axiosErr = err as { 
+          response?: { status?: number; statusText?: string; data?: unknown; headers?: unknown };
+          request?: unknown;
+          message?: string;
+          config?: { method?: string; url?: string };
+        };
+        console.error('Response status:', axiosErr.response?.status);
+        console.error('Response statusText:', axiosErr.response?.statusText);
+        console.error('Response data:', axiosErr.response?.data);
+        console.error('Request config:', axiosErr.config);
+      }
+      // Extract error message from response if available
+      const errorMessage = err && typeof err === 'object' && 'response' in err
+        ? (err as { response?: { data?: { detail?: string; message?: string }; statusText?: string } }).response?.data?.detail 
+          || (err as { response?: { data?: { detail?: string; message?: string }; statusText?: string } }).response?.data?.message
+          || (err as { response?: { data?: { detail?: string; message?: string }; statusText?: string } }).response?.statusText
+          || 'Failed to create API key'
+        : 'Failed to create API key';
+      alert(errorMessage);
     } finally {
       setSavingKey(false);
     }
@@ -570,6 +596,7 @@ export default function Settings() {
                     
                     <div className="flex gap-2 pt-2">
                       <button
+                        type="button"
                         onClick={handleCreateKey}
                         disabled={!newKeyData.name.trim() || newKeyData.scopes.length === 0 || savingKey}
                         className="px-4 py-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -577,6 +604,7 @@ export default function Settings() {
                         {savingKey ? 'Creating...' : 'Create Key'}
                       </button>
                       <button
+                        type="button"
                         onClick={() => setShowNewKeyForm(false)}
                         className="px-4 py-2 rounded-lg border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-surface)]"
                       >

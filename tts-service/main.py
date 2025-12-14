@@ -89,6 +89,7 @@ class TTSJob:
     id: str
     text: str
     voice: str
+    speed: float = 1.0
     status: JobStatus = JobStatus.QUEUED
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
@@ -101,6 +102,7 @@ class TTSJob:
 class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=MAX_TEXT_LENGTH)
     voice: str = Field(default="af_heart")
+    speed: float = Field(default=1.0, ge=0.5, le=2.0, description="Speech speed (0.5-2.0)")
 
 
 class TTSJobResponse(BaseModel):
@@ -172,13 +174,13 @@ class KokoroPipeline:
                 logger.error(f"Failed to initialize Kokoro: {e}")
                 raise
     
-    def generate_sync(self, text: str, voice: str) -> bytes:
+    def generate_sync(self, text: str, voice: str, speed: float = 1.0) -> bytes:
         """Generate speech synchronously (called from thread pool)"""
         if self._pipeline is None:
             raise RuntimeError("Pipeline not initialized")
         
         audio_chunks = []
-        for i, (gs, ps, audio) in enumerate(self._pipeline(text, voice=voice)):
+        for i, (gs, ps, audio) in enumerate(self._pipeline(text, voice=voice, speed=speed)):
             audio_chunks.append(audio)
         
         if not audio_chunks:
@@ -193,27 +195,31 @@ class KokoroPipeline:
         
         return buffer.read()
     
-    def generate_chunks_sync(self, text: str, voice: str):
+    def generate_chunks_sync(self, text: str, voice: str, speed: float = 1.0):
         """
         Generator that yields audio chunks as they're generated.
-        Kokoro generates per-sentence, so we yield each sentence's audio.
+        Uses Kokoro's native split_pattern for optimal streaming.
         """
         if self._pipeline is None:
             raise RuntimeError("Pipeline not initialized")
         
-        for i, (gs, ps, audio) in enumerate(self._pipeline(text, voice=voice)):
+        # Use aggressive split pattern for faster first-chunk delivery
+        # Split on sentences, commas, semicolons, colons, and newlines
+        split_pattern = r'[.!?;:,]\s+|\n+'
+        
+        for i, (gs, ps, audio) in enumerate(self._pipeline(text, voice=voice, speed=speed, split_pattern=split_pattern)):
             # Convert chunk to WAV bytes
             buffer = io.BytesIO()
             sf.write(buffer, audio, self.SAMPLE_RATE, format='WAV')
             buffer.seek(0)
             yield buffer.read()
     
-    async def generate(self, text: str, voice: str) -> bytes:
+    async def generate(self, text: str, voice: str, speed: float = 1.0) -> bytes:
         """Generate speech asynchronously"""
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.generate_sync, text, voice)
+        return await loop.run_in_executor(None, self.generate_sync, text, voice, speed)
     
-    async def generate_stream(self, text: str, voice: str):
+    async def generate_stream(self, text: str, voice: str, speed: float = 1.0):
         """
         Async generator that yields audio chunks as they're generated.
         Uses a queue to bridge sync generator with async iteration.
@@ -227,7 +233,7 @@ class KokoroPipeline:
         
         def producer():
             try:
-                for chunk in self.generate_chunks_sync(text, voice):
+                for chunk in self.generate_chunks_sync(text, voice, speed):
                     if timing["first_chunk"] is None:
                         timing["first_chunk"] = time.time()
                         elapsed = (timing["first_chunk"] - timing["start"]) * 1000
@@ -297,7 +303,7 @@ class TTSQueueManager:
         if self._cleanup_task:
             self._cleanup_task.cancel()
     
-    async def submit(self, text: str, voice: str) -> TTSJob:
+    async def submit(self, text: str, voice: str, speed: float = 1.0) -> TTSJob:
         """Submit a new TTS job"""
         async with self.lock:
             if self.queue.full():
@@ -311,6 +317,7 @@ class TTSQueueManager:
                 id=job_id,
                 text=text,
                 voice=voice,
+                speed=speed,
                 queue_position=self.queue.qsize() + 1
             )
             
@@ -397,7 +404,7 @@ class TTSQueueManager:
                 
                 try:
                     # Generate TTS
-                    audio_bytes = await self.pipeline.generate(job.text, job.voice)
+                    audio_bytes = await self.pipeline.generate(job.text, job.voice, job.speed)
                     
                     job.result = audio_bytes
                     job.status = JobStatus.COMPLETED
@@ -572,7 +579,7 @@ async def submit_tts_job(request: TTSRequest):
             detail=f"Invalid voice '{request.voice}'. Use /voices to see available options."
         )
     
-    job = await queue_manager.submit(request.text, request.voice)
+    job = await queue_manager.submit(request.text, request.voice, request.speed)
     
     return TTSJobResponse(
         job_id=job.id,
@@ -651,7 +658,7 @@ async def generate_tts_sync(request: TTSRequest):
         )
     
     try:
-        audio_bytes = await pipeline.generate(request.text, request.voice)
+        audio_bytes = await pipeline.generate(request.text, request.voice, request.speed)
         
         return Response(
             content=audio_bytes,
@@ -688,7 +695,7 @@ async def stream_tts(request: TTSRequest):
         try:
             chunk_index = 0
             start_time = time.time()
-            async for audio_chunk in pipeline.generate_stream(request.text, request.voice):
+            async for audio_chunk in pipeline.generate_stream(request.text, request.voice, request.speed):
                 # Yield chunk with boundary marker for client parsing
                 # Format: 4-byte length prefix + WAV data
                 length_bytes = len(audio_chunk).to_bytes(4, byteorder='big')
