@@ -1,9 +1,20 @@
 import { useState, useRef, useCallback, useEffect, type RefObject } from 'react';
+import type { Artifact } from '../types';
+import { processFilesToArtifacts, readFileAsBase64 } from '../lib/fileProcessor';
+
+interface ProcessedAttachment {
+  type: 'image' | 'file';
+  filename: string;
+  mime_type: string;
+  data?: string;  // base64 for images
+  content?: string;  // text content for files
+}
 
 interface ChatInputProps {
-  onSend: (content: string, attachments?: File[]) => void;
+  onSend: (content: string, attachments?: ProcessedAttachment[]) => void;
   onStop?: () => void;
   onZipUpload?: (file: File) => Promise<void>;
+  onFilesUploaded?: (artifacts: Artifact[]) => void;
   onVoiceModeToggle?: () => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -18,6 +29,7 @@ export default function ChatInput({
   onSend, 
   onStop, 
   onZipUpload, 
+  onFilesUploaded,
   onVoiceModeToggle,
   disabled, 
   isStreaming, 
@@ -29,18 +41,21 @@ export default function ChatInput({
 }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
+  const [processedAttachments, setProcessedAttachments] = useState<ProcessedAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const internalRef = useRef<HTMLTextAreaElement>(null);
   const textareaRef = inputRef || internalRef;
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const handleSubmit = () => {
-    if (!message.trim() && attachments.length === 0) return;
+    if (!message.trim() && processedAttachments.length === 0) return;
     if (disabled) return;
     
-    onSend(message.trim(), attachments.length > 0 ? attachments : undefined);
+    onSend(message.trim(), processedAttachments.length > 0 ? processedAttachments : undefined);
     setMessage('');
     setAttachments([]);
+    setProcessedAttachments([]);
     
     // Reset textarea height
     if (textareaRef.current) {
@@ -64,10 +79,11 @@ export default function ChatInput({
     textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
   };
   
-  const handleFileSelect = (files: FileList | null) => {
+  const handleFileSelect = async (files: FileList | null) => {
     if (!files) return;
     
-    const newFiles: File[] = [];
+    const imageFiles: File[] = [];
+    const textFiles: File[] = [];
     
     for (const file of Array.from(files)) {
       // Limit file size to 10MB (50MB for zip)
@@ -83,16 +99,71 @@ export default function ChatInput({
         continue;
       }
       
-      newFiles.push(file);
+      // Separate images from other files
+      if (file.type.startsWith('image/')) {
+        imageFiles.push(file);
+      } else {
+        textFiles.push(file);
+      }
     }
     
-    if (newFiles.length > 0) {
-      setAttachments((prev) => [...prev, ...newFiles]);
+    // Process files
+    setIsProcessingFiles(true);
+    try {
+      const newProcessed: ProcessedAttachment[] = [];
+      
+      // Process images as base64 attachments
+      for (const img of imageFiles) {
+        const base64 = await readFileAsBase64(img);
+        newProcessed.push({
+          type: 'image',
+          filename: img.name,
+          mime_type: img.type,
+          data: base64,
+        });
+      }
+      
+      // Process text files into artifacts
+      if (textFiles.length > 0) {
+        console.log(`[ChatInput v2] Processing ${textFiles.length} text files:`, textFiles.map(f => `${f.name} (${f.type})`));
+        const artifacts = await processFilesToArtifacts(textFiles);
+        console.log(`[ChatInput v2] Created ${artifacts.length} artifacts`);
+        
+        // Notify parent of new artifacts
+        if (onFilesUploaded && artifacts.length > 0) {
+          console.log(`[ChatInput v2] Notifying parent of ${artifacts.length} artifacts`);
+          onFilesUploaded(artifacts);
+        }
+        
+        // Add file content as attachments for LLM context
+        for (const artifact of artifacts) {
+          console.log(`[ChatInput v2] Adding artifact to processed attachments: ${artifact.filename}, ${artifact.content.length} chars`);
+          newProcessed.push({
+            type: 'file',
+            filename: artifact.filename || artifact.title,
+            mime_type: `text/${artifact.language || 'plain'}`,
+            content: artifact.content,
+          });
+        }
+      }
+      
+      // Update state
+      console.log(`[ChatInput v2] Setting ${newProcessed.length} processed attachments`);
+      setAttachments((prev) => [...prev, ...imageFiles, ...textFiles]);
+      setProcessedAttachments((prev) => [...prev, ...newProcessed]);
+    } catch (error) {
+      console.error('Error processing files:', error);
+      alert('Failed to process some files');
+    } finally {
+      setIsProcessingFiles(false);
     }
   };
   
   const removeAttachment = (index: number) => {
+    const removedFile = attachments[index];
     setAttachments((prev) => prev.filter((_, i) => i !== index));
+    // Also remove from processed attachments by matching filename
+    setProcessedAttachments((prev) => prev.filter(p => p.filename !== removedFile?.name));
   };
   
   // Drag and drop handlers
@@ -220,7 +291,7 @@ export default function ChatInput({
           multiple
           onChange={(e) => handleFileSelect(e.target.files)}
           className="hidden"
-          accept="image/*,.pdf,.txt,.md,.json,.csv,.zip"
+          accept="image/*,.pdf,.docx,.doc,.xlsx,.xls,.rtf,.txt,.md,.json,.csv,.zip,.py,.js,.jsx,.ts,.tsx,.java,.go,.rs,.rb,.php,.c,.cpp,.h,.hpp,.cs,.swift,.kt,.scala,.lua,.r,.sh,.bash,.yaml,.yml,.toml,.xml,.html,.css,.scss,.sass,.sql,.graphql,.proto,.asm,.s"
         />
         
         {/* Talk to Me (Voice Mode) button */}
@@ -281,12 +352,19 @@ export default function ChatInput({
         ) : (
           <button
             onClick={handleSubmit}
-            disabled={disabled || (!message.trim() && attachments.length === 0)}
+            disabled={disabled || isProcessingFiles || (!message.trim() && attachments.length === 0)}
             className="p-3 md:p-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
           >
-            <svg className="w-6 h-6 md:w-5 md:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-            </svg>
+            {isProcessingFiles ? (
+              <svg className="w-6 h-6 md:w-5 md:h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            ) : (
+              <svg className="w-6 h-6 md:w-5 md:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+              </svg>
+            )}
           </button>
         )}
       </div>

@@ -147,7 +147,7 @@ def setup_default_filters():
     )
     registry.register_default_to_llm(
         lambda: InputSanitizerToLLM(priority=Priority.MEDIUM).configure(
-            normalize_whitespace=True, trim=True, max_length=100000,
+            normalize_whitespace=True, trim=True, max_length=0,  # 0 = no limit, let LLM context window be the constraint
         )
     )
     registry.register_default_from_llm(
@@ -171,7 +171,7 @@ def setup_minimal_filters():
     )
     registry.register_default_to_llm(
         lambda: InputSanitizerToLLM(priority=Priority.MEDIUM).configure(
-            normalize_whitespace=False, trim=True, max_length=50000,
+            normalize_whitespace=False, trim=True, max_length=0,
         )
     )
     
@@ -195,7 +195,7 @@ def setup_strict_filters():
     )
     registry.register_default_to_llm(
         lambda: InputSanitizerToLLM(priority=Priority.MEDIUM).configure(
-            normalize_whitespace=True, trim=True, max_length=10000,
+            normalize_whitespace=True, trim=True, max_length=0,
         )
     )
     registry.register_default_from_llm(

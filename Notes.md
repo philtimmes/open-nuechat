@@ -10,7 +10,7 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.37
+**Current Version:** NC-0.6.38
 
 ---
 
@@ -354,6 +354,58 @@ User1 (parent_id=null)
 
 ---
 
+## File Upload to Artifacts (NC-0.6.38)
+
+Users can upload any supported file type directly to the chat. Files are:
+1. Added to the artifacts panel for viewing
+2. Sent to the LLM as context
+3. Available for partial viewing via tools
+
+### Supported File Types
+
+**Code Files**: `.py`, `.js`, `.jsx`, `.ts`, `.tsx`, `.java`, `.go`, `.rs`, `.rb`, `.php`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt`, `.scala`, `.lua`, `.r`, `.sh`, `.bash`, `.asm`, `.s`
+
+**Config/Data Files**: `.yaml`, `.yml`, `.toml`, `.xml`, `.json`, `.csv`, `.sql`, `.graphql`, `.proto`
+
+**Web Files**: `.html`, `.css`, `.scss`, `.sass`
+
+**Documents**: `.md`, `.txt`, `.pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`, `.rtf`
+
+**Images**: All common image formats (sent as base64)
+
+**Archives**: `.zip` (special processing with signature extraction)
+
+### Binary Document Handling
+
+Binary documents (PDF, DOCX, XLSX, RTF) are processed via:
+1. Frontend sends file to `/documents/extract-text` endpoint
+2. Backend uses `DocumentProcessor.extract_text()` (Tika/PyMuPDF for PDF, python-docx, openpyxl)
+3. Extracted text becomes artifact content and LLM context
+
+### Partial File Viewing Tools
+
+For large files, the LLM can use these tools instead of reading entire content:
+
+| Tool | Description |
+|------|-------------|
+| `list_uploaded_files` | List all files in the session with line count and preview |
+| `view_file_lines` | View specific line range (e.g., lines 100-150) |
+| `search_in_file` | Search for pattern and show matches with context |
+| `view_signature` | View code around a function/class definition |
+
+### Signature Extraction
+
+Code files automatically have signatures extracted:
+- **Python**: `def`, `class`, `CONSTANTS`
+- **JavaScript/TypeScript**: `function`, `class`, `const`, `interface`, `type`
+- **Java/C#**: `class`, `interface`, public methods
+- **Go**: `func`, `type`
+- **Rust**: `fn`, `struct`, `enum`, `trait`, `impl`
+- **C/C++**: functions, `struct`, `class`, `namespace`, `#define`
+- **Assembly**: labels, `.global` directives
+
+---
+
 ## Keyboard Shortcuts (NC-0.6.28)
 
 | Shortcut | Action |
@@ -423,6 +475,7 @@ Admin-configurable message processing flows (Admin → Filter Chains tab).
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.38 | 2025-12-15 | File upload to artifacts, partial file viewing tools, remove 100K char filter limit |
 | NC-0.6.37 | 2025-12-13 | LLM confirmation for image generation (safe fallback on error) |
 | NC-0.6.36 | 2025-12-13 | API keys table migration, parent_id branching fix, shared chat "Show All" toggle, TTS ROCm MIOPEN_FIND_MODE |
 | NC-0.6.35 | 2025-12-13 | Custom assistant chat association |
@@ -496,7 +549,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.36**
+Current: **NC-0.6.38**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

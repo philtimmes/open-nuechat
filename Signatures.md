@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.37"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.38"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -722,6 +722,137 @@ function getChatShortcuts(): Array<{ shortcut: string; description: string }>
   // ]
 ```
 
+### frontend/src/lib/fileProcessor.ts (NEW NC-0.6.38)
+
+```typescript
+// Extension to language/type mapping
+const EXT_MAP: Record<string, { language: string; type: Artifact['type'] }>
+
+// Signature extraction patterns by language
+const SIGNATURE_PATTERNS: Record<string, Array<{ kind: string; pattern: RegExp }>>
+
+// Extract code signatures from file content
+function extractSignatures(content: string, language: string): CodeSignature[]
+
+// File reading utilities
+async function readFileAsText(file: File): Promise<string>
+async function readFileAsBase64(file: File): Promise<string>
+
+// Process a single file into an artifact
+async function processFileToArtifact(file: File): Promise<Artifact | null>
+
+// Process multiple files
+async function processFilesToArtifacts(files: File[]): Promise<Artifact[]>
+
+// Generate LLM context manifest
+function generateFileManifest(artifacts: Artifact[]): string
+
+// Partial file viewing utilities
+function getFileLines(content: string, startLine: number, endLine?: number): string
+function searchInFile(content: string, pattern: string, contextLines?: number): string[]
+```
+
+---
+
+## Documents API (app/api/routes/documents.py)
+
+### POST /documents/extract-text (NEW NC-0.6.38)
+
+Extract text from binary documents (PDF, DOCX, XLSX, etc) without storing.
+
+```python
+@router.post("/extract-text")
+async def extract_text_from_file(
+    file: UploadFile,
+    user: User = Depends(get_current_user),
+) -> dict:
+    # Returns: { filename, text, chars, lines, warning? }
+    # Uses DocumentProcessor.extract_text() from rag.py
+```
+
+### DocumentProcessor (app/services/rag.py)
+
+```python
+class DocumentProcessor:
+    @staticmethod
+    async def extract_text(file_path: str, mime_type: str) -> str
+        # Extracts text from: PDF (Tika/PyMuPDF), DOCX (python-docx),
+        # XLSX (openpyxl), RTF, CSV, JSON, plain text
+    
+    @staticmethod
+    async def extract_text_from_pdf_tika(file_path: str) -> str
+    
+    @staticmethod
+    async def extract_text_from_docx(file_path: str) -> str
+    
+    @staticmethod
+    async def extract_text_from_xlsx(file_path: str) -> str
+    
+    @staticmethod
+    async def extract_text_from_rtf(file_path: str) -> str
+```
+
+---
+
+## Tool Registry (app/tools/registry.py)
+
+### Session File Storage (NEW NC-0.6.38)
+
+```python
+# Session-based file store for uploaded files
+# Key: chat_id, Value: Dict[filename, content]
+_session_files: Dict[str, Dict[str, str]]
+
+def store_session_file(chat_id: str, filename: str, content: str)
+def get_session_file(chat_id: str, filename: str) -> Optional[str]
+def get_session_files(chat_id: str) -> Dict[str, str]
+def clear_session_files(chat_id: str)
+```
+
+### File Viewing Tools (NEW NC-0.6.38)
+
+```python
+class FileViewingTools:
+    @staticmethod
+    async def view_file_lines(arguments: Dict, context: Dict) -> Dict
+        # View specific lines from an uploaded file
+        # Args: filename (str), start_line (int), end_line (int)
+        # Returns: { filename, total_lines, showing, content }
+
+    @staticmethod
+    async def search_in_file(arguments: Dict, context: Dict) -> Dict
+        # Search for pattern in file with context
+        # Args: filename (str), pattern (str), context_lines (int)
+        # Returns: { filename, pattern, total_matches, results[] }
+
+    @staticmethod
+    async def list_uploaded_files(arguments: Dict, context: Dict) -> Dict
+        # List all uploaded files in session
+        # Returns: { file_count, files[{filename, lines, size, preview}] }
+
+    @staticmethod
+    async def view_signature(arguments: Dict, context: Dict) -> Dict
+        # View code around a function/class signature
+        # Args: filename (str), signature_name (str), lines_after (int)
+        # Returns: { filename, signature, start_line, content }
+```
+
+### Built-in Tools
+
+| Tool | Description |
+|------|-------------|
+| calculator | Mathematical expression evaluation |
+| get_current_time | Current time in any timezone |
+| search_documents | RAG search in knowledge stores |
+| execute_python | Sandboxed Python execution |
+| format_json | JSON formatting and validation |
+| analyze_text | Word count, character count, readability |
+| fetch_webpage | Fetch and parse web page content |
+| view_file_lines | View line range from uploaded file |
+| search_in_file | Search pattern in uploaded file |
+| list_uploaded_files | List all uploaded files |
+| view_signature | View code around signature |
+
 ---
 
 ## Microservice Signatures
@@ -770,9 +901,10 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.37**
+**NC-0.6.38**
 
 Changes:
+- NC-0.6.38: File upload to artifacts, partial file viewing tools (view_file_lines, search_in_file, view_signature), removed 100K char filter limit
 - NC-0.6.37: LLM confirmation for image generation (safe fallback on error - returns False, not regex)
 - NC-0.6.36: API keys table with proper migration, parent_id branching fixes
 - NC-0.6.35: Custom assistant chat association (assistant_id, assistant_name on chats)

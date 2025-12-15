@@ -385,3 +385,46 @@ class BillingService:
             "overage_cost": round(overage_cost, 2),
             "total_amount": round(base_price + overage_cost, 2),
         }
+    
+    async def record_usage(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        model: str,
+        source: str = "api",
+        chat_id: str = None,
+        message_id: str = None,
+    ) -> None:
+        """
+        Record token usage for billing.
+        
+        Args:
+            db: Database session
+            user_id: User ID
+            input_tokens: Number of input/prompt tokens
+            output_tokens: Number of output/completion tokens
+            model: Model name used
+            source: Source of the request (e.g., 'v1_api', 'chat')
+            chat_id: Optional chat ID
+            message_id: Optional message ID
+        """
+        from datetime import datetime, timezone
+        from app.models.billing import TokenUsage
+        
+        now = datetime.now(timezone.utc)
+        
+        usage = TokenUsage(
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            year=now.year,
+            month=now.month,
+        )
+        
+        db.add(usage)
+        # Don't commit here - let caller control transaction

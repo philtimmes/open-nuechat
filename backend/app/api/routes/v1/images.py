@@ -158,9 +158,10 @@ async def create_image(
             raise HTTPException(status_code=500, detail=str(e))
     
     # Bill for image generation (flat rate per image)
-    billing = BillingService(db)
+    billing = BillingService()
     # Image generation costs ~1000 tokens equivalent per image
     await billing.record_usage(
+        db=db,
         user_id=user.id,
         input_tokens=len(request.prompt.split()),
         output_tokens=1000 * len(images),  # Flat rate per image

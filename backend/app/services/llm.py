@@ -512,10 +512,14 @@ class LLMService:
             extra_metadata=extra_metadata if extra_metadata else None
         )
         
+        # Log incoming message size
+        logger.info(f"[FILTER_IN] User message before filter: len={len(user_message)}")
+        
         # === OverrideToLLM: Filter user input before sending to LLM ===
         to_llm_result = await filter_manager.process_to_llm(user_message, context)
         
         if to_llm_result.blocked:
+            logger.warning(f"[FILTER_BLOCKED] Message blocked: {to_llm_result.block_reason}")
             yield {
                 "type": "error",
                 "error": f"Request blocked: {to_llm_result.block_reason}",
@@ -524,6 +528,16 @@ class LLMService:
             return
         
         filtered_user_message = to_llm_result.content
+        
+        # Log filter result
+        if to_llm_result.modified:
+            logger.info(f"[FILTER_OUT] Message was MODIFIED by filter: before={len(user_message)}, after={len(filtered_user_message)}")
+        else:
+            logger.debug(f"[FILTER_OUT] Message passed through unchanged: len={len(filtered_user_message)}")
+        
+        # Warn if message is very large (potential context window issues)
+        if len(filtered_user_message) > 50000:
+            logger.warning(f"[LARGE_MESSAGE] User message is very large: {len(filtered_user_message)} chars. May exceed context window for some models.")
         
         # Build messages from chat history (using tree structure)
         messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id)
@@ -655,7 +669,50 @@ class LLMService:
                 "stream": True,
             }
             
+            # Debug: Log the ACTUAL JSON payload size that will be sent
+            import json as json_module
+            try:
+                payload_json = json_module.dumps(api_params)
+                logger.info(f"[LLM_PAYLOAD] JSON payload size: {len(payload_json)} bytes")
+                
+                # For very large payloads, log structure
+                if len(payload_json) > 100000:
+                    logger.info(f"[LLM_PAYLOAD] Large payload detected. Message count: {len(messages)}")
+                    for i, msg in enumerate(messages):
+                        content = msg.get("content", "")
+                        if isinstance(content, str):
+                            logger.info(f"[LLM_PAYLOAD] msg[{i}] role={msg.get('role')} content_bytes={len(content.encode('utf-8'))}")
+            except Exception as e:
+                logger.error(f"[LLM_PAYLOAD] Failed to serialize payload for logging: {e}")
+            
+            # Debug log: show message sizes being sent to LLM
+            total_chars = sum(
+                len(m.get("content", "")) if isinstance(m.get("content"), str) 
+                else sum(len(p.get("text", "")) for p in m.get("content", []) if isinstance(p, dict) and p.get("type") == "text")
+                for m in messages
+            )
+            logger.info(f"[LLM_REQUEST] Sending {len(messages)} messages to {effective_model}, total_chars={total_chars}")
+            
+            # Log each message with size - this is critical for debugging content loss
+            for i, msg in enumerate(messages):
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    content_len = len(content)
+                    # For user messages, log more detail
+                    if msg.get("role") == "user" and content_len > 500:
+                        logger.info(f"[LLM_REQUEST] msg[{i}] role=user len={content_len} head={content[:150]!r} tail={content[-150:]!r}")
+                    else:
+                        preview = content[:100] + "..." if len(content) > 100 else content
+                        logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} preview={preview}")
+                else:
+                    content_len = sum(len(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text")
+                    text_parts = [p.get("text", "")[:50] for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                    logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} multimodal_parts={text_parts}")
+            
             stream = await self.client.chat.completions.create(**api_params)
+            
+            # Log successful request creation
+            logger.debug(f"[LLM_REQUEST] Stream created successfully")
             
             # Pass stream to handler for direct cancellation capability
             if stream_setter:
@@ -663,8 +720,12 @@ class LLMService:
                 logger.debug(f"Stream set for cancellation: {type(stream)}")
             
             cancelled = False
+            chunk_count = 0
+            first_content = ""
             try:
                 async for chunk in stream:
+                    chunk_count += 1
+                    
                     # Check for cancellation at start of each iteration
                     if cancel_check and cancel_check():
                         logger.info("Stream cancelled by user request - breaking loop")
@@ -683,6 +744,13 @@ class LLMService:
                     
                     if delta.content:
                         filtered_content += delta.content
+                        
+                        # Log first 500 chars of response
+                        if len(first_content) < 500:
+                            first_content += delta.content
+                            if len(first_content) >= 500:
+                                logger.info(f"[LLM_RESPONSE] First 500 chars: {first_content[:500]!r}")
+                        
                         yield {
                             "type": "text_delta",
                             "text": delta.content,
@@ -691,6 +759,9 @@ class LLMService:
                     if hasattr(chunk, 'usage') and chunk.usage:
                         total_input_tokens = chunk.usage.prompt_tokens or 0
                         total_output_tokens = chunk.usage.completion_tokens or 0
+                        # Log token counts when available
+                        if total_input_tokens > 0:
+                            logger.info(f"[LLM_RESPONSE] Token usage: prompt={total_input_tokens}, completion={total_output_tokens}")
                     
                     if chunk.choices[0].finish_reason:
                         break
@@ -735,6 +806,9 @@ class LLMService:
                 total_input_tokens = self._estimate_tokens(messages)
             if total_output_tokens == 0:
                 total_output_tokens = self._estimate_tokens(filtered_content)
+            
+            # Log stream completion summary
+            logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}")
             
             # Use direct SQL update instead of ORM to avoid stale object issues
             # This is more robust during long streaming sessions
@@ -1059,6 +1133,7 @@ When you receive search results or external data in the conversation, follow the
         
         # Add current user message
         content = self._build_user_content(user_message, attachments)
+        
         messages.append({
             "role": "user",
             "content": content,
@@ -1078,12 +1153,15 @@ When you receive search results or external data in the conversation, follow the
         Compress history if it exceeds thresholds.
         This helps manage context window limits for long conversations.
         """
+        import logging
         from app.services.settings_service import SettingsService
         from app.services.history_compression import (
             get_compression_service, 
             CompressionConfig,
             estimate_message_tokens
         )
+        
+        logger = logging.getLogger(__name__)
         
         # Check if compression is enabled
         enabled = await SettingsService.get_bool(db, "history_compression_enabled")
@@ -1105,11 +1183,15 @@ When you receive search results or external data in the conversation, follow the
         compression_service = get_compression_service(config)
         
         # Check if compression is needed
-        if not compression_service.should_compress(messages) and not compression_service.should_compress_by_tokens(messages):
+        needs_msg_compress = compression_service.should_compress(messages)
+        needs_token_compress = compression_service.should_compress_by_tokens(messages)
+        
+        if needs_msg_compress or needs_token_compress:
+            logger.info(f"[COMPRESSION] Triggered: by_messages={needs_msg_compress}, by_tokens={needs_token_compress}")
+        
+        if not needs_msg_compress and not needs_token_compress:
             return messages
         
-        import logging
-        logger = logging.getLogger(__name__)
         logger.info(f"Compressing chat history: {len(messages)} messages, ~{estimate_message_tokens(messages)} tokens")
         
         # Perform compression
@@ -1131,29 +1213,57 @@ When you receive search results or external data in the conversation, follow the
         text: str,
         attachments: Optional[List[Dict]] = None,
     ) -> Any:
-        """Build user message content, handling text and images"""
+        """Build user message content, handling text, images, and file attachments"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.debug(f"[BUILD_CONTENT] text_len={len(text)}, attachments={len(attachments) if attachments else 0}")
         
         if not attachments:
             return text
         
-        # Multi-modal content
-        content = []
+        # Separate images from file attachments
+        images = []
+        file_contents = []
         
         for attachment in attachments:
-            if attachment.get("type") == "image":
-                content.append({
+            att_type = attachment.get("type")
+            logger.debug(f"[BUILD_CONTENT] Processing attachment type={att_type}, filename={attachment.get('filename')}")
+            
+            if att_type == "image":
+                images.append({
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:{attachment.get('mime_type', 'image/jpeg')};base64,{attachment.get('data')}",
+                        "url": f"data:{attachment.get('mime_type', 'image/jpeg')};base64,{attachment.get('data', '')[:50]}...",
                     }
                 })
+            elif att_type == "file":
+                # File attachment - include content as text
+                filename = attachment.get("filename", "unnamed")
+                content = attachment.get("content", "")
+                if content:
+                    logger.info(f"[BUILD_CONTENT] Adding file content: {filename} ({len(content)} chars)")
+                    file_contents.append(f"=== FILE: {filename} ===\n{content}\n=== END FILE ===")
+                else:
+                    logger.warning(f"[BUILD_CONTENT] File attachment has no content: {filename}")
         
-        content.append({
-            "type": "text",
-            "text": text,
-        })
+        # Build the combined text with file contents
+        combined_text = text
+        if file_contents:
+            combined_text = "\n\n".join(file_contents) + "\n\n" + text
+            logger.info(f"[BUILD_CONTENT] Combined text length: {len(combined_text)} chars")
         
-        return content
+        # If we have images, use multi-modal format
+        if images:
+            content = images.copy()
+            content.append({
+                "type": "text",
+                "text": combined_text,
+            })
+            return content
+        
+        # Text only (possibly with file contents prepended)
+        return combined_text
     
     async def _track_usage(
         self,

@@ -115,6 +115,77 @@ async def upload_document(
     return DocumentResponse.model_validate(document)
 
 
+@router.post("/extract-text")
+async def extract_text_from_file(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+):
+    """
+    Extract text content from a document file (PDF, DOCX, XLSX, etc).
+    Returns the extracted text without storing the document.
+    Used for inline file uploads in chat.
+    """
+    import tempfile
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[extract-text] === ENDPOINT CALLED ===")
+    logger.info(f"[extract-text] User: {user.id} ({user.email})")
+    logger.info(f"[extract-text] File object: {file}")
+    logger.info(f"[extract-text] Filename: {file.filename}")
+    logger.info(f"[extract-text] Content-Type: {file.content_type}")
+    
+    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
+    mime_type = file.content_type or "application/octet-stream"
+    
+    logger.info(f"[extract-text] Processing {file.filename}, ext={file_ext}, mime={mime_type}")
+    
+    # Save to temp file for processing
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        logger.info(f"[extract-text] Saved {len(content)} bytes to temp file {tmp_path}")
+        
+        try:
+            # Use existing DocumentProcessor
+            text = await DocumentProcessor.extract_text(tmp_path, mime_type)
+            
+            if not text or not text.strip():
+                logger.warning(f"[extract-text] No text extracted from {file.filename}")
+                return {
+                    "filename": file.filename,
+                    "text": "",
+                    "chars": 0,
+                    "lines": 0,
+                    "warning": "No text could be extracted from this file"
+                }
+            
+            logger.info(f"[extract-text] Extracted {len(text)} chars from {file.filename}")
+            return {
+                "filename": file.filename,
+                "text": text,
+                "chars": len(text),
+                "lines": len(text.split('\n')),
+            }
+            
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+                
+    except Exception as e:
+        logger.error(f"[extract-text] Text extraction failed for {file.filename}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to extract text: {str(e)}"
+        )
+
+
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
     document_id: str,

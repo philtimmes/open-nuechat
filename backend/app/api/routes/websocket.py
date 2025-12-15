@@ -21,7 +21,7 @@ from app.services.billing import BillingService
 from app.services.procedural_memory import ProceduralMemoryService, get_procedural_context
 from app.services.tool_service import ToolService
 from app.services.image_gen import detect_image_request, detect_image_request_async
-from app.tools.registry import tool_registry
+from app.tools.registry import tool_registry, store_session_file
 from app.models.models import User, Chat, Message, MessageRole, ContentType, AssistantConversation, CustomAssistant
 from app.core.config import settings
 from app.core.logging import log_websocket_event
@@ -127,7 +127,15 @@ async def websocket_endpoint(
             
             elif msg_type == "chat_message":
                 save_msg = payload.get("save_user_message", True)
-                logger.info(f"chat_message: chat={payload.get('chat_id')}, len={len(payload.get('content', ''))}, save={save_msg}")
+                content_len = len(payload.get("content", ""))
+                logger.info(f"chat_message: chat={payload.get('chat_id')}, content_len={content_len}, save={save_msg}")
+                
+                # Debug: log first and last 100 chars to verify content integrity
+                content = payload.get("content", "")
+                if content_len > 200:
+                    logger.debug(f"chat_message content head: {content[:100]}")
+                    logger.debug(f"chat_message content tail: {content[-100:]}")
+                
                 await handle_chat_message(connection, streaming_handler, user_id, payload)
             
             elif msg_type == "regenerate_message":
@@ -184,6 +192,23 @@ async def handle_chat_message(
     attachments = payload.get("attachments", [])
     parent_id = payload.get("parent_id")  # For conversation branching
     client_message_id = payload.get("message_id")  # Client-generated UUID for the user message
+    
+    # Log attachment info
+    if attachments:
+        logger.info(f"[ATTACHMENTS] Received {len(attachments)} attachments")
+        for i, att in enumerate(attachments):
+            att_type = att.get("type")
+            filename = att.get("filename", "unknown")
+            content_len = len(att.get("content", "")) if att.get("content") else 0
+            data_len = len(att.get("data", "")) if att.get("data") else 0
+            logger.info(f"[ATTACHMENTS] [{i}] type={att_type}, filename={filename}, content_len={content_len}, data_len={data_len}")
+    
+    # Store file attachments for tool access (partial viewing)
+    if attachments:
+        for att in attachments:
+            if att.get("type") == "file" and att.get("filename") and att.get("content"):
+                store_session_file(chat_id, att["filename"], att["content"])
+                logger.info(f"[ATTACHMENTS] Stored for tools: {att['filename']} ({len(att['content'])} chars)")
     
     # Allow payload to override save_user_message (for file content continuation)
     if "save_user_message" in payload:
@@ -604,7 +629,7 @@ async def handle_chat_message(
                     result = await tool_registry.execute(
                         tool_name,
                         params,
-                        {"db": db, "user": user},
+                        {"db": db, "user": user, "chat_id": chat_id},
                     )
                     return str(result) if result else ""
                 except Exception as e:
@@ -804,13 +829,19 @@ async def handle_chat_message(
                 result = await tool_registry.execute(
                     tool_name,
                     arguments,
-                    {"db": db, "user": user},
+                    {"db": db, "user": user, "chat_id": chat_id},
                 )
             
             logger.debug(f"Tool executed, result length: {len(str(result))}")
             return result
         
         try:
+            # Log content being sent to LLM
+            logger.info(f"[LLM_CALL] Sending to LLM: content_len={len(content)}, chat={chat_id}")
+            if len(content) > 200:
+                logger.debug(f"[LLM_CALL] Content head: {content[:100]}")
+                logger.debug(f"[LLM_CALL] Content tail: {content[-100:]}")
+            
             async for event in llm.stream_message(
                 db=db,
                 user=user,

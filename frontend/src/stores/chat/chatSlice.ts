@@ -29,6 +29,9 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
       // Use provided model, or selected model from store, or let backend use default
       const modelToUse = model || useModelsStore.getState().selectedModel || undefined;
       
+      // Preserve uploaded artifacts - they were uploaded before the chat was created
+      const { uploadedArtifacts: preservedArtifacts, zipUploadResult: preservedZipResult, zipContext: preservedZipContext } = get();
+      
       // Check if this is an assistant model (gpt: prefix)
       if (modelToUse && modelToUse.startsWith('gpt:')) {
         const assistantId = modelToUse.substring(4);
@@ -47,9 +50,10 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
           messages: [],
           artifacts: [],
           selectedArtifact: null,
-          uploadedArtifacts: [],
-          zipUploadResult: null,
-          zipContext: null,
+          // Preserve uploads from before chat was created
+          uploadedArtifacts: preservedArtifacts,
+          zipUploadResult: preservedZipResult,
+          zipContext: preservedZipContext,
           codeSummary: null,
           showSummary: false,
         }));
@@ -69,9 +73,10 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         messages: [],
         artifacts: [],
         selectedArtifact: null,
-        uploadedArtifacts: [],
-        zipUploadResult: null,
-        zipContext: null,
+        // Preserve uploads from before chat was created
+        uploadedArtifacts: preservedArtifacts,
+        zipUploadResult: preservedZipResult,
+        zipContext: preservedZipContext,
         codeSummary: null,
         showSummary: false,
       }));

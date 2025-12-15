@@ -19,6 +19,7 @@ export default function ArtifactsPanel({
   onSelect, 
   onClose 
 }: ArtifactsPanelProps) {
+  console.log('[ArtifactsPanel] RENDERING with', artifacts.length, 'artifacts');
   const [view, setView] = useState<View>('list');
   const [selectedGroup, setSelectedGroup] = useState<ArtifactGroup | null>(null);
   const [activeTab, setActiveTab] = useState<'preview' | 'code' | 'signatures'>('preview');

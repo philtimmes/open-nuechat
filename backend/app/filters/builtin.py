@@ -221,9 +221,9 @@ class InputSanitizerToLLM(OverrideToLLM):
         if self.get_config("trim", True):
             sanitized = sanitized.strip()
         
-        # Length limit
-        max_length = self.get_config("max_length", 100000)
-        if len(sanitized) > max_length:
+        # Length limit (0 = no limit)
+        max_length = self.get_config("max_length", 0)
+        if max_length > 0 and len(sanitized) > max_length:
             sanitized = sanitized[:max_length]
             logger.warning(f"Input truncated from {len(original)} to {max_length} chars")
         

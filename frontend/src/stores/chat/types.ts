@@ -78,6 +78,7 @@ export interface ArtifactSlice {
   setSelectedArtifact: (artifact: Artifact | null) => void;
   setShowArtifacts: (show: boolean) => void;
   collectAllArtifacts: () => Artifact[];
+  addUploadedArtifacts: (artifacts: Artifact[]) => void;
   setZipUploadResult: (result: Partial<ZipUploadResult> | null) => void;
   fetchUploadedData: (chatId: string) => Promise<void>;
   setZipContext: (context: string | null) => void;

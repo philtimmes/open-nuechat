@@ -134,8 +134,9 @@ async def create_embeddings(
         raise HTTPException(status_code=500, detail=f"Embedding failed: {str(e)}")
     
     # Bill for embedding tokens
-    billing = BillingService(db)
+    billing = BillingService()
     await billing.record_usage(
+        db=db,
         user_id=user.id,
         input_tokens=total_tokens,
         output_tokens=0,

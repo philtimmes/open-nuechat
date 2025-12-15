@@ -160,13 +160,13 @@ const MessageMarkdown = memo(function MessageMarkdown({ content }: { content: st
           return <td className="px-3 py-2 text-sm text-[var(--color-text-secondary)] whitespace-normal">{children}</td>;
         },
         p({ children }) {
-          return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>;
+          return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>;
         },
         ul({ children }) {
-          return <ul className="list-disc list-outside ml-4 mb-3 space-y-1">{children}</ul>;
+          return <ul className="list-disc list-outside ml-4 mb-2 space-y-0.5">{children}</ul>;
         },
         ol({ children }) {
-          return <ol className="list-decimal list-outside ml-4 mb-3 space-y-1">{children}</ol>;
+          return <ol className="list-decimal list-outside ml-4 mb-2 space-y-0.5">{children}</ol>;
         },
         a({ href, children }) {
           return (
@@ -635,14 +635,26 @@ export default function ChatPage() {
     setSelectedArtifact,
     setShowArtifacts,
     collectAllArtifacts,
+    addUploadedArtifacts,
+    uploadedArtifacts,
     zipUploadResult,
     setZipUploadResult,
   } = useChatStore();
   
-  // Combine saved artifacts with streaming artifacts for real-time updates
+  // Combine saved artifacts with streaming and uploaded artifacts for real-time updates
   const artifacts = useMemo(() => {
-    return [...savedArtifacts, ...streamingArtifacts];
-  }, [savedArtifacts, streamingArtifacts]);
+    const combined = [...savedArtifacts, ...streamingArtifacts, ...uploadedArtifacts];
+    console.log('[ChatPage] Combined artifacts:', {
+      saved: savedArtifacts.length,
+      streaming: streamingArtifacts.length,
+      uploaded: uploadedArtifacts.length,
+      total: combined.length,
+    });
+    return combined;
+  }, [savedArtifacts, streamingArtifacts, uploadedArtifacts]);
+  
+  // Debug: log showArtifacts value on each render
+  console.log('[ChatPage] Render state:', { showArtifacts, artifactsCount: artifacts.length, selectedArtifact: selectedArtifact?.filename });
   
   // Chat menu state
   const [showChatMenu, setShowChatMenu] = useState(false);
@@ -947,7 +959,16 @@ export default function ChatPage() {
     };
   }, [currentChat?.title, appName, chatId]);
   
-  const handleSendMessage = async (content: string, _attachments?: File[]) => {
+  // Define attachment type from ChatInput
+  interface ProcessedAttachment {
+    type: 'image' | 'file';
+    filename: string;
+    mime_type: string;
+    data?: string;
+    content?: string;
+  }
+  
+  const handleSendMessage = async (content: string, attachments?: ProcessedAttachment[]) => {
     // Get currentChat from store directly to avoid stale closure issues
     const { currentChat: storeCurrentChat, messages: storeMessages } = useChatStore.getState();
     let targetChatId = storeCurrentChat?.id;
@@ -955,7 +976,8 @@ export default function ChatPage() {
     console.log('[handleSendMessage] Starting:', {
       targetChatId,
       totalMessagesInStore: storeMessages.length,
-      content: content.substring(0, 50)
+      content: content.substring(0, 50),
+      attachmentCount: attachments?.length || 0,
     });
     
     // Calculate parentId from the currently displayed leaf assistant
@@ -979,8 +1001,14 @@ export default function ChatPage() {
     
     // Pass the current leaf assistant ID as parent_id for linear conversation
     // This tells the backend which conversation path we're continuing from
-    sendChatMessage(targetChatId, content, undefined, parentId);
+    sendChatMessage(targetChatId, content, attachments, parentId);
   };
+  
+  // Handle file uploads - add to artifacts
+  const handleFilesUploaded = useCallback((artifacts: Artifact[]) => {
+    console.log('[handleFilesUploaded] Adding artifacts:', artifacts.length);
+    addUploadedArtifacts(artifacts);
+  }, [addUploadedArtifacts]);
   
   // Update voice ref with send function
   // Note: handleSendMessage calculates parentId from store directly, so no stale closure issues
@@ -1339,6 +1367,7 @@ export default function ChatPage() {
           <ChatInput
             onSend={handleSendMessage}
             onZipUpload={handleZipUpload}
+            onFilesUploaded={handleFilesUploaded}
             onVoiceModeToggle={sttEnabled ? toggleVoiceMode : undefined}
             disabled={!isConnected}
             isUploadingZip={isUploadingZip}
@@ -1696,6 +1725,7 @@ export default function ChatPage() {
             onSend={handleSendMessage}
             onStop={handleStop}
             onZipUpload={handleZipUpload}
+            onFilesUploaded={handleFilesUploaded}
             onVoiceModeToggle={sttEnabled ? toggleVoiceMode : undefined}
             disabled={!isConnected}
             isStreaming={isSending}
@@ -1769,6 +1799,13 @@ export default function ChatPage() {
           onSelect={setSelectedArtifact}
           onClose={() => setShowArtifacts(false)}
         />
+      )}
+      
+      {/* DEBUG: Visible indicator when showArtifacts is true */}
+      {showArtifacts && (
+        <div style={{position: 'fixed', top: 10, right: 10, background: 'red', color: 'white', padding: '10px', zIndex: 9999}}>
+          ARTIFACTS PANEL SHOULD BE VISIBLE ({artifacts.length} artifacts)
+        </div>
       )}
       
       {/* Summary panel */}

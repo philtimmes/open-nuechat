@@ -179,6 +179,83 @@ class ToolRegistry:
             },
             handler=self._webpage_fetch_handler,
         )
+        
+        # File viewing tools for uploaded files
+        self.register(
+            name="view_file_lines",
+            description="View specific lines from an uploaded file. Use this to examine portions of large files without loading the entire content.",
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "Name of the uploaded file to view",
+                    "required": True,
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "First line to view (1-indexed). Default: 1",
+                    "required": False,
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Last line to view (inclusive). Default: end of file",
+                    "required": False,
+                }
+            },
+            handler=FileViewingTools.view_file_lines,
+        )
+        
+        self.register(
+            name="search_in_file",
+            description="Search for a pattern in an uploaded file and show matching lines with context. Useful for finding specific code or text.",
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "Name of the uploaded file to search",
+                    "required": True,
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Search pattern (supports regex or literal text)",
+                    "required": True,
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Number of lines to show before and after each match. Default: 3",
+                    "required": False,
+                }
+            },
+            handler=FileViewingTools.search_in_file,
+        )
+        
+        self.register(
+            name="list_uploaded_files",
+            description="List all files uploaded in the current chat session with basic info (size, line count, preview)",
+            parameters={},
+            handler=FileViewingTools.list_uploaded_files,
+        )
+        
+        self.register(
+            name="view_signature",
+            description="View code around a specific function, class, or other code signature. Automatically finds the definition and shows the implementation.",
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "Name of the source file",
+                    "required": True,
+                },
+                "signature_name": {
+                    "type": "string",
+                    "description": "Name of the function, class, method, or label to find",
+                    "required": True,
+                },
+                "lines_after": {
+                    "type": "integer",
+                    "description": "Number of lines to show after the signature. Default: 20",
+                    "required": False,
+                }
+            },
+            handler=FileViewingTools.view_signature,
+        )
     
     async def _calculator_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Safe mathematical expression evaluator"""
@@ -537,6 +614,223 @@ class ToolRegistry:
             import html as html_module
             text = html_module.unescape(text)
             return text
+
+
+# Session-based file store for uploaded files
+# Key: chat_id, Value: Dict[filename, content]
+_session_files: Dict[str, Dict[str, str]] = {}
+
+
+def store_session_file(chat_id: str, filename: str, content: str):
+    """Store a file in the session for tool access"""
+    if chat_id not in _session_files:
+        _session_files[chat_id] = {}
+    _session_files[chat_id][filename] = content
+
+
+def get_session_file(chat_id: str, filename: str) -> Optional[str]:
+    """Get a file from the session"""
+    return _session_files.get(chat_id, {}).get(filename)
+
+
+def get_session_files(chat_id: str) -> Dict[str, str]:
+    """Get all files for a chat session"""
+    return _session_files.get(chat_id, {})
+
+
+def clear_session_files(chat_id: str):
+    """Clear files for a chat session"""
+    if chat_id in _session_files:
+        del _session_files[chat_id]
+
+
+class FileViewingTools:
+    """Tools for viewing uploaded files partially"""
+    
+    @staticmethod
+    async def view_file_lines(arguments: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """View specific lines from an uploaded file"""
+        filename = arguments.get("filename")
+        start_line = arguments.get("start_line", 1)
+        end_line = arguments.get("end_line")
+        
+        if not filename:
+            return {"error": "filename is required"}
+        
+        chat_id = context.get("chat_id") if context else None
+        if not chat_id:
+            return {"error": "No chat context available"}
+        
+        content = get_session_file(chat_id, filename)
+        if not content:
+            # List available files
+            available = list(get_session_files(chat_id).keys())
+            return {
+                "error": f"File '{filename}' not found",
+                "available_files": available if available else "No files uploaded in this session"
+            }
+        
+        lines = content.split('\n')
+        total_lines = len(lines)
+        
+        # Adjust indices (1-based to 0-based)
+        start_idx = max(0, start_line - 1)
+        end_idx = min(total_lines, end_line) if end_line else total_lines
+        
+        selected_lines = lines[start_idx:end_idx]
+        
+        # Format with line numbers
+        numbered_lines = [
+            f"{start_idx + i + 1}: {line}"
+            for i, line in enumerate(selected_lines)
+        ]
+        
+        return {
+            "filename": filename,
+            "total_lines": total_lines,
+            "showing": f"lines {start_idx + 1}-{end_idx}",
+            "content": "\n".join(numbered_lines)
+        }
+    
+    @staticmethod
+    async def search_in_file(arguments: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Search for a pattern in an uploaded file and show context"""
+        filename = arguments.get("filename")
+        pattern = arguments.get("pattern")
+        context_lines = arguments.get("context_lines", 3)
+        
+        if not filename or not pattern:
+            return {"error": "filename and pattern are required"}
+        
+        chat_id = context.get("chat_id") if context else None
+        if not chat_id:
+            return {"error": "No chat context available"}
+        
+        content = get_session_file(chat_id, filename)
+        if not content:
+            available = list(get_session_files(chat_id).keys())
+            return {
+                "error": f"File '{filename}' not found",
+                "available_files": available if available else "No files uploaded"
+            }
+        
+        lines = content.split('\n')
+        results = []
+        
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            # Treat as literal string
+            regex = re.compile(re.escape(pattern), re.IGNORECASE)
+        
+        for i, line in enumerate(lines):
+            if regex.search(line):
+                start = max(0, i - context_lines)
+                end = min(len(lines), i + context_lines + 1)
+                
+                context_block = []
+                for j in range(start, end):
+                    marker = ">" if j == i else " "
+                    context_block.append(f"{j + 1}{marker} {lines[j]}")
+                
+                results.append({
+                    "line_number": i + 1,
+                    "match": line.strip(),
+                    "context": "\n".join(context_block)
+                })
+                
+                # Limit results
+                if len(results) >= 10:
+                    break
+        
+        return {
+            "filename": filename,
+            "pattern": pattern,
+            "total_matches": len(results),
+            "results": results
+        }
+    
+    @staticmethod
+    async def list_uploaded_files(arguments: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """List all uploaded files in the current session"""
+        chat_id = context.get("chat_id") if context else None
+        if not chat_id:
+            return {"error": "No chat context available"}
+        
+        files = get_session_files(chat_id)
+        if not files:
+            return {"message": "No files uploaded in this session"}
+        
+        file_info = []
+        for filename, content in files.items():
+            lines = content.split('\n')
+            file_info.append({
+                "filename": filename,
+                "lines": len(lines),
+                "size": len(content),
+                "preview": lines[0][:100] + "..." if lines and len(lines[0]) > 100 else (lines[0] if lines else "")
+            })
+        
+        return {
+            "file_count": len(files),
+            "files": file_info
+        }
+    
+    @staticmethod
+    async def view_signature(arguments: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """View code around a function/class signature"""
+        filename = arguments.get("filename")
+        signature_name = arguments.get("signature_name")
+        lines_after = arguments.get("lines_after", 20)
+        
+        if not filename or not signature_name:
+            return {"error": "filename and signature_name are required"}
+        
+        chat_id = context.get("chat_id") if context else None
+        if not chat_id:
+            return {"error": "No chat context available"}
+        
+        content = get_session_file(chat_id, filename)
+        if not content:
+            available = list(get_session_files(chat_id).keys())
+            return {
+                "error": f"File '{filename}' not found",
+                "available_files": available if available else "No files uploaded"
+            }
+        
+        lines = content.split('\n')
+        
+        # Search for the signature name in common patterns
+        patterns = [
+            rf"^\s*(?:async\s+)?def\s+{re.escape(signature_name)}\s*\(",  # Python function
+            rf"^\s*class\s+{re.escape(signature_name)}[\s:(]",  # Python/JS class
+            rf"^\s*(?:export\s+)?(?:async\s+)?function\s+{re.escape(signature_name)}\s*\(",  # JS function
+            rf"^\s*(?:export\s+)?const\s+{re.escape(signature_name)}\s*=",  # JS const
+            rf"^\s*(?:public|private|protected)?\s*(?:static)?\s*\w+\s+{re.escape(signature_name)}\s*\(",  # Java/C# method
+            rf"^{re.escape(signature_name)}:",  # Assembly label
+            rf"^\s*fn\s+{re.escape(signature_name)}\s*[<(]",  # Rust function
+            rf"^\s*func\s+{re.escape(signature_name)}\s*\(",  # Go function
+        ]
+        
+        for i, line in enumerate(lines):
+            for pattern in patterns:
+                if re.match(pattern, line, re.IGNORECASE):
+                    start = i
+                    end = min(len(lines), i + lines_after + 1)
+                    
+                    numbered = [f"{start + j + 1}: {lines[start + j]}" for j in range(end - start)]
+                    
+                    return {
+                        "filename": filename,
+                        "signature": signature_name,
+                        "start_line": start + 1,
+                        "content": "\n".join(numbered)
+                    }
+        
+        return {
+            "error": f"Signature '{signature_name}' not found in {filename}",
+            "tip": "Try using search_in_file to find the exact location"
+        }
 
 
 # Global tool registry instance

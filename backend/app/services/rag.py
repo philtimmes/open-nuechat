@@ -175,6 +175,7 @@ class FAISSIndexManager:
             embeddings: numpy array of shape (n, dim) with normalized embeddings
             chunk_ids: List of chunk IDs corresponding to each embedding
         """
+        logger.info(f"[FAISS_BUILD] Building index for: {index_id} (type: {type(index_id).__name__})")
         n_vectors = len(embeddings)
         
         if n_vectors == 0:
@@ -211,9 +212,11 @@ class FAISSIndexManager:
         cpu_index = self._to_cpu(index)
         index_path, map_path = self._get_index_path(index_id)
         
+        logger.info(f"[FAISS_BUILD] Saving index to: {index_path}")
         faiss.write_index(cpu_index, str(index_path))
         with open(map_path, 'wb') as f:
             pickle.dump(id_map, f)
+        logger.info(f"[FAISS_BUILD] Index saved successfully: {index_path.exists()}")
         
         # Cache GPU version
         self._indexes[index_id] = index
@@ -223,16 +226,31 @@ class FAISSIndexManager:
     
     def load_index(self, index_id: str) -> bool:
         """Load index from disk into memory/GPU"""
+        logger.info(f"[FAISS_LOAD] Attempting to load index: {index_id}")
+        
         if index_id in self._indexes:
+            logger.info(f"[FAISS_LOAD] Index {index_id} already cached in memory")
             return True
         
         index_path, map_path = self._get_index_path(index_id)
+        logger.info(f"[FAISS_LOAD] Looking for index file: {index_path}")
         
         if not index_path.exists():
+            logger.warning(f"[FAISS_LOAD] Index file NOT FOUND: {index_path}")
+            # List what files ARE in the directory
+            try:
+                if self.index_dir.exists():
+                    files = list(self.index_dir.glob("*.faiss"))
+                    logger.warning(f"[FAISS_LOAD] Available index files: {[f.name for f in files]}")
+                else:
+                    logger.warning(f"[FAISS_LOAD] Index directory does not exist: {self.index_dir}")
+            except Exception as e:
+                logger.warning(f"[FAISS_LOAD] Error listing index dir: {e}")
             return False
         
         try:
             # Load from disk
+            logger.info(f"[FAISS_LOAD] Loading index from disk: {index_path}")
             index = faiss.read_index(str(index_path))
             
             # Set search parameters
@@ -275,6 +293,7 @@ class FAISSIndexManager:
         """
         # Ensure index is loaded
         if not self.load_index(index_id):
+            logger.warning(f"[FAISS] Index {index_id} not found or failed to load")
             return []
         
         index = self._indexes[index_id]
@@ -282,16 +301,26 @@ class FAISSIndexManager:
         
         # Prepare query
         query = query_embedding.astype(np.float32).reshape(1, -1)
+        
+        # Log query info
+        logger.debug(f"[FAISS] Search: index={index_id}, index_vectors={index.ntotal}, query_dim={query.shape[1]}, query_norm_before={np.linalg.norm(query):.4f}")
+        
         faiss.normalize_L2(query)
+        
+        logger.debug(f"[FAISS] Query norm after normalize_L2={np.linalg.norm(query):.4f}")
         
         # Search
         scores, indices = index.search(query, min(top_k, index.ntotal))
+        
+        logger.debug(f"[FAISS] Raw results: indices={indices[0][:5].tolist()}, scores={scores[0][:5].tolist()}")
         
         # Map back to chunk IDs
         results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx >= 0 and idx in id_map:
                 results.append((id_map[idx], float(score)))
+        
+        logger.debug(f"[FAISS] Mapped {len(results)} results, top_scores={[r[1] for r in results[:3]]}")
         
         return results
     
@@ -390,9 +419,14 @@ class RAGService:
         """Generate embedding for text using GPU"""
         model = self.get_model()
         if model is None:
+            logger.warning("[EMBED] Model not loaded!")
             return None
         
         embedding = model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
+        
+        # Debug logging
+        logger.debug(f"[EMBED] text='{text[:50]}...', shape={embedding.shape}, norm={np.linalg.norm(embedding):.4f}, first5={embedding[:5].tolist()}")
+        
         return embedding
     
     async def get_embedding(self, text: str) -> List[float]:
@@ -556,6 +590,8 @@ class RAGService:
     ) -> None:
         """Rebuild FAISS index for a knowledge store"""
         
+        logger.info(f"[FAISS_BUILD] Starting index rebuild for knowledge store: {knowledge_store_id}")
+        
         # Get all chunks for this knowledge store
         result = await db.execute(
             select(DocumentChunk, Document)
@@ -567,8 +603,11 @@ class RAGService:
         rows = result.all()
         
         if not rows:
+            logger.warning(f"[FAISS_BUILD] No chunks found for knowledge store {knowledge_store_id}")
             self.get_index_manager().delete_index(knowledge_store_id)
             return
+        
+        logger.info(f"[FAISS_BUILD] Found {len(rows)} chunks to index")
         
         # Collect embeddings and IDs
         embeddings = []
@@ -581,6 +620,8 @@ class RAGService:
         
         embeddings_array = np.vstack(embeddings)
         
+        logger.info(f"[FAISS_BUILD] Embedding array shape: {embeddings_array.shape}, first embedding norm: {np.linalg.norm(embeddings_array[0]):.4f}")
+        
         # Build index in thread pool
         await asyncio.get_event_loop().run_in_executor(
             _executor,
@@ -589,6 +630,8 @@ class RAGService:
             embeddings_array,
             chunk_ids
         )
+        
+        logger.info(f"[FAISS_BUILD] Index build complete for {knowledge_store_id}")
     
     async def search(
         self,
@@ -639,7 +682,7 @@ class RAGService:
                 _log_rag_debug(
                     "Direct search completed",
                     results_count=len(results),
-                    top_scores=[r.get("score", 0) for r in results[:3]]
+                    top_scores=[r.get("similarity", 0) for r in results[:3]]
                 )
             return results
         
@@ -649,7 +692,7 @@ class RAGService:
             _log_rag_debug(
                 "User document search completed",
                 results_count=len(results),
-                top_scores=[r.get("score", 0) for r in results[:3]]
+                top_scores=[r.get("similarity", 0) for r in results[:3]]
             )
         return results
     
@@ -672,14 +715,42 @@ class RAGService:
         rows = result.all()
         
         if not rows:
+            logger.debug(f"[DIRECT_SEARCH] No chunks found for documents: {document_ids}")
             return []
+        
+        # Ensure query is normalized
+        query_norm = np.linalg.norm(query_embedding)
+        if query_norm > 0:
+            query_normalized = query_embedding / query_norm
+        else:
+            logger.warning("[DIRECT_SEARCH] Query embedding has zero norm!")
+            return []
+        
+        logger.debug(f"[DIRECT_SEARCH] Found {len(rows)} chunks, query_norm_before={query_norm:.4f}, query_dim={len(query_embedding)}")
         
         # Calculate similarities
         results = []
         for chunk, document in rows:
             chunk_embedding = np.frombuffer(chunk.embedding, dtype=np.float32)
-            # Cosine similarity (vectors should be normalized)
-            similarity = float(np.dot(query_embedding, chunk_embedding))
+            
+            # Check dimensions match
+            if len(chunk_embedding) != len(query_normalized):
+                logger.warning(f"[DIRECT_SEARCH] Dimension mismatch! chunk_dim={len(chunk_embedding)}, query_dim={len(query_normalized)}")
+                continue
+            
+            # Normalize chunk embedding
+            chunk_norm = np.linalg.norm(chunk_embedding)
+            if chunk_norm > 0:
+                chunk_normalized = chunk_embedding / chunk_norm
+            else:
+                logger.warning(f"[DIRECT_SEARCH] Chunk has zero norm: {chunk.id}")
+                continue
+            
+            # Cosine similarity
+            similarity = float(np.dot(query_normalized, chunk_normalized))
+            
+            if len(results) < 3:  # Log first 3
+                logger.debug(f"[DIRECT_SEARCH] Chunk '{chunk.content[:50]}...' norm={chunk_norm:.4f}, similarity={similarity:.4f}")
             
             results.append({
                 "chunk_id": str(chunk.id),
@@ -692,6 +763,7 @@ class RAGService:
             })
         
         results.sort(key=lambda x: x["similarity"], reverse=True)
+        logger.debug(f"[DIRECT_SEARCH] Top similarities: {[round(r['similarity'], 4) for r in results[:5]]}")
         return results[:top_k]
     
     async def _user_document_search(
@@ -720,7 +792,10 @@ class RAGService:
         documents = result.scalars().all()
         
         if not documents:
+            logger.debug(f"[USER_DOC_SEARCH] No unitemized documents found for user {user.id}")
             return []
+        
+        logger.debug(f"[USER_DOC_SEARCH] Found {len(documents)} unitemized documents for user {user.id}")
         
         doc_ids = [str(d.id) for d in documents]
         return await self._direct_search(db, query_embedding, doc_ids, top_k)
@@ -799,7 +874,10 @@ class RAGService:
         all_results = []
         index_manager = self.get_index_manager()
         
+        logger.info(f"[KB_SEARCH] Searching {len(accessible_stores)} knowledge stores: {accessible_stores}")
+        
         for store_id in accessible_stores:
+            logger.info(f"[KB_SEARCH] Searching store: {store_id} (type: {type(store_id).__name__})")
             results = await asyncio.get_event_loop().run_in_executor(
                 _executor,
                 index_manager.search,
@@ -807,6 +885,7 @@ class RAGService:
                 query_embedding,
                 top_k
             )
+            logger.info(f"[KB_SEARCH] Store {store_id} returned {len(results)} results")
             
             if debug_enabled and results:
                 _log_rag_debug(

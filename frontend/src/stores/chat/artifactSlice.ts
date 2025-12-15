@@ -29,6 +29,26 @@ export const createArtifactSlice: SliceCreator<ArtifactSlice> = (set, get) => ({
     return Array.from(artifactMap.values());
   },
 
+  addUploadedArtifacts: (artifacts: Artifact[]) => {
+    console.log('[artifactSlice] addUploadedArtifacts called with', artifacts.length, 'artifacts');
+    console.log('[artifactSlice] Current state before:', {
+      uploadedArtifacts: get().uploadedArtifacts.length,
+      showArtifacts: get().showArtifacts,
+    });
+    set((state) => ({
+      uploadedArtifacts: [...state.uploadedArtifacts, ...artifacts],
+      // Auto-show artifacts panel when files are uploaded
+      showArtifacts: artifacts.length > 0 || state.showArtifacts,
+      // Auto-select the first new artifact if nothing is selected
+      selectedArtifact: state.selectedArtifact || (artifacts.length > 0 ? artifacts[0] : null),
+    }));
+    console.log('[artifactSlice] After update:', {
+      uploadedArtifacts: get().uploadedArtifacts.length,
+      showArtifacts: get().showArtifacts,
+      selectedArtifact: get().selectedArtifact?.filename,
+    });
+  },
+
   setZipUploadResult: (result) => {
     set({ zipUploadResult: result });
     if (result?.artifacts) {

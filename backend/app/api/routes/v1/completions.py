@@ -437,8 +437,9 @@ async def _create_non_streaming_response(
     completion_tokens = len(response_content.split()) * 1.3
     
     # Bill tokens
-    billing = BillingService(db)
+    billing = BillingService()
     await billing.record_usage(
+        db=db,
         user_id=user.id,
         input_tokens=int(prompt_tokens),
         output_tokens=int(completion_tokens),
@@ -469,7 +470,7 @@ async def _create_non_streaming_response(
     )
 
 
-async def _create_streaming_response(
+def _create_streaming_response(
     completion_id: str,
     created: int,
     model: str,
@@ -573,8 +574,9 @@ async def _create_streaming_response(
             
             # Bill tokens after streaming
             prompt_tokens = sum(len(str(m.get("content", "")).split()) * 1.3 for m in messages)
-            billing = BillingService(db)
+            billing = BillingService()
             await billing.record_usage(
+                db=db,
                 user_id=user.id,
                 input_tokens=int(prompt_tokens),
                 output_tokens=int(completion_tokens),
