@@ -38,6 +38,25 @@ export default function OAuthCallback() {
         // Clear the hash from URL for cleanliness
         window.history.replaceState(null, '', '/oauth/callback');
         
+        // Check if we need to continue a shared chat
+        const continueShareId = sessionStorage.getItem('continueSharedChat');
+        if (continueShareId) {
+          sessionStorage.removeItem('continueSharedChat');
+          // Clone the chat and redirect
+          try {
+            const cloneResponse = await axios.post(`/api/shared/${continueShareId}/clone`, {}, {
+              headers: {
+                'Authorization': `Bearer ${accessToken}`
+              }
+            });
+            navigate(`/?chat=${cloneResponse.data.chat_id}`);
+            return;
+          } catch (cloneErr) {
+            console.error('Failed to clone shared chat:', cloneErr);
+            // Fall through to normal redirect
+          }
+        }
+        
         // Redirect to home
         navigate('/');
       } catch (err: any) {

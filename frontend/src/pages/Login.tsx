@@ -36,6 +36,22 @@ export default function Login() {
       console.log('Login response:', response.data);
       const { user, access_token, refresh_token } = response.data;
       setAuth(user, access_token, refresh_token);
+      
+      // Check if we need to continue a shared chat
+      const continueShareId = sessionStorage.getItem('continueSharedChat');
+      if (continueShareId) {
+        sessionStorage.removeItem('continueSharedChat');
+        // Clone the chat and redirect
+        try {
+          const cloneResponse = await api.post(`/shared/${continueShareId}/clone`);
+          navigate(`/?chat=${cloneResponse.data.chat_id}`);
+          return;
+        } catch (cloneErr) {
+          console.error('Failed to clone shared chat:', cloneErr);
+          // Fall through to normal redirect
+        }
+      }
+      
       navigate('/');
     } catch (err: any) {
       console.error('Login error:', err);

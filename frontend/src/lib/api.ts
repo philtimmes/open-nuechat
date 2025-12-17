@@ -118,7 +118,7 @@ export const chatApi = {
       params: { parent_id: parentId, child_id: childId }
     }),
   
-  share: (chatId: string) => api.post(`/chats/${chatId}/share`),
+  share: (chatId: string, anonymous: boolean = false) => api.post(`/chats/${chatId}/share`, { anonymous }),
   
   delete: (chatId: string) => api.delete(`/chats/${chatId}`),
   

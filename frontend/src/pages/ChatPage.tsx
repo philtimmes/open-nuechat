@@ -661,6 +661,7 @@ export default function ChatPage() {
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [shareCopied, setShareCopied] = useState(false);
+  const [shareAnonymous, setShareAnonymous] = useState(false);
   const chatMenuRef = useRef<HTMLDivElement>(null);
   
   // Model selector state
@@ -1270,12 +1271,12 @@ export default function ChatPage() {
     URL.revokeObjectURL(url);
   };
   
-  const handleShareChat = async () => {
+  const handleShareChat = async (anonymous: boolean = false) => {
     if (!currentChat) return;
     setShowChatMenu(false);
     
     try {
-      const response = await chatApi.share(currentChat.id);
+      const response = await chatApi.share(currentChat.id, anonymous);
       const shareId = response.data.share_id;
       const url = `${window.location.origin}/shared/${shareId}`;
       setShareUrl(url);
@@ -1618,7 +1619,7 @@ export default function ChatPage() {
               {showChatMenu && (
                 <div className="absolute right-0 top-full mt-1 w-44 py-1 bg-[var(--color-surface)] rounded-lg border border-[var(--color-border)] shadow-xl z-50">
                   <button
-                    onClick={handleShareChat}
+                    onClick={() => handleShareChat()}
                     className="w-full px-4 py-2 text-left text-sm text-[var(--color-text)] hover:bg-[var(--color-background)] flex items-center gap-2"
                   >
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1798,6 +1799,22 @@ export default function ChatPage() {
               Anyone with this link can view this conversation (read-only).
             </p>
             
+            {/* Anonymous checkbox */}
+            <label className="flex items-center gap-2 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={shareAnonymous}
+                onChange={(e) => {
+                  setShareAnonymous(e.target.checked);
+                  // Re-share with new anonymous setting
+                  handleShareChat(e.target.checked);
+                }}
+                className="w-4 h-4 rounded border-[var(--color-border)] text-[var(--color-button)] focus:ring-[var(--color-button)]"
+              />
+              <span className="text-sm text-[var(--color-text)]">Share anonymously</span>
+              <span className="text-xs text-[var(--color-text-secondary)]">(hide your name)</span>
+            </label>
+            
             <div className="flex gap-2 mb-4">
               <input
                 type="text"
@@ -1818,6 +1835,7 @@ export default function ChatPage() {
                 onClick={() => {
                   setShowShareDialog(false);
                   setShareUrl(null);
+                  setShareAnonymous(false);
                 }}
                 className="px-4 py-2 rounded-lg text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-background)] transition-colors text-sm"
               >

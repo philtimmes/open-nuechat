@@ -899,6 +899,125 @@ async def get_shared_chat(share_id: str):
         }
 
 
+@app.post("/api/shared/{share_id}/clone")
+async def clone_shared_chat(share_id: str, request: Request):
+    """Clone a shared chat for the authenticated user"""
+    from fastapi import HTTPException
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from app.api.dependencies import get_current_user
+    from app.models.chat import Chat
+    from app.models.models import Message
+    from app.models.user import User
+    from app.db.database import async_session_maker
+    import uuid
+    
+    # Get auth token from header
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    token = auth_header.split(" ")[1]
+    
+    async with async_session_maker() as db:
+        # Verify user by decoding token
+        from app.services.auth import AuthService
+        payload = AuthService.decode_token(token)
+        if not payload or "sub" not in payload:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        
+        user_id = payload["sub"]
+        user = await AuthService.get_user_by_id(db, user_id)
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        # Find the shared chat
+        result = await db.execute(
+            select(Chat)
+            .options(selectinload(Chat.messages))
+            .where(Chat.share_id == share_id)
+        )
+        original_chat = result.scalar_one_or_none()
+        
+        if not original_chat:
+            raise HTTPException(status_code=404, detail="Shared chat not found")
+        
+        # Create new chat for the user
+        new_chat_id = str(uuid.uuid4())
+        new_chat = Chat(
+            id=new_chat_id,
+            owner_id=user.id,
+            title=f"{original_chat.title} (continued)",
+            model=original_chat.model,
+            system_prompt=original_chat.system_prompt,
+            assistant_id=original_chat.assistant_id,
+            assistant_name=original_chat.assistant_name,
+        )
+        db.add(new_chat)
+        await db.flush()
+        
+        # Get messages in order (following the selected branch path)
+        sorted_messages = sorted(original_chat.messages, key=lambda m: m.created_at)
+        
+        # Build the message path following selected_versions
+        children_by_parent = {}
+        for msg in sorted_messages:
+            parent_key = msg.parent_id or 'root'
+            if parent_key not in children_by_parent:
+                children_by_parent[parent_key] = []
+            children_by_parent[parent_key].append(msg)
+        
+        selected_versions = original_chat.selected_versions or {}
+        
+        # Walk the tree to get the selected path
+        path_messages = []
+        current_parent = 'root'
+        while current_parent in children_by_parent:
+            children = children_by_parent[current_parent]
+            if not children:
+                break
+            
+            # Select the right child based on selected_versions
+            if current_parent in selected_versions:
+                selected_id = selected_versions[current_parent]
+                selected = next((c for c in children if c.id == selected_id), children[-1])
+            else:
+                selected = children[-1]  # Default to newest
+            
+            path_messages.append(selected)
+            current_parent = selected.id
+        
+        # Clone messages with new IDs, maintaining parent relationships
+        old_to_new_id = {}
+        for old_msg in path_messages:
+            new_msg_id = str(uuid.uuid4())
+            old_to_new_id[old_msg.id] = new_msg_id
+            
+            # Determine new parent_id
+            new_parent_id = None
+            if old_msg.parent_id and old_msg.parent_id in old_to_new_id:
+                new_parent_id = old_to_new_id[old_msg.parent_id]
+            
+            new_message = Message(
+                id=new_msg_id,
+                chat_id=new_chat_id,
+                sender_id=user.id if old_msg.role.value == 'user' else None,
+                role=old_msg.role,
+                content=old_msg.content,
+                content_type=old_msg.content_type,
+                parent_id=new_parent_id,
+                input_tokens=old_msg.input_tokens,
+                output_tokens=old_msg.output_tokens,
+            )
+            db.add(new_message)
+        
+        await db.commit()
+        
+        logger.info(f"[CLONE_CHAT] User {user.id} cloned shared chat {share_id} -> {new_chat_id} ({len(path_messages)} messages)")
+        
+        return {"chat_id": new_chat_id, "message_count": len(path_messages)}
+
+
 # ============ Static File Serving ============
 # Serve frontend if static directory exists
 
