@@ -3,7 +3,7 @@ Chat API routes
 """
 import logging
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
 from typing import Optional, List, Dict
@@ -292,9 +292,15 @@ async def update_selected_version(
     return {"status": "ok", "parent_id": parent_id, "child_id": child_id}
 
 
+class ShareChatRequest(BaseModel):
+    """Request body for sharing a chat"""
+    anonymous: bool = False  # If True, hide owner name in shared view
+
+
 @router.post("/{chat_id}/share")
 async def share_chat(
     chat_id: str,
+    request: ShareChatRequest = ShareChatRequest(),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -306,9 +312,12 @@ async def share_chat(
     if not chat.share_id:
         import uuid
         chat.share_id = str(uuid.uuid4())[:8]  # Short ID for URLs
-        await db.commit()
     
-    return {"share_id": chat.share_id}
+    # Update anonymous setting
+    chat.share_anonymous = request.anonymous
+    await db.commit()
+    
+    return {"share_id": chat.share_id, "anonymous": chat.share_anonymous}
 
 
 @router.delete("/{chat_id}")
@@ -374,6 +383,14 @@ async def list_messages(
     result = await db.execute(query)
     messages = result.scalars().all()
     
+    # Debug logging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[LIST_MESSAGES] chat_id={chat_id}, count={len(messages)}")
+    for msg in messages:
+        content_preview = (msg.content[:50] + '...') if msg.content and len(msg.content) > 50 else msg.content
+        logger.info(f"[LIST_MESSAGES]   msg_id={msg.id[:8]}..., role={msg.role}, parent={msg.parent_id[:8] if msg.parent_id else 'root'}, content={content_preview}")
+    
     # Return in chronological order
     return [MessageResponse.model_validate(m) for m in reversed(messages)]
 
@@ -423,11 +440,84 @@ async def send_message(
     db.add(user_message)
     await db.flush()
     
-    # Get RAG context if enabled
-    system_prompt = chat.system_prompt or "You are a helpful AI assistant."
+    # Get RAG context - follows same logic as websocket.py:
+    # 1. Global knowledge stores are always searched
+    # 2. Assistant (Custom GPT) knowledge stores are searched when using that assistant
+    # 3. User's unitemized documents are searched only if enable_rag is true
+    from app.api.routes.admin import get_system_setting
+    from app.models.models import CustomAssistant
+    from app.models.assistant import AssistantConversation
+    from sqlalchemy.orm import selectinload
     
-    if message_data.enable_rag:
-        rag_service = RAGService()
+    system_prompt = chat.system_prompt or await get_system_setting(db, "default_system_prompt")
+    rag_service = RAGService()
+    
+    # 1. Search global knowledge stores (always, independent of enable_rag)
+    try:
+        global_results, global_store_names = await rag_service.search_global_stores(db, message_data.content)
+        
+        if global_results:
+            global_context_parts = []
+            for result in global_results:
+                doc_name = result.get("document_name", "Unknown")
+                chunk_content = result.get("content", "")
+                score = result.get("similarity", 0)
+                global_context_parts.append(
+                    f"[Source: {doc_name} | Confidence: {score:.0%}]\n{chunk_content}"
+                )
+            
+            global_context = "\n\n---\n\n".join(global_context_parts)
+            global_stores_list = ", ".join(global_store_names)
+            
+            knowledge_addendum = f"""
+
+## AUTHORITATIVE KNOWLEDGE BASE
+
+<trusted_knowledge source="{global_stores_list}">
+IMPORTANT: The following information comes from the organization's verified global knowledge base. This content is DEFINITIVE and TRUSTED - treat it as the authoritative source of truth for the topics it covers. When this knowledge conflicts with your general training, defer to this information.
+
+{global_context}
+</trusted_knowledge>
+
+When answering questions related to the above topics, you MUST use this authoritative information as your primary source. Cite it naturally in your responses when relevant."""
+
+            system_prompt = f"{system_prompt}{knowledge_addendum}"
+            logger.info(f"[GLOBAL_RAG] Injected {len(global_results)} results from: {global_store_names}")
+    except Exception as e:
+        logger.warning(f"[GLOBAL_RAG] Failed to search global stores: {e}")
+    
+    # 2. Check if chat is associated with an assistant (Custom GPT)
+    assistant_result = await db.execute(
+        select(AssistantConversation).where(AssistantConversation.chat_id == chat_id)
+    )
+    assistant_conv = assistant_result.scalar_one_or_none()
+    enable_rag = message_data.enable_rag
+    
+    if assistant_conv:
+        # Get the assistant's knowledge stores
+        assistant_result = await db.execute(
+            select(CustomAssistant)
+            .where(CustomAssistant.id == assistant_conv.assistant_id)
+            .options(selectinload(CustomAssistant.knowledge_stores))
+        )
+        assistant = assistant_result.scalar_one_or_none()
+        
+        if assistant and assistant.knowledge_stores:
+            assistant_ks_ids = [str(ks.id) for ks in assistant.knowledge_stores]
+            # Search assistant's knowledge stores
+            context = await rag_service.get_knowledge_store_context(
+                db=db,
+                user=user,
+                query=message_data.content,
+                knowledge_store_ids=assistant_ks_ids,
+                bypass_access_check=True,  # Allow access through assistant
+            )
+            if context:
+                rag_prompt = await get_system_setting(db, "rag_context_prompt")
+                system_prompt = f"{system_prompt}\n\n{rag_prompt}\n{context}"
+            logger.debug(f"[ASSISTANT_RAG] Searched assistant KBs: {assistant_ks_ids}")
+    elif enable_rag:
+        # 3. Search user's unitemized documents (only if no assistant and RAG enabled)
         context = await rag_service.get_context_for_query(
             db=db,
             user=user,
@@ -467,9 +557,10 @@ async def send_message(
     # Restore original prompt
     chat.system_prompt = original_prompt
     
-    # Auto-generate title for new chats
-    if chat.title == "New Chat":
-        chat.title = message_data.content[:50] + ("..." if len(message_data.content) > 50 else "")
+    # Note: Title generation is handled by WebSocket route (websocket.py)
+    # The WebSocket path uses LLM-based title generation which produces better results
+    # than simple truncation. REST API created chats will get titles when first
+    # message is sent via WebSocket.
     
     await db.commit()
     
@@ -892,6 +983,67 @@ async def get_chat_uploaded_files(
         "artifacts": artifacts,
         "archive": archive_info,
     }
+
+
+@router.post("/{chat_id}/uploaded-files")
+async def save_uploaded_file(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    filename: str = Body(...),
+    content: str = Body(...),
+    language: str = Body(None),
+    signatures: list = Body(default=[]),
+):
+    """
+    Save an individual uploaded file (not from zip) to the database.
+    Used to persist file uploads across page refreshes.
+    """
+    import os
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[SAVE_UPLOAD] Saving file {filename} for chat {chat_id}, content_len={len(content)}")
+    
+    await _get_user_chat(db, user, chat_id)
+    
+    ext = os.path.splitext(filename)[1].lower() if '.' in filename else ''
+    
+    # Check if file already exists for this chat
+    result = await db.execute(
+        select(UploadedFile)
+        .where(UploadedFile.chat_id == chat_id)
+        .where(UploadedFile.filepath == filename)
+    )
+    existing = result.scalar_one_or_none()
+    
+    if existing:
+        # Update existing file
+        existing.content = content
+        existing.language = language
+        existing.size = len(content)
+        existing.signatures = json.dumps(signatures) if signatures else None
+        logger.info(f"[SAVE_UPLOAD] Updated existing file {filename}")
+    else:
+        # Create new file
+        uploaded_file = UploadedFile(
+            chat_id=chat_id,
+            archive_name=None,  # Not from archive
+            filepath=filename,
+            filename=os.path.basename(filename),
+            extension=ext,
+            language=language,
+            size=len(content),
+            is_binary=False,
+            content=content,
+            signatures=json.dumps(signatures) if signatures else None,
+        )
+        db.add(uploaded_file)
+        logger.info(f"[SAVE_UPLOAD] Created new file {filename}")
+    
+    await db.commit()
+    
+    return {"success": True, "filename": filename}
 
 
 @router.post("/{chat_id}/upload-zip")

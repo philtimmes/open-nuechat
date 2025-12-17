@@ -425,11 +425,13 @@ class ChainExecutor:
         tool_func: Optional[ToolFunc] = None,
         chain_loader: Optional[Callable[[str], Optional[dict]]] = None,
         global_max_iterations: int = 100,
+        global_debug: bool = False,  # Global debug flag from admin settings
     ):
         self._llm_func = llm_func
         self._tool_func = tool_func
         self._chain_loader = chain_loader  # Function to load chain by name (for call_chain)
         self._global_max_iterations = global_max_iterations
+        self._global_debug = global_debug
     
     def set_llm_func(self, func: LLMFunc):
         self._llm_func = func
@@ -440,6 +442,17 @@ class ChainExecutor:
     def set_chain_loader(self, loader: Callable[[str], Optional[dict]]):
         self._chain_loader = loader
     
+    def _global_debug_log(self, chain_name: str, message: str, data: Any = None):
+        """Log debug message when global debug is enabled (full output, no truncation)."""
+        if self._global_debug:
+            prefix = f"[FILTER_DEBUG:{chain_name}]"
+            if data is not None:
+                # Full data output - no truncation for global debug
+                data_str = str(data)
+                logger.info(f"{prefix} {message}: {data_str}")
+            else:
+                logger.info(f"{prefix} {message}")
+    
     async def execute(
         self,
         chain_def: dict,
@@ -448,9 +461,18 @@ class ChainExecutor:
         chat_id: str,
     ) -> ExecutionResult:
         """Execute a complete chain definition."""
+        import time
+        chain_start_time = time.time()
         
         chain_name = chain_def.get("name", "unnamed")
         debug = chain_def.get("debug", False)
+        
+        # Global debug logging
+        if self._global_debug:
+            logger.info(f"[FILTER_DEBUG:{chain_name}] ════════════════════════════════════════════════════════")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] CHAIN EXECUTION START")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] ════════════════════════════════════════════════════════")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] Input Query: {query}")
         
         ctx = ExecutionContext(
             user_id=user_id,
@@ -485,11 +507,43 @@ class ChainExecutor:
         if not steps:
             # No steps, pass through
             ctx.debug_log("No steps defined, passing through")
+            if self._global_debug:
+                logger.info(f"[FILTER_DEBUG:{chain_name}] No steps defined, passing through")
             return ExecutionResult(
                 content=query,
                 context=ctx,
                 proceed_to_llm=True,
             )
+        
+        # Execute steps
+        ctx = await self._execute_steps(steps, ctx, max_iter, chain_name)
+        
+        # Determine final content
+        if ctx.final_message:
+            final_content = ctx.final_message
+        elif ctx.context_items:
+            # Inject context into query
+            context_str = ctx.get_context_string()
+            final_content = f"Context:\n{context_str}\n\nQuery: {ctx.original_query}"
+        else:
+            final_content = ctx.current_value or ctx.original_query
+        
+        ctx.debug_log("Chain execution complete")
+        ctx.debug_log("Final signal", ctx.signal.name)
+        ctx.debug_log("Proceed to LLM", ctx.proceed_to_llm)
+        ctx.debug_log("Final content", final_content)
+        
+        # Global debug logging
+        if self._global_debug:
+            chain_elapsed = time.time() - chain_start_time
+            logger.info(f"[FILTER_DEBUG:{chain_name}] ════════════════════════════════════════════════════════")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] CHAIN EXECUTION COMPLETE")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] Total Time: {chain_elapsed:.3f}s")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] Final Signal: {ctx.signal.name}")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] Proceed to LLM: {ctx.proceed_to_llm}")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] Output Content: {final_content}")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] Variables: {dict(ctx.variables)}")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] ════════════════════════════════════════════════════════")
         
         # Execute steps
         ctx = await self._execute_steps(steps, ctx, max_iter)
@@ -522,6 +576,7 @@ class ChainExecutor:
         steps: List[dict],
         ctx: ExecutionContext,
         max_iterations: int,
+        chain_name: str = "",
     ) -> ExecutionContext:
         """Execute a list of steps."""
         
@@ -552,7 +607,7 @@ class ChainExecutor:
                 continue
             
             # Execute step
-            ctx = await self._execute_step(step, ctx, max_iterations)
+            ctx = await self._execute_step(step, ctx, max_iterations, chain_name)
             
             step_index += 1
         
@@ -563,12 +618,28 @@ class ChainExecutor:
         step: dict,
         ctx: ExecutionContext,
         max_iterations: int,
+        chain_name: str = "",
     ) -> ExecutionContext:
         """Execute a single step with optional conditional and loop."""
+        import time
+        step_start_time = time.time()
         
         step_id = step.get("id", "unknown")
         step_type = step.get("type", "unknown")
-        step_name = step.get("name", step_type)
+        step_name = step.get("name") or step_type
+        
+        # Capture input for global debug
+        input_value = ctx.current_value
+        input_vars = dict(ctx.variables)
+        
+        # Global debug: step start
+        if self._global_debug:
+            logger.info(f"[FILTER_DEBUG:{chain_name}] ────────────────────────────────────────")
+            logger.info(f"[FILTER_DEBUG:{chain_name}] STEP: {step_name} (type={step_type})")
+            logger.info(f"[FILTER_DEBUG:{chain_name}]   Input $Current: {input_value}")
+            logger.info(f"[FILTER_DEBUG:{chain_name}]   Input $Query: {ctx.original_query}")
+            logger.info(f"[FILTER_DEBUG:{chain_name}]   Input $PreviousResult: {ctx.previous_result}")
+            logger.info(f"[FILTER_DEBUG:{chain_name}]   Variables: {input_vars}")
         
         ctx.debug_log(f"─── Step: {step_name} (type={step_type}, id={step_id[:8]}...)")
         ctx.debug_log("  Input value", ctx.current_value)
@@ -590,12 +661,52 @@ class ChainExecutor:
             ctx = await self._execute_primitive(step, ctx)
             ctx.debug_log("  Output value", ctx.current_value)
             ctx.debug_log("  Variables", dict(ctx.variables))
+            
+            # Step-level add_to_context: add the step's output to context
+            # This is separate from the primitive's own add_to_context (which is for tool results)
+            step_add_to_context = step.get("add_to_context", False)
+            if step_add_to_context and ctx.previous_result:
+                context_label = step.get("context_label") or step_name
+                ctx.debug_log(f"  Adding to context: {context_label}")
+                ctx.add_context(str(ctx.previous_result), context_label)
+            
+            # Global debug: step complete
+            if self._global_debug:
+                step_elapsed = time.time() - step_start_time
+                logger.info(f"[FILTER_DEBUG:{chain_name}]   Output $Current: {ctx.current_value}")
+                logger.info(f"[FILTER_DEBUG:{chain_name}]   Output $PreviousResult: {ctx.previous_result}")
+                # Show new/changed variables
+                new_vars = {k: v for k, v in ctx.variables.items() if k not in input_vars or input_vars[k] != v}
+                if new_vars:
+                    logger.info(f"[FILTER_DEBUG:{chain_name}]   New/Changed Variables: {new_vars}")
+                if step_add_to_context:
+                    logger.info(f"[FILTER_DEBUG:{chain_name}]   Added to context: {step.get('context_label') or step_name}")
+                logger.info(f"[FILTER_DEBUG:{chain_name}]   Time: {step_elapsed:.3f}s")
+                logger.info(f"[FILTER_DEBUG:{chain_name}]   Signal: {ctx.signal.name}")
+            
+            # Handle jump_to_step for successful completion (if not already jumping)
+            # Branch nodes handle their own jumps, so skip for them
+            if step_type != "branch" and ctx.signal == FlowSignal.CONTINUE:
+                jump_target = step.get("jump_to_step")
+                if jump_target:
+                    ctx.debug_log(f"  Jump to step: {jump_target}")
+                    ctx.signal = FlowSignal.JUMP
+                    ctx.jump_target = jump_target
+                    if self._global_debug:
+                        logger.info(f"[FILTER_DEBUG:{chain_name}]   Jump Target: {jump_target}")
+            
             return ctx
             
         except Exception as e:
             logger.error(f"Error in step {step_id} ({step_type}): {e}")
             ctx.debug_log(f"  ERROR: {e}")
             ctx.log_step(step_id, step_type, None, str(e))
+            
+            # Global debug: error
+            if self._global_debug:
+                step_elapsed = time.time() - step_start_time
+                logger.info(f"[FILTER_DEBUG:{chain_name}]   ERROR: {e}")
+                logger.info(f"[FILTER_DEBUG:{chain_name}]   Time: {step_elapsed:.3f}s")
             
             # Handle error based on config
             on_error = step.get("on_error", "skip")
@@ -735,8 +846,12 @@ class ChainExecutor:
                 return left_str.startswith(right_str)
             elif op == "ends_with":
                 return left_str.endswith(right_str)
-            elif op == "regex":
+            elif op == "regex" or op == "matches":
                 return bool(re.search(right_str, left_str, re.IGNORECASE))
+            elif op == "is_empty":
+                return left is None or left_str == "" or left_str == "none"
+            elif op == "is_not_empty":
+                return left is not None and left_str != "" and left_str != "none"
             elif op in (">", "gt"):
                 return float(left) > float(right)
             elif op in ("<", "lt"):
@@ -825,10 +940,14 @@ class ChainExecutor:
         
         # Store result
         ctx.previous_result = response
-        ctx.current_value = response
         
+        # Only update current_value if NOT storing to a named variable
+        # This preserves the main flow (original query) when steps are just 
+        # computing intermediate values
         if output_var:
             ctx.set_variable(output_var, response)
+        else:
+            ctx.current_value = response
         
         return ctx
     
@@ -869,7 +988,7 @@ class ChainExecutor:
         ctx.debug_log("  Query step - LLM response", query)
         
         ctx.previous_result = query
-        ctx.current_value = query
+        # Query step always stores to a variable, so don't overwrite current_value
         ctx.set_variable(output_var, query)
         
         return ctx
@@ -910,10 +1029,12 @@ class ChainExecutor:
         result = await self._tool_func(tool_name, params)
         
         ctx.previous_result = result
-        ctx.current_value = result
         
+        # Only update current_value if NOT storing to a named variable
         if output_var:
             ctx.set_variable(output_var, result)
+        else:
+            ctx.current_value = result
         
         if add_to_context and result:
             ctx.add_context(str(result), context_label, tool_name)
@@ -953,9 +1074,12 @@ class ChainExecutor:
         """Set up final message for main LLM call."""
         input_var = config.get("input_var", "$Query")  # Default to original query
         include_context = config.get("include_context", True)
+        include_vars = config.get("include_vars", [])  # List of variable names to include
+        custom_template = config.get("template")  # Optional custom template
         
         ctx.debug_log("  go_to_llm - input_var", input_var)
         ctx.debug_log("  go_to_llm - include_context", include_context)
+        ctx.debug_log("  go_to_llm - include_vars", include_vars)
         ctx.debug_log("  go_to_llm - context_items count", len(ctx.context_items))
         
         # Get the content to send to LLM (usually original query)
@@ -967,17 +1091,38 @@ class ChainExecutor:
         
         ctx.debug_log("  go_to_llm - resolved content", content)
         
-        # Build final message with context if available
-        if include_context and ctx.context_items:
+        # Build variable section if include_vars specified
+        vars_section = ""
+        if include_vars:
+            var_lines = []
+            for var_name in include_vars:
+                # Handle both "$Var[name]" format and plain "name"
+                if var_name.startswith("$Var[") and var_name.endswith("]"):
+                    actual_name = var_name[5:-1]
+                else:
+                    actual_name = var_name
+                value = ctx.variables.get(actual_name, "")
+                if value:
+                    var_lines.append(f"{actual_name}: {value}")
+            if var_lines:
+                vars_section = "Additional Information:\n" + "\n".join(var_lines) + "\n\n"
+        
+        # Build final message
+        if custom_template:
+            # Use custom template with interpolation
+            ctx.final_message = ctx.interpolate(custom_template)
+        elif include_context and ctx.context_items:
             context_str = ctx.get_context_string()
             ctx.debug_log("  go_to_llm - context_str length", len(context_str))
-            ctx.final_message = f"Context:\n{context_str}\n\nUser Question: {content}"
+            ctx.final_message = f"Context:\n{context_str}\n\n{vars_section}User Question: {content}"
         else:
-            # No context items - just use the original query
-            ctx.final_message = str(content)
+            # No context items - just use vars and query
+            ctx.final_message = f"{vars_section}{content}" if vars_section else str(content)
         
         ctx.debug_log("  go_to_llm - final_message length", len(ctx.final_message))
         ctx.proceed_to_llm = True
+        # Stop chain execution - we're done, proceed to main LLM
+        ctx.signal = FlowSignal.FILTER_COMPLETE
         return ctx
     
     async def _prim_filter_complete(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
@@ -1038,7 +1183,7 @@ class ChainExecutor:
         ctx.debug_log("  set_array - final array", resolved_array)
         ctx.set_variable(var_name, resolved_array)
         ctx.previous_result = resolved_array
-        ctx.current_value = resolved_array
+        # Don't overwrite current_value - set_array stores to a named variable
         
         return ctx
     
@@ -1049,6 +1194,92 @@ class ChainExecutor:
         result = self._evaluate_comparison(config, ctx)
         ctx.set_variable(output_var, result)
         ctx.previous_result = result
+        
+        return ctx
+    
+    async def _prim_branch(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Branch to different outputs based on conditions.
+        
+        Config format:
+        {
+            "outputs": [
+                {
+                    "id": "output_1",
+                    "label": "Contains keyword",
+                    "condition": {"var": "$Query", "operator": "contains", "value": "help"},
+                    "jump_to": "step_id_1"
+                },
+                {
+                    "id": "output_2", 
+                    "label": "Is empty",
+                    "condition": {"var": "$Var[result]", "operator": "is_empty", "value": ""},
+                    "jump_to": "step_id_2"
+                },
+                {
+                    "id": "output_else",
+                    "label": "Else",
+                    "jump_to": "step_id_3"  # No condition = else/default
+                }
+            ]
+        }
+        
+        First matching condition wins. Last output without condition is the "else" case.
+        """
+        outputs = config.get("outputs", [])
+        
+        if not outputs:
+            ctx.debug_log("  Branch: No outputs configured, continuing")
+            return ctx
+        
+        ctx.debug_log(f"  Branch: Evaluating {len(outputs)} outputs")
+        
+        matched_output = None
+        
+        for i, output in enumerate(outputs):
+            output_id = output.get("id", f"output_{i}")
+            output_label = output.get("label", f"Output {i + 1}")
+            condition = output.get("condition")
+            
+            # If no condition, this is the "else" case - only use if it's the last output
+            if not condition or not condition.get("var"):
+                if i == len(outputs) - 1:
+                    ctx.debug_log(f"    Output '{output_label}': No condition (else case) - MATCHED")
+                    matched_output = output
+                    break
+                else:
+                    ctx.debug_log(f"    Output '{output_label}': No condition, skipping (not last)")
+                    continue
+            
+            # Evaluate the condition
+            # Convert condition format to what _evaluate_comparison expects
+            comp = {
+                "left": condition.get("var", ""),
+                "operator": condition.get("operator", "contains"),
+                "right": condition.get("value", ""),
+            }
+            
+            result = self._evaluate_comparison(comp, ctx)
+            left_val = ctx.resolve_variable(comp["left"])
+            
+            ctx.debug_log(f"    Output '{output_label}': {comp['left']} ({left_val}) {comp['operator']} '{comp['right']}' = {result}")
+            
+            if result:
+                ctx.debug_log(f"    Output '{output_label}': MATCHED")
+                matched_output = output
+                break
+        
+        # Handle the matched output
+        if matched_output:
+            jump_to = matched_output.get("jump_to")
+            if jump_to:
+                ctx.debug_log(f"  Branch: Jumping to {jump_to}")
+                ctx.signal = FlowSignal.JUMP
+                ctx.jump_target = jump_to
+            else:
+                ctx.debug_log(f"  Branch: No jump target, continuing to next step")
+        else:
+            ctx.debug_log(f"  Branch: No output matched, continuing to next step")
         
         return ctx
     

@@ -380,26 +380,71 @@ class RAGService:
         if not cls._model_loaded:
             try:
                 import torch
+                import os
+                
+                # CRITICAL: Disable accelerate's device_map which causes meta tensor issues
+                # Must be set BEFORE importing sentence_transformers
+                os.environ["ACCELERATE_DISABLE_RICH"] = "1"
+                os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+                # Prevent accelerate from using device_map="auto" 
+                os.environ["ACCELERATE_USE_CPU"] = "1"
+                
                 from sentence_transformers import SentenceTransformer
                 
                 # ROCm/HIP uses torch.cuda API - same interface, different backend
-                # torch.cuda.is_available() returns True for ROCm GPUs
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                logger.info(f"Loading embedding model on device: {device} (ROCm/HIP)")
+                target_device = "cuda" if torch.cuda.is_available() else "cpu"
+                logger.info(f"Loading embedding model '{settings.EMBEDDING_MODEL}', target device: {target_device}")
                 
-                cls._model = SentenceTransformer(
-                    settings.EMBEDDING_MODEL,
-                    device=device
-                )
+                model = None
+                
+                # Load with device="cpu" to avoid meta tensor issues
+                # The model weights are loaded into real memory on CPU first,
+                # then we can move to GPU after
+                try:
+                    logger.info("Loading embedding model with device=cpu...")
+                    model = SentenceTransformer(
+                        settings.EMBEDDING_MODEL, 
+                        device="cpu",
+                        trust_remote_code=True,  # Some models need this
+                    )
+                    logger.info("Model loaded on CPU successfully")
+                except Exception as e:
+                    logger.error(f"Failed to load with device=cpu: {e}")
+                    # Try without trust_remote_code
+                    try:
+                        logger.info("Retrying without trust_remote_code...")
+                        model = SentenceTransformer(settings.EMBEDDING_MODEL, device="cpu")
+                        logger.info("Model loaded on CPU (retry) successfully")
+                    except Exception as e2:
+                        logger.error(f"Retry also failed: {e2}")
+                        raise
+                
+                if model is None:
+                    raise RuntimeError("Failed to load embedding model")
+                
+                logger.info(f"Model loaded, current device: {model.device}")
+                
+                # Move to GPU if available and model is on CPU
+                if target_device == "cuda" and str(model.device) == "cpu":
+                    logger.info("Moving embedding model to GPU...")
+                    try:
+                        model = model.to(target_device)
+                        logger.info(f"Model moved to GPU successfully")
+                    except Exception as e:
+                        logger.warning(f"Failed to move to GPU ({e}), keeping on CPU")
+                
+                cls._model = model
                 cls._model_loaded = True
                 
                 # Update embedding dimension in index manager
                 dim = cls._model.get_sentence_embedding_dimension()
                 FAISSIndexManager.EMBEDDING_DIM = dim
-                logger.info(f"Embedding model loaded: dim={dim}")
+                logger.info(f"Embedding model ready: dim={dim}, device={cls._model.device}")
                 
             except Exception as e:
                 logger.error(f"Failed to load embedding model: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 cls._model = None
         return cls._model
     
@@ -932,6 +977,123 @@ class RAGService:
             )
         
         return final_results
+    
+    async def search_global_stores(
+        self,
+        db: AsyncSession,
+        query: str,
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """
+        Search all global knowledge stores for relevant context.
+        
+        Returns:
+            Tuple of (results, store_names) where results are filtered by 
+            each store's global_min_score threshold.
+            
+        This function is called automatically on every chat message when
+        the global_knowledge_store_enabled setting is true.
+        """
+        import time
+        from app.models.models import SystemSetting
+        
+        total_start = time.time()
+        
+        # Check if global knowledge stores are enabled
+        setting_start = time.time()
+        result = await db.execute(
+            select(SystemSetting).where(SystemSetting.key == "global_knowledge_store_enabled")
+        )
+        setting = result.scalar_one_or_none()
+        setting_time = time.time() - setting_start
+        logger.debug(f"[GLOBAL_RAG_TIMING] Setting check took {setting_time:.3f}s")
+        
+        if setting and setting.value.lower() != "true":
+            logger.debug("[GLOBAL_RAG] Global knowledge stores disabled")
+            return [], []
+        
+        # Find all global knowledge stores
+        stores_start = time.time()
+        result = await db.execute(
+            select(KnowledgeStore).where(KnowledgeStore.is_global == True)
+        )
+        global_stores = result.scalars().all()
+        stores_time = time.time() - stores_start
+        logger.debug(f"[GLOBAL_RAG_TIMING] Store query took {stores_time:.3f}s, found {len(global_stores)} stores")
+        
+        if not global_stores:
+            logger.debug("[GLOBAL_RAG] No global knowledge stores configured")
+            return [], []
+        
+        logger.info(f"[GLOBAL_RAG] Searching {len(global_stores)} global stores for query: {query[:50]}...")
+        
+        # Generate query embedding once
+        embed_start = time.time()
+        query_embedding = await asyncio.get_event_loop().run_in_executor(
+            _executor, self.embed_text, query
+        )
+        embed_time = time.time() - embed_start
+        logger.debug(f"[GLOBAL_RAG_TIMING] Embedding generation took {embed_time:.3f}s")
+        
+        if query_embedding is None:
+            logger.warning("[GLOBAL_RAG] Failed to generate embedding for query")
+            return [], []
+        
+        all_results = []
+        matched_store_names = []
+        index_manager = self.get_index_manager()
+        
+        for store in global_stores:
+            store_start = time.time()
+            store_id = str(store.id)
+            min_score = store.global_min_score or 0.7
+            max_results = store.global_max_results or 3
+            
+            # Search this store's FAISS index
+            results = await asyncio.get_event_loop().run_in_executor(
+                _executor,
+                index_manager.search,
+                store_id,
+                query_embedding,
+                max_results * 2  # Get extra to filter by score
+            )
+            store_search_time = time.time() - store_start
+            
+            # Filter by minimum score threshold
+            filtered_results = [(chunk_id, score) for chunk_id, score in results if score >= min_score]
+            
+            logger.debug(f"[GLOBAL_RAG_TIMING] Store '{store.name}' search took {store_search_time:.3f}s - raw={len(results)}, filtered={len(filtered_results)}")
+            
+            if filtered_results:
+                logger.info(f"[GLOBAL_RAG] Store '{store.name}' matched with {len(filtered_results)} results (min_score={min_score})")
+                for chunk_id, score in filtered_results[:max_results]:
+                    logger.debug(f"[GLOBAL_RAG_DETAIL] Store '{store.name}' - chunk_id={chunk_id}, score={score:.4f}")
+                matched_store_names.append(store.name)
+                
+                # Limit to max_results
+                for chunk_id, score in filtered_results[:max_results]:
+                    all_results.append((chunk_id, score, store_id))
+            else:
+                logger.debug(f"[GLOBAL_RAG] Store '{store.name}' had no matches above threshold {min_score}")
+        
+        if not all_results:
+            total_time = time.time() - total_start
+            logger.debug(f"[GLOBAL_RAG_TIMING] No relevant results found in any global store (total time: {total_time:.3f}s)")
+            return [], []
+        
+        # Sort by score and fetch details
+        all_results.sort(key=lambda x: x[1], reverse=True)
+        chunk_ids = [r[0] for r in all_results]
+        scores_map = {r[0]: r[1] for r in all_results}
+        
+        fetch_start = time.time()
+        final_results = await self._get_chunks_by_ids(db, chunk_ids, scores_map)
+        fetch_time = time.time() - fetch_start
+        
+        total_time = time.time() - total_start
+        logger.info(f"[GLOBAL_RAG_TIMING] Total search time: {total_time:.3f}s (embed={embed_time:.3f}s, search={total_time - embed_time - fetch_time:.3f}s, fetch={fetch_time:.3f}s)")
+        logger.info(f"[GLOBAL_RAG] Returning {len(final_results)} results from stores: {matched_store_names}")
+        
+        return final_results, matched_store_names
     
     async def _get_chunks_by_ids(
         self,

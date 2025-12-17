@@ -15,7 +15,7 @@ import SummaryPanel from '../components/SummaryPanel';
 import VoiceModeOverlay from '../components/VoiceModeOverlay';
 import type { Artifact, Message, GeneratedImage } from '../types';
 import { groupArtifactsByFilename, getLatestArtifacts } from '../lib/artifacts';
-import { chatApi } from '../lib/api';
+import api, { chatApi } from '../lib/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -1010,6 +1010,43 @@ export default function ChatPage() {
     addUploadedArtifacts(artifacts);
   }, [addUploadedArtifacts]);
   
+  // Persist uploaded files to backend when we have a chat
+  // This ensures files survive page refresh
+  const persistedFilesRef = useRef<Set<string>>(new Set());
+  
+  useEffect(() => {
+    if (!currentChat?.id || uploadedArtifacts.length === 0) return;
+    
+    const persistFiles = async () => {
+      for (const artifact of uploadedArtifacts) {
+        // Skip if already persisted
+        const key = `${currentChat.id}:${artifact.filename}`;
+        if (persistedFilesRef.current.has(key)) continue;
+        
+        try {
+          console.log('[persistFiles] Saving to backend:', artifact.filename);
+          await api.post(`/chats/${currentChat.id}/uploaded-files`, {
+            filename: artifact.filename,
+            content: artifact.content,
+            language: artifact.language,
+            signatures: artifact.signatures || [],
+          });
+          persistedFilesRef.current.add(key);
+          console.log('[persistFiles] Saved:', artifact.filename);
+        } catch (err) {
+          console.error('[persistFiles] Failed to save:', artifact.filename, err);
+        }
+      }
+    };
+    
+    persistFiles();
+  }, [currentChat?.id, uploadedArtifacts]);
+  
+  // Clear persisted files tracking when chat changes
+  useEffect(() => {
+    persistedFilesRef.current.clear();
+  }, [currentChat?.id]);
+  
   // Update voice ref with send function
   // Note: handleSendMessage calculates parentId from store directly, so no stale closure issues
   useEffect(() => {
@@ -1799,13 +1836,6 @@ export default function ChatPage() {
           onSelect={setSelectedArtifact}
           onClose={() => setShowArtifacts(false)}
         />
-      )}
-      
-      {/* DEBUG: Visible indicator when showArtifacts is true */}
-      {showArtifacts && (
-        <div style={{position: 'fixed', top: 10, right: 10, background: 'red', color: 'white', padding: '10px', zIndex: 9999}}>
-          ARTIFACTS PANEL SHOULD BE VISIBLE ({artifacts.length} artifacts)
-        </div>
       )}
       
       {/* Summary panel */}

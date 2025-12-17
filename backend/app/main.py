@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.38"
+SCHEMA_VERSION = "NC-0.6.42"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -245,6 +245,19 @@ async def run_migrations(conn):
             ("CREATE INDEX IF NOT EXISTS idx_api_key_prefix ON api_keys(key_prefix)", "api_keys.idx_prefix"),
             ("CREATE INDEX IF NOT EXISTS idx_api_key_user ON api_keys(user_id)", "api_keys.idx_user"),
             ("CREATE INDEX IF NOT EXISTS idx_api_key_hash ON api_keys(key_hash)", "api_keys.idx_hash"),
+        ],
+        "NC-0.6.39": [
+            # Global knowledge store feature - auto-searched on every query
+            ("ALTER TABLE knowledge_stores ADD COLUMN is_global BOOLEAN DEFAULT 0", "knowledge_stores.is_global"),
+            ("ALTER TABLE knowledge_stores ADD COLUMN global_min_score REAL DEFAULT 0.7", "knowledge_stores.global_min_score"),
+            ("ALTER TABLE knowledge_stores ADD COLUMN global_max_results INTEGER DEFAULT 3", "knowledge_stores.global_max_results"),
+            ("CREATE INDEX IF NOT EXISTS idx_knowledge_store_global ON knowledge_stores(is_global)", "knowledge_stores.idx_global"),
+            # System setting to enable/disable global store feature
+            ("INSERT INTO system_settings (key, value) VALUES ('global_knowledge_store_enabled', 'true')", "global_knowledge_store_enabled"),
+        ],
+        "NC-0.6.42": [
+            # Anonymous sharing option for chats
+            ("ALTER TABLE chats ADD COLUMN share_anonymous BOOLEAN DEFAULT 0", "chats.share_anonymous"),
         ],
     }
     
@@ -775,10 +788,10 @@ async def get_shared_chat(share_id: str):
     from app.models.models import Chat, Message
     
     async with async_session_maker() as db:
-        # Find chat by share_id
+        # Find chat by share_id, include owner for name
         result = await db.execute(
             select(Chat)
-            .options(selectinload(Chat.messages))
+            .options(selectinload(Chat.messages), selectinload(Chat.owner))
             .where(Chat.share_id == share_id)
         )
         chat = result.scalar_one_or_none()
@@ -786,6 +799,18 @@ async def get_shared_chat(share_id: str):
         if not chat:
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Shared chat not found")
+        
+        # Get owner name (unless anonymous)
+        owner_name = None
+        if not chat.share_anonymous and chat.owner:
+            # Use display_name if set, otherwise username
+            owner_name = chat.owner.display_name or chat.owner.username
+        
+        # Debug logging
+        logger.info(f"[SHARED_CHAT] share_id={share_id}, chat_id={chat.id}, message_count={len(chat.messages)}, owner={owner_name}, anonymous={chat.share_anonymous}")
+        for msg in chat.messages:
+            content_preview = (msg.content[:50] + '...') if msg.content and len(msg.content) > 50 else msg.content
+            logger.info(f"[SHARED_CHAT]   msg_id={msg.id[:8]}..., role={msg.role}, parent={msg.parent_id[:8] if msg.parent_id else 'root'}, content={content_preview}")
         
         # Sort messages chronologically
         sorted_messages = sorted(chat.messages, key=lambda m: m.created_at)
@@ -798,11 +823,17 @@ async def get_shared_chat(share_id: str):
                 children_by_parent[parent_key] = []
             children_by_parent[parent_key].append(msg)
         
+        # Debug: log children map
+        logger.info(f"[SHARED_CHAT] Children map keys: {list(children_by_parent.keys())}")
+        for parent_key, children in children_by_parent.items():
+            logger.info(f"[SHARED_CHAT]   {parent_key}: {[c.id[:8] for c in children]}")
+        
         # Check if there are branches (any parent has multiple children)
         has_branches = any(len(children) > 1 for children in children_by_parent.values())
         
         # Use selected_versions to determine which branch to follow
         selected_versions = chat.selected_versions or {}
+        logger.info(f"[SHARED_CHAT] selected_versions: {selected_versions}")
         
         # Walk the tree from root, following selected branches
         path_messages = []
@@ -812,6 +843,7 @@ async def get_shared_chat(share_id: str):
         while current_parent not in visited:
             visited.add(current_parent)
             children = children_by_parent.get(current_parent, [])
+            logger.info(f"[SHARED_CHAT] Walking: parent={current_parent}, children_count={len(children)}")
             if not children:
                 break
             
@@ -850,12 +882,16 @@ async def get_shared_chat(share_id: str):
             "output_tokens": msg.output_tokens,
         } for msg in sorted_messages]
         
+        # Log final result
+        logger.info(f"[SHARED_CHAT] Returning: path_messages={len(path_messages)}, all_messages={len(all_messages)}, has_branches={has_branches}")
+        
         return {
             "id": chat.id,
             "title": chat.title,
             "model": chat.model,
             "assistant_id": chat.assistant_id,
             "assistant_name": chat.assistant_name,
+            "owner_name": owner_name,  # None if anonymous or no owner
             "created_at": chat.created_at.isoformat(),
             "messages": path_messages,
             "all_messages": all_messages,

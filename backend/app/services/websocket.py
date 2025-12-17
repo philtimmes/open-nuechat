@@ -262,26 +262,49 @@ class StreamingHandler:
         # Close the active stream to interrupt network I/O immediately
         if self._active_stream:
             try:
-                # For OpenAI AsyncStream, close the underlying httpx response
-                if hasattr(self._active_stream, 'response') and hasattr(self._active_stream.response, 'aclose'):
-                    logger.info("Closing httpx response...")
-                    await self._active_stream.response.aclose()
-                    logger.info("Closed stream response - LLM connection terminated")
-                elif hasattr(self._active_stream, 'close'):
+                stream = self._active_stream
+                
+                # Method 1: Close the httpx response directly (most effective)
+                if hasattr(stream, 'response'):
+                    response = stream.response
+                    if hasattr(response, 'aclose'):
+                        logger.info("Closing httpx response via aclose()...")
+                        await response.aclose()
+                    if hasattr(response, 'close'):
+                        logger.info("Closing httpx response via close()...")
+                        response.close()
+                
+                # Method 2: Close the stream itself
+                if hasattr(stream, 'close'):
                     logger.info("Closing stream via close()...")
-                    await self._active_stream.close()
-                    logger.info("Closed stream via close() - LLM connection terminated")
-                else:
-                    logger.warning(f"Stream has no close method: {type(self._active_stream)}")
+                    try:
+                        result = stream.close()
+                        if hasattr(result, '__await__'):
+                            await result
+                    except Exception:
+                        pass
+                
+                # Method 3: Close underlying HTTP client if accessible
+                if hasattr(stream, '_client') and hasattr(stream._client, 'close'):
+                    logger.info("Closing underlying HTTP client...")
+                    try:
+                        await stream._client.close()
+                    except Exception:
+                        pass
+                
+                logger.info("Stream close attempted - LLM connection should be terminated")
             except Exception as e:
                 logger.info(f"Stream close completed (may have already closed): {type(e).__name__}: {e}")
         else:
             logger.warning("No active stream to close")
         
-        # Also cancel the streaming task as backup
+        # Cancel the streaming task immediately (most reliable method)
         if self._streaming_task and not self._streaming_task.done():
             self._streaming_task.cancel()
             logger.info("Cancelled streaming task")
+        
+        # Clear the stream reference
+        self._active_stream = None
     
     async def _close_stream(self):
         """Close the active stream"""

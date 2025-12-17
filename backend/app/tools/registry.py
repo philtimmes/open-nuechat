@@ -638,6 +638,63 @@ def get_session_files(chat_id: str) -> Dict[str, str]:
     return _session_files.get(chat_id, {})
 
 
+async def get_session_file_with_db_fallback(chat_id: str, filename: str, db) -> Optional[str]:
+    """Get a file from session, falling back to database if not in memory"""
+    from sqlalchemy import select
+    from app.models.upload import UploadedFile
+    
+    # Try in-memory first
+    content = get_session_file(chat_id, filename)
+    if content:
+        return content
+    
+    # Fallback to database
+    try:
+        result = await db.execute(
+            select(UploadedFile)
+            .where(UploadedFile.chat_id == chat_id)
+            .where(UploadedFile.filepath == filename)
+        )
+        uploaded = result.scalar_one_or_none()
+        if uploaded and uploaded.content:
+            # Cache it for future use
+            store_session_file(chat_id, filename, uploaded.content)
+            return uploaded.content
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to load file from DB: {e}")
+    
+    return None
+
+
+async def get_session_files_with_db_fallback(chat_id: str, db) -> Dict[str, str]:
+    """Get all files for a chat session, including from database"""
+    from sqlalchemy import select
+    from app.models.upload import UploadedFile
+    
+    # Start with in-memory files
+    files = dict(get_session_files(chat_id))
+    
+    # Add any database files not in memory
+    try:
+        result = await db.execute(
+            select(UploadedFile)
+            .where(UploadedFile.chat_id == chat_id)
+            .where(UploadedFile.content.isnot(None))
+        )
+        uploaded_files = result.scalars().all()
+        for uf in uploaded_files:
+            if uf.filepath not in files and uf.content:
+                files[uf.filepath] = uf.content
+                # Cache it
+                store_session_file(chat_id, uf.filepath, uf.content)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to load files from DB: {e}")
+    
+    return files
+
+
 def clear_session_files(chat_id: str):
     """Clear files for a chat session"""
     if chat_id in _session_files:
@@ -658,13 +715,23 @@ class FileViewingTools:
             return {"error": "filename is required"}
         
         chat_id = context.get("chat_id") if context else None
+        db = context.get("db") if context else None
         if not chat_id:
             return {"error": "No chat context available"}
         
-        content = get_session_file(chat_id, filename)
+        # Try with database fallback
+        if db:
+            content = await get_session_file_with_db_fallback(chat_id, filename, db)
+        else:
+            content = get_session_file(chat_id, filename)
+            
         if not content:
-            # List available files
-            available = list(get_session_files(chat_id).keys())
+            # List available files (also with db fallback)
+            if db:
+                all_files = await get_session_files_with_db_fallback(chat_id, db)
+            else:
+                all_files = get_session_files(chat_id)
+            available = list(all_files.keys())
             return {
                 "error": f"File '{filename}' not found",
                 "available_files": available if available else "No files uploaded in this session"
@@ -703,12 +770,22 @@ class FileViewingTools:
             return {"error": "filename and pattern are required"}
         
         chat_id = context.get("chat_id") if context else None
+        db = context.get("db") if context else None
         if not chat_id:
             return {"error": "No chat context available"}
         
-        content = get_session_file(chat_id, filename)
+        # Try with database fallback
+        if db:
+            content = await get_session_file_with_db_fallback(chat_id, filename, db)
+        else:
+            content = get_session_file(chat_id, filename)
+            
         if not content:
-            available = list(get_session_files(chat_id).keys())
+            if db:
+                all_files = await get_session_files_with_db_fallback(chat_id, db)
+            else:
+                all_files = get_session_files(chat_id)
+            available = list(all_files.keys())
             return {
                 "error": f"File '{filename}' not found",
                 "available_files": available if available else "No files uploaded"
@@ -754,10 +831,16 @@ class FileViewingTools:
     async def list_uploaded_files(arguments: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
         """List all uploaded files in the current session"""
         chat_id = context.get("chat_id") if context else None
+        db = context.get("db") if context else None
         if not chat_id:
             return {"error": "No chat context available"}
         
-        files = get_session_files(chat_id)
+        # Use database fallback
+        if db:
+            files = await get_session_files_with_db_fallback(chat_id, db)
+        else:
+            files = get_session_files(chat_id)
+            
         if not files:
             return {"message": "No files uploaded in this session"}
         
@@ -787,12 +870,22 @@ class FileViewingTools:
             return {"error": "filename and signature_name are required"}
         
         chat_id = context.get("chat_id") if context else None
+        db = context.get("db") if context else None
         if not chat_id:
             return {"error": "No chat context available"}
         
-        content = get_session_file(chat_id, filename)
+        # Try with database fallback
+        if db:
+            content = await get_session_file_with_db_fallback(chat_id, filename, db)
+        else:
+            content = get_session_file(chat_id, filename)
+            
         if not content:
-            available = list(get_session_files(chat_id).keys())
+            if db:
+                all_files = await get_session_files_with_db_fallback(chat_id, db)
+            else:
+                all_files = get_session_files(chat_id)
+            available = list(all_files.keys())
             return {
                 "error": f"File '{filename}' not found",
                 "available_files": available if available else "No files uploaded"

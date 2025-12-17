@@ -435,7 +435,7 @@ class ChainManager:
             "pass", "stop", "block", "to_llm", "from_llm", "query",
             "to_tool", "from_tool", "context_insert", "go_to_llm",
             "filter_complete", "set_var", "set_array", "compare", "call_chain",
-            "modify", "log",
+            "modify", "log", "branch",
         }
         
         def validate_steps(steps: list, path: str = ""):

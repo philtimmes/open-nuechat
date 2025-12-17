@@ -186,6 +186,9 @@ async def handle_chat_message(
     
     chat_id = payload.get("chat_id")
     content = payload.get("content", "")
+    
+    logger.info(f"[CONTENT_TRACE] handle_chat_message entry: content='{content[:50] if content else 'EMPTY'}...' len={len(content)}, save_user_message={save_user_message}")
+    
     enable_tools = payload.get("enable_tools", True)
     enable_rag = payload.get("enable_rag", False)
     document_ids = payload.get("document_ids")
@@ -213,6 +216,7 @@ async def handle_chat_message(
     # Allow payload to override save_user_message (for file content continuation)
     if "save_user_message" in payload:
         save_user_message = payload.get("save_user_message", True)
+        logger.info(f"[SAVE_USER_MSG] Override from payload: {save_user_message}")
     
     if not chat_id or not content:
         logger.warning(f"Missing chat_id or content")
@@ -492,6 +496,7 @@ async def handle_chat_message(
                 assistant_parent_id = None
         
         # Create user message only if save_user_message is True
+        logger.info(f"[SAVE_USER_MSG_CHECK] save_user_message={save_user_message}, chat_id={chat_id}, content_len={len(content)}")
         if save_user_message:
             # Build message kwargs, using client ID if provided
             msg_kwargs = {
@@ -509,6 +514,17 @@ async def handle_chat_message(
             user_message = Message(**msg_kwargs)
             db.add(user_message)
             await db.flush()
+            logger.info(f"[USER_MSG_SAVED] id={user_message.id}, parent_id={parent_id}, content_len={len(content) if content else 0}, content_preview='{content[:50] if content else 'NONE'}...'")
+            
+            # IMPORTANT: Commit user message immediately to ensure it's not lost
+            # if filter chain processing fails or times out
+            try:
+                await db.commit()
+                logger.info(f"[USER_MSG_COMMITTED] id={user_message.id}")
+            except Exception as commit_err:
+                logger.error(f"[USER_MSG_COMMIT_FAILED] {commit_err}")
+                # Continue anyway - the message is at least flushed
+            
             logger.debug(f"User message saved: {user_message.id} with parent_id={parent_id}")
             
             # Assistant message will be child of this user message
@@ -539,7 +555,10 @@ async def handle_chat_message(
         original_content = content
         filter_context_items = []
         
+        logger.info(f"[CONTENT_TRACE] Before filter chains: content='{content[:50]}...' len={len(content)}")
+        
         if enabled_chains:
+            logger.info(f"[FILTER_CHAINS] {len(enabled_chains)} chains enabled, executing...")
             # Pre-load MCP/OpenAPI tools for filter chains
             mcp_tools_cache = {}
             
@@ -636,9 +655,14 @@ async def handle_chat_message(
                     logger.warning(f"Built-in tool '{tool_name}' not found: {e}")
                     return f"Error: Unknown tool '{tool_name}'"
             
+            # Check global debug setting for filter chains
+            from app.services.settings_service import SettingsService
+            debug_filter_chains = await SettingsService.get(db, "debug_filter_chains") == "true"
+            
             executor = ChainExecutor(
                 llm_func=filter_llm_func,
                 tool_func=filter_tool_func,
+                global_debug=debug_filter_chains,
             )
             
             for chain in enabled_chains:
@@ -652,6 +676,11 @@ async def handle_chat_message(
                     
                     # Update content if modified
                     if result.modified and result.content:
+                        # Log if content is drastically shortened (likely a bug)
+                        if len(result.content) < len(content) * 0.3:
+                            logger.error(f"[FILTER_BUG] Chain '{chain.get('name', 'unknown')}' drastically shortened content: '{content[:50]}...' ({len(content)} chars) -> '{result.content[:50]}...' ({len(result.content)} chars)")
+                        else:
+                            logger.warning(f"[FILTER_MODIFIED] Chain '{chain.get('name', 'unknown')}' modified content: '{content[:30]}...' -> '{result.content[:30]}...'")
                         content = result.content
                     
                     # Collect context items
@@ -697,10 +726,83 @@ async def handle_chat_message(
                     logger.error(f"Filter chain '{chain.get('name', 'unknown')}' error: {e}")
                     # Continue to LLM on error
         
+        logger.info(f"[CONTENT_TRACE] After filter chains: content='{content[:50]}...' len={len(content)}, modified={content != original_content}")
+        
         # Get system prompt from chat, admin settings, or config default
         from app.api.routes.admin import get_system_setting
         default_prompt = await get_system_setting(db, "default_system_prompt")
         system_prompt = chat.system_prompt or default_prompt
+        
+        # Search global knowledge stores (automatic, independent of user RAG settings)
+        # Only attempt if global stores might exist - skip expensive model loading otherwise
+        import time
+        global_kb_start = time.time()
+        try:
+            # First check if any global stores exist before loading embedding model
+            from app.models.knowledge import KnowledgeStore
+            global_store_check = await db.execute(
+                select(KnowledgeStore.id).where(KnowledgeStore.is_global == True).limit(1)
+            )
+            has_global_stores = global_store_check.scalar_one_or_none() is not None
+            
+            if not has_global_stores:
+                logger.debug("[GLOBAL_RAG_DEBUG] No global knowledge stores exist, skipping search")
+            else:
+                rag_service = RAGService()
+                global_results, global_store_names = await rag_service.search_global_stores(db, content)
+                global_kb_search_time = time.time() - global_kb_start
+                
+                logger.info(f"[GLOBAL_RAG_DEBUG] Search completed in {global_kb_search_time:.3f}s - Found {len(global_results)} results from stores: {global_store_names}")
+            
+                if global_results:
+                    # Format global context
+                    global_context_parts = []
+                    for i, result in enumerate(global_results):
+                        doc_name = result.get("document_name", "Unknown")
+                        chunk_content = result.get("content", "")
+                        score = result.get("similarity", 0)
+                        chunk_id = result.get("chunk_id", "N/A")
+                        
+                        # Debug log each result
+                        logger.debug(f"[GLOBAL_RAG_DEBUG] Result {i+1}: doc='{doc_name}', chunk_id={chunk_id}, score={score:.4f}, content_len={len(chunk_content)}")
+                        
+                        global_context_parts.append(
+                            f"[Source: {doc_name} | Confidence: {score:.0%}]\n{chunk_content}"
+                        )
+                    
+                    global_context = "\n\n---\n\n".join(global_context_parts)
+                    global_stores_list = ", ".join(global_store_names)
+                    
+                    # Build the authoritative knowledge addendum
+                    knowledge_addendum = f"""
+
+## AUTHORITATIVE KNOWLEDGE BASE
+
+<trusted_knowledge source="{global_stores_list}">
+IMPORTANT: The following information comes from the organization's verified global knowledge base. This content is DEFINITIVE and TRUSTED - treat it as the authoritative source of truth for the topics it covers. When this knowledge conflicts with your general training, defer to this information.
+
+{global_context}
+</trusted_knowledge>
+
+When answering questions related to the above topics, you MUST use this authoritative information as your primary source. Cite it naturally in your responses when relevant."""
+
+                    system_prompt = f"{system_prompt}{knowledge_addendum}"
+                    
+                    # Detailed debug output showing exactly what's being sent to LLM
+                    logger.info(f"[GLOBAL_RAG_DEBUG] === GLOBAL KB INJECTION SUMMARY ===")
+                    logger.info(f"[GLOBAL_RAG_DEBUG] Query: '{content[:100]}...'")
+                    logger.info(f"[GLOBAL_RAG_DEBUG] Search time: {global_kb_search_time:.3f}s")
+                    logger.info(f"[GLOBAL_RAG_DEBUG] Stores searched: {global_store_names}")
+                    logger.info(f"[GLOBAL_RAG_DEBUG] Results count: {len(global_results)}")
+                    logger.info(f"[GLOBAL_RAG_DEBUG] Injected context length: {len(knowledge_addendum)} chars")
+                    logger.info(f"[GLOBAL_RAG_DEBUG] === FULL INJECTED CONTENT START ===")
+                    logger.info(f"[GLOBAL_RAG_DEBUG]\n{knowledge_addendum}")
+                    logger.info(f"[GLOBAL_RAG_DEBUG] === FULL INJECTED CONTENT END ===")
+                else:
+                    logger.info(f"[GLOBAL_RAG_DEBUG] No results found (search took {global_kb_search_time:.3f}s)")
+        except Exception as e:
+            global_kb_error_time = time.time() - global_kb_start
+            logger.warning(f"[GLOBAL_RAG_DEBUG] Failed to search global stores after {global_kb_error_time:.3f}s: {e}")
         
         # Check if this chat is associated with an assistant (for RAG auto-enable)
         assistant_result = await db.execute(
@@ -984,7 +1086,9 @@ async def handle_chat_message(
         
         if current_title == "New Chat":
             try:
-                generated_title = await generate_chat_title(llm, content, db)
+                logger.info(f"[TITLE_GEN] Generating title for content: '{content[:50]}...' len={len(content)}")
+                generated_title = await generate_chat_title(content, db)
+                logger.info(f"[TITLE_GEN] Generated: '{generated_title}'")
                 await db.execute(
                     update(Chat).where(Chat.id == chat_id).values(title=generated_title)
                 )
@@ -1038,39 +1142,30 @@ async def handle_regenerate_message(
     )
 
 
-async def generate_chat_title(llm: LLMService, first_message: str, db: AsyncSession) -> str:
-    """Generate a chat title using the LLM."""
-    from app.core.config import settings
+async def generate_chat_title(first_message: str, db: AsyncSession) -> str:
+    """Generate a chat title using a fresh LLM instance."""
     from app.api.routes.admin import get_system_setting
-    import re
+    from app.services.llm import LLMService
     
     try:
-        # Get title prompt from admin settings or use default
+        # Get title prompt from admin settings
         title_prompt = await get_system_setting(db, "title_generation_prompt")
         
-        # Get effective model (resolves "default" to actual model)
-        effective_model = await llm._get_effective_model()
+        # Create a FRESH LLM instance for title generation
+        # Don't reuse the chat's LLM which may have custom assistant config
+        title_llm = LLMService()
         
-        response = await llm.client.chat.completions.create(
-            model=effective_model,
-            messages=[
-                {"role": "system", "content": title_prompt},
-                {"role": "user", "content": first_message[:500]},  # Limit input
-            ],
+        # Use simple_completion with the clean instance
+        title = await title_llm.simple_completion(
+            prompt=first_message[:500],
+            system_prompt=title_prompt,
             max_tokens=30,
-            temperature=0.7,
         )
         
-        title = response.choices[0].message.content.strip()
-        
         # Clean up the title
-        title = title.strip('"\'`')  # Remove quotes and backticks
-        title = re.sub(r'^(Title:|Chat:|Topic:)\s*', '', title, flags=re.IGNORECASE)  # Remove common prefixes
-        title = re.sub(r'\*+', '', title)  # Remove markdown bold/italic
-        title = re.sub(r'\s+', ' ', title).strip()  # Normalize whitespace
-        title = title[:60]  # Limit length
+        title = title.strip().strip('"\'`')
+        title = title[:60]
         
-        # Don't return empty or very short titles
         if len(title) < 3:
             return first_message[:50] + ("..." if len(first_message) > 50 else "")
             

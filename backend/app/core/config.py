@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     # RAG CONFIGURATION
     # ===========================================
     
-    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     CHUNK_SIZE: int = 512
     CHUNK_OVERLAP: int = 50
     TOP_K_RESULTS: int = 5

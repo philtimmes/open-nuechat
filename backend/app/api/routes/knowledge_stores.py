@@ -56,6 +56,9 @@ class KnowledgeStoreResponse(BaseModel):
     color: str
     is_public: bool
     is_discoverable: bool
+    is_global: bool = False  # Auto-searched on every query (admin only)
+    global_min_score: float = 0.7  # Minimum relevance score for global results
+    global_max_results: int = 3  # Max results from global search
     document_count: int
     total_chunks: int
     total_size_bytes: int
@@ -79,6 +82,10 @@ class KnowledgeStoreUpdate(BaseModel):
     color: Optional[str] = Field(None, max_length=20)
     is_public: Optional[bool] = None
     is_discoverable: Optional[bool] = None
+    # Global store settings (admin only - checked in endpoint)
+    is_global: Optional[bool] = None
+    global_min_score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    global_max_results: Optional[int] = Field(None, ge=1, le=20)
 
 
 class ShareCreate(BaseModel):
@@ -389,12 +396,22 @@ async def update_knowledge_store(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a knowledge store (requires edit permission)"""
+    """Update a knowledge store (requires edit permission, global settings require admin)"""
     store, permission = await get_store_with_access(
         store_id, current_user, db, SharePermission.EDIT
     )
     
     update_dict = update_data.model_dump(exclude_unset=True)
+    
+    # Global settings require admin
+    global_fields = {"is_global", "global_min_score", "global_max_results"}
+    if any(field in update_dict for field in global_fields):
+        if not current_user.is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admins can modify global knowledge store settings"
+            )
+    
     for field, value in update_dict.items():
         setattr(store, field, value)
     
@@ -471,15 +488,7 @@ async def add_document_to_store(
     Upload a document to a knowledge store.
     Supported formats: PDF, TXT, MD, code files, and more.
     """
-    # Rate limit document uploads
-    try:
-        await rate_limiter.check_rate_limit("document_upload", str(current_user.id))
-    except RateLimitExceeded as e:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Try again in {e.retry_after} seconds.",
-            headers={"Retry-After": str(e.retry_after)}
-        )
+    # Note: No rate limiting for knowledge base uploads - users need to bulk upload files
     
     store, _ = await get_store_with_access(
         store_id, current_user, db, SharePermission.EDIT
@@ -903,3 +912,116 @@ async def join_via_share_link(
         "store_name": store.name,
         "permission": share.permission.value,
     }
+
+
+# === Admin Endpoints: Global Knowledge Stores ===
+
+@router.get("/admin/global", response_model=List[KnowledgeStoreResponse])
+async def list_global_stores(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all global knowledge stores (admin only)"""
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    result = await db.execute(
+        select(KnowledgeStore)
+        .where(KnowledgeStore.is_global == True)
+        .order_by(KnowledgeStore.name)
+    )
+    stores = result.scalars().all()
+    
+    responses = []
+    for store in stores:
+        owner_result = await db.execute(
+            select(User).where(User.id == store.owner_id)
+        )
+        owner = owner_result.scalar_one_or_none()
+        
+        response = KnowledgeStoreResponse.model_validate(store)
+        response.owner_username = owner.username if owner else "Unknown"
+        responses.append(response)
+    
+    return responses
+
+
+@router.post("/admin/global/{store_id}")
+async def set_store_global(
+    store_id: str,
+    is_global: bool = True,
+    min_score: float = 0.7,
+    max_results: int = 3,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a knowledge store as global (admin only)"""
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    result = await db.execute(
+        select(KnowledgeStore).where(KnowledgeStore.id == store_id)
+    )
+    store = result.scalar_one_or_none()
+    
+    if not store:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Knowledge store not found"
+        )
+    
+    store.is_global = is_global
+    store.global_min_score = min_score
+    store.global_max_results = max_results
+    
+    await db.commit()
+    
+    action = "enabled" if is_global else "disabled"
+    return {
+        "message": f"Global store {action}",
+        "store_id": store_id,
+        "store_name": store.name,
+        "is_global": is_global,
+        "global_min_score": min_score,
+        "global_max_results": max_results,
+    }
+
+
+@router.get("/admin/all", response_model=List[KnowledgeStoreResponse])
+async def list_all_stores_admin(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all knowledge stores in the system (admin only)"""
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    result = await db.execute(
+        select(KnowledgeStore)
+        .order_by(KnowledgeStore.is_global.desc(), KnowledgeStore.name)
+    )
+    stores = result.scalars().all()
+    
+    # Batch fetch owners
+    owner_ids = list(set(s.owner_id for s in stores))
+    owner_result = await db.execute(
+        select(User).where(User.id.in_(owner_ids))
+    )
+    owners = {str(u.id): u.username for u in owner_result.scalars().all()}
+    
+    responses = []
+    for store in stores:
+        response = KnowledgeStoreResponse.model_validate(store)
+        response.owner_username = owners.get(str(store.owner_id), "Unknown")
+        responses.append(response)
+    
+    return responses

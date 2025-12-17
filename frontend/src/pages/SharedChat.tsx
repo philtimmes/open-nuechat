@@ -23,6 +23,7 @@ interface SharedChatData {
   model: string;
   assistant_id?: string;
   assistant_name?: string;
+  owner_name?: string | null;  // null if anonymous
   created_at: string;
   messages: SharedMessage[];
   all_messages?: SharedMessage[];
@@ -155,7 +156,11 @@ export default function SharedChat() {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto divide-y divide-[var(--color-border)]/50">
-          {(showAllMessages && chat.all_messages ? chat.all_messages : chat.messages).map((message) => (
+          {(showAllMessages && chat.all_messages ? chat.all_messages : chat.messages).map((message) => {
+            // Determine user display name: owner_name, or "Anonymous" if null
+            const userDisplayName = chat.owner_name || 'Anonymous';
+            
+            return (
             <div key={message.id} className="py-4 px-4">
               <div className="flex items-start gap-3">
                 {/* Avatar */}
@@ -164,14 +169,14 @@ export default function SharedChat() {
                     ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
                     : 'bg-[var(--color-surface)] text-[var(--color-text)] border border-[var(--color-border)]'
                 }`}>
-                  {message.role === 'user' ? 'U' : 'AI'}
+                  {message.role === 'user' ? userDisplayName.charAt(0).toUpperCase() : 'AI'}
                 </div>
                 
                 {/* Content */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-sm font-medium text-[var(--color-text)]">
-                      {message.role === 'user' ? 'User' : assistantDisplayName}
+                      {message.role === 'user' ? userDisplayName : assistantDisplayName}
                     </span>
                     {message.output_tokens && (
                       <span className="text-xs text-[var(--color-text-secondary)]">
@@ -251,7 +256,8 @@ export default function SharedChat() {
                 </div>
               </div>
             </div>
-          ))}
+          );
+          })}
         </div>
       </div>
       

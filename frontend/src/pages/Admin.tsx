@@ -1,7 +1,10 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import api from '../lib/api';
+
+// Lazy load FlowEditor for better performance
+const FlowEditor = lazy(() => import('../components/FlowEditor'));
 
 interface SystemSettings {
   default_system_prompt: string;
@@ -159,7 +162,7 @@ interface FilterConfig {
   is_global: boolean;
 }
 
-type TabId = 'system' | 'oauth' | 'llm' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'dev';
+type TabId = 'system' | 'oauth' | 'llm' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'dev';
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -182,6 +185,7 @@ export default function Admin() {
   const [debugTokenResets, setDebugTokenResets] = useState(false);
   const [debugDocumentQueue, setDebugDocumentQueue] = useState(false);
   const [debugRag, setDebugRag] = useState(false);
+  const [debugFilterChains, setDebugFilterChains] = useState(false);
   const [lastTokenReset, setLastTokenReset] = useState<string | null>(null);
   const [tokenRefillHours, setTokenRefillHours] = useState(720);
   const [debugSettingsLoading, setDebugSettingsLoading] = useState(false);
@@ -351,6 +355,23 @@ export default function Admin() {
   const [filterChainJson, setFilterChainJson] = useState('');
   const [previewJsonChain, setPreviewJsonChain] = useState<FilterChainDef | null>(null);
   
+  // Global Knowledge Store state
+  interface GlobalKBStore {
+    id: string;
+    name: string;
+    description: string | null;
+    icon: string;
+    owner_username: string;
+    document_count: number;
+    is_global: boolean;
+    global_min_score: number;
+    global_max_results: number;
+  }
+  const [globalKBStores, setGlobalKBStores] = useState<GlobalKBStore[]>([]);
+  const [allKBStores, setAllKBStores] = useState<GlobalKBStore[]>([]);
+  const [globalKBLoading, setGlobalKBLoading] = useState(false);
+  const [globalKBEnabled, setGlobalKBEnabled] = useState(true);
+  
   // LLM test state
   const [llmTestResult, setLLMTestResult] = useState<{ success: boolean; message: string; models?: string[] } | null>(null);
   const [llmTesting, setLLMTesting] = useState(false);
@@ -376,6 +397,84 @@ export default function Admin() {
     }
   }, [activeTab]);
   
+  // Fetch global KB stores when that tab is activated
+  useEffect(() => {
+    if (activeTab === 'global_kb') {
+      fetchGlobalKBStores();
+    }
+  }, [activeTab]);
+  
+  const fetchGlobalKBStores = async () => {
+    setGlobalKBLoading(true);
+    try {
+      // Fetch all stores
+      const allRes = await api.get('/knowledge-stores/admin/all');
+      setAllKBStores(allRes.data);
+      
+      // Filter to global ones
+      setGlobalKBStores(allRes.data.filter((s: GlobalKBStore) => s.is_global));
+      
+      // Get global KB enabled setting (using raw settings endpoint)
+      const settingsRes = await api.get('/admin/settings/raw');
+      const globalEnabled = settingsRes.data.find((s: any) => s.key === 'global_knowledge_store_enabled');
+      setGlobalKBEnabled(globalEnabled?.value === 'true');
+    } catch (err: any) {
+      console.error('Failed to load global KB stores:', err);
+      setError(err.response?.data?.detail || 'Failed to load global knowledge stores');
+    } finally {
+      setGlobalKBLoading(false);
+    }
+  };
+  
+  const toggleGlobalKBEnabled = async () => {
+    try {
+      const newValue = !globalKBEnabled;
+      await api.put('/admin/setting', {
+        key: 'global_knowledge_store_enabled',
+        value: String(newValue),
+      });
+      setGlobalKBEnabled(newValue);
+      setSuccess(`Global knowledge stores ${newValue ? 'enabled' : 'disabled'}`);
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to update setting');
+    }
+  };
+  
+  const toggleStoreGlobal = async (store: GlobalKBStore, makeGlobal: boolean) => {
+    try {
+      await api.post(`/knowledge-stores/admin/global/${store.id}`, null, {
+        params: {
+          is_global: makeGlobal,
+          min_score: store.global_min_score || 0.7,
+          max_results: store.global_max_results || 3,
+        },
+      });
+      await fetchGlobalKBStores();
+      setSuccess(`Store "${store.name}" ${makeGlobal ? 'added to' : 'removed from'} global stores`);
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to update store');
+    }
+  };
+  
+  const updateGlobalStoreSettings = async (store: GlobalKBStore, minScore: number, maxResults: number) => {
+    try {
+      await api.post(`/knowledge-stores/admin/global/${store.id}`, null, {
+        params: {
+          is_global: true,
+          min_score: minScore,
+          max_results: maxResults,
+        },
+      });
+      await fetchGlobalKBStores();
+      setSuccess('Global store settings updated');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to update store settings');
+    }
+  };
+  
   const fetchDebugSettings = async () => {
     setDebugSettingsLoading(true);
     try {
@@ -383,6 +482,7 @@ export default function Admin() {
       setDebugTokenResets(res.data.debug_token_resets);
       setDebugDocumentQueue(res.data.debug_document_queue);
       setDebugRag(res.data.debug_rag);
+      setDebugFilterChains(res.data.debug_filter_chains);
       setLastTokenReset(res.data.last_token_reset_timestamp);
       setTokenRefillHours(res.data.token_refill_interval_hours);
     } catch (err: any) {
@@ -418,6 +518,17 @@ export default function Admin() {
     try {
       await api.put('/admin/debug-settings', { debug_rag: value });
       setDebugRag(value);
+      setSuccess('Debug setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save debug setting');
+    }
+  };
+  
+  const saveDebugFilterChains = async (value: boolean) => {
+    try {
+      await api.put('/admin/debug-settings', { debug_filter_chains: value });
+      setDebugFilterChains(value);
       setSuccess('Debug setting saved');
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
@@ -1272,6 +1383,8 @@ export default function Admin() {
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>;
       case 'filter_chains':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 4v6m0 0v6m0-6h6m-6 0h-6" transform="translate(-3, 0) scale(0.5)" /></svg>;
+      case 'global_kb':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
       case 'dev':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>;
       default:
@@ -1286,6 +1399,7 @@ export default function Admin() {
     { id: 'features', label: 'Features', iconType: 'features' },
     { id: 'filters', label: 'Filters', iconType: 'filters' },
     { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
+    { id: 'global_kb', label: 'Global KB', iconType: 'global_kb' },
     { id: 'tiers', label: 'Tiers', iconType: 'tiers' },
     { id: 'users', label: 'Users', iconType: 'users' },
     { id: 'chats', label: 'Chats', iconType: 'chats' },
@@ -3074,858 +3188,128 @@ export default function Admin() {
             )}
             
             
-            {/* Filter Chain Modal - Visual No-Code Builder */}
+            {/* Filter Chain Modal - Visual Node-Based Builder */}
             {showFilterChainModal && (
-              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                <div className="bg-[var(--color-surface)] rounded-xl w-full max-w-4xl border border-[var(--color-border)] max-h-[90vh] flex flex-col">
+              <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                <div className="bg-[var(--color-surface)] rounded-xl w-[95vw] h-[95vh] border border-[var(--color-border)] flex flex-col">
                   {/* Header */}
-                  <div className="p-6 border-b border-[var(--color-border)]">
-                    <h3 className="text-xl font-semibold text-[var(--color-text)]">
-                      {editingFilterChain ? 'Edit Filter Chain' : 'Create Filter Chain'}
-                    </h3>
-                    <p className="text-sm text-[var(--color-text-secondary)] mt-1">
-                      Build automated flows that process messages before they reach the AI
-                    </p>
+                  <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-4">
+                      <h3 className="text-lg font-semibold text-[var(--color-text)]">
+                        {editingFilterChain ? 'Edit Filter Chain' : 'Create Filter Chain'}
+                      </h3>
+                      <input
+                        type="text"
+                        value={filterChainForm.name}
+                        onChange={(e) => setFilterChainForm({ ...filterChainForm, name: e.target.value })}
+                        className="px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm w-48"
+                        placeholder="Chain name..."
+                      />
+                      <select
+                        value={filterChainForm.priority}
+                        onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
+                        className="px-2 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      >
+                        <option value={10}>Priority: First (10)</option>
+                        <option value={50}>Priority: Early (50)</option>
+                        <option value={100}>Priority: Normal (100)</option>
+                        <option value={200}>Priority: Late (200)</option>
+                        <option value={500}>Priority: Last (500)</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-2 cursor-pointer text-sm">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.enabled}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, enabled: e.target.checked })}
+                          className="rounded"
+                        />
+                        <span className="text-[var(--color-text)]">Enabled</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer text-sm">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.retain_history}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
+                          className="rounded"
+                        />
+                        <span className="text-[var(--color-text)]">Hidden</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer text-sm">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.debug}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
+                          className="rounded"
+                        />
+                        <span className="text-[var(--color-text)]">🐛 Debug</span>
+                      </label>
+                      <button
+                        onClick={() => setFilterChainJsonMode(!filterChainJsonMode)}
+                        className={`px-3 py-1.5 rounded text-sm ${
+                          filterChainJsonMode
+                            ? 'bg-yellow-500/20 text-yellow-400'
+                            : 'bg-[var(--color-background)] text-[var(--color-text-secondary)]'
+                        }`}
+                      >
+                        {filterChainJsonMode ? '← Visual' : 'JSON →'}
+                      </button>
+                    </div>
                   </div>
                   
-                  {/* Content - Scrollable */}
-                  <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                    {/* Basic Info */}
-                    <div className="bg-[var(--color-background)] rounded-lg p-4 space-y-4">
-                      <h4 className="font-medium text-[var(--color-text)]">Basic Information</h4>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Chain Name</label>
-                          <input
-                            type="text"
-                            value={filterChainForm.name}
-                            onChange={(e) => setFilterChainForm({ ...filterChainForm, name: e.target.value })}
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                            placeholder="e.g., Smart Search"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Run Order (lower runs first)</label>
-                          <select
-                            value={filterChainForm.priority}
-                            onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                          >
-                            <option value={10}>First (10)</option>
-                            <option value={50}>Early (50)</option>
-                            <option value={100}>Normal (100)</option>
-                            <option value={200}>Late (200)</option>
-                            <option value={500}>Last (500)</option>
-                          </select>
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Description (optional)</label>
-                        <input
-                          type="text"
-                          value={filterChainForm.description || ''}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, description: e.target.value })}
-                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                          placeholder="What does this chain do?"
+                  {/* Content - Flow Editor or JSON */}
+                  <div className="flex-1 overflow-hidden">
+                    {filterChainJsonMode ? (
+                      <div className="h-full p-4">
+                        <textarea
+                          value={filterChainJson || JSON.stringify(filterChainForm.definition, null, 2)}
+                          onChange={(e) => {
+                            setFilterChainJson(e.target.value);
+                            try {
+                              const parsed = JSON.parse(e.target.value);
+                              if (parsed.steps && Array.isArray(parsed.steps)) {
+                                setFilterChainForm(prev => ({ ...prev, definition: parsed }));
+                              }
+                            } catch {
+                              // Invalid JSON, don't update
+                            }
+                          }}
+                          className="w-full h-full font-mono text-sm bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg p-4 text-[var(--color-text)] resize-none"
+                          placeholder='{"steps": []}'
                         />
                       </div>
-                      <div className="flex flex-wrap gap-4">
-                        <label className="flex items-center gap-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={filterChainForm.enabled}
-                            onChange={(e) => setFilterChainForm({ ...filterChainForm, enabled: e.target.checked })}
-                            className="rounded"
-                          />
-                          <span className="text-sm text-[var(--color-text)]">Enabled</span>
-                        </label>
-                        <label className="flex items-center gap-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={filterChainForm.retain_history}
-                            onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
-                            className="rounded"
-                          />
-                          <span className="text-sm text-[var(--color-text)]">Hide processing from chat</span>
-                        </label>
-                        <label className="flex items-center gap-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={filterChainForm.debug}
-                            onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
-                            className="rounded"
-                          />
-                          <span className="text-sm text-[var(--color-text)]">🐛 Enable Debug (logs to console)</span>
-                        </label>
-                      </div>
-                    </div>
-                    
-                    {/* Steps */}
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <h4 className="font-medium text-[var(--color-text)]">Steps</h4>
-                        <div className="text-xs text-[var(--color-text-secondary)]">
-                          Steps run in order from top to bottom
+                    ) : (
+                      <Suspense fallback={
+                        <div className="h-full flex items-center justify-center text-[var(--color-text-secondary)]">
+                          Loading visual editor...
                         </div>
-                      </div>
-                      
-                      {/* Step List */}
-                      {filterChainForm.definition?.steps?.length === 0 ? (
-                        <div className="text-center py-12 border-2 border-dashed border-[var(--color-border)] rounded-lg">
-                          <div className="text-[var(--color-text-secondary)] mb-4">No steps yet</div>
-                          <div className="text-sm text-[var(--color-text-secondary)]">Add a step below to get started</div>
-                        </div>
-                      ) : (
-                        <div className="space-y-3">
-                          {filterChainForm.definition?.steps?.map((step, index) => {
-                            // Get list of available variables for dropdowns (simplified syntax - no $Var needed)
-                            const availableVars = [
-                              { value: 'Query', label: 'User Message' },
-                              { value: 'PreviousResult', label: 'Previous Step Result' },
-                              ...filterChainForm.definition.steps
-                                .slice(0, index)
-                                .filter(s => s.config?.output_var)
-                                .map(s => ({ 
-                                  value: s.config.output_var, 
-                                  label: `Step ${filterChainForm.definition.steps.indexOf(s) + 1}: ${s.config.output_var}` 
-                                }))
-                            ];
-                            
-                            return (
-                              <div
-                                key={step.id}
-                                className={`bg-[var(--color-background)] rounded-lg border-2 ${
-                                  step.enabled !== false ? 'border-[var(--color-border)]' : 'border-red-500/30 opacity-60'
-                                }`}
-                              >
-                                {/* Step Header */}
-                                <div className="flex items-center gap-3 p-3 border-b border-[var(--color-border)]">
-                                  <div className="w-8 h-8 rounded-full bg-[var(--color-button)] text-[var(--color-button-text)] flex items-center justify-center font-bold text-sm">
-                                    {index + 1}
-                                  </div>
-                                  <select
-                                    value={step.type}
-                                    onChange={(e) => updateStep(step.id, { type: e.target.value, config: {} })}
-                                    className="flex-1 px-3 py-1.5 rounded bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] font-medium"
-                                  >
-                                    <optgroup label="AI Actions">
-                                      <option value="to_llm">🤖 Ask AI a Question</option>
-                                      <option value="query">🔍 Generate Search Query</option>
-                                    </optgroup>
-                                    <optgroup label="Tool Actions">
-                                      <option value="to_tool">🔧 Run a Tool</option>
-                                    </optgroup>
-                                    <optgroup label="Flow Control">
-                                      <option value="go_to_llm">➡️ Send to Main AI</option>
-                                      <option value="filter_complete">✅ Finish Chain</option>
-                                      <option value="stop">⛔ Stop Processing</option>
-                                      <option value="block">🚫 Block Message</option>
-                                    </optgroup>
-                                    <optgroup label="Data">
-                                      <option value="set_var">📝 Set Variable</option>
-                                      <option value="set_array">📋 Set Array</option>
-                                      <option value="context_insert">📎 Add to Context</option>
-                                      <option value="modify">✏️ Modify Content</option>
-                                    </optgroup>
-                                    <optgroup label="Logic">
-                                      <option value="compare">⚖️ Compare Values</option>
-                                      <option value="call_chain">🔗 Run Another Chain</option>
-                                    </optgroup>
-                                  </select>
-                                  <div className="flex items-center gap-1">
-                                    <button
-                                      onClick={() => {
-                                        const steps = [...filterChainForm.definition.steps];
-                                        if (index > 0) {
-                                          [steps[index], steps[index - 1]] = [steps[index - 1], steps[index]];
-                                          setFilterChainForm(prev => ({ ...prev, definition: { steps } }));
-                                        }
-                                      }}
-                                      disabled={index === 0}
-                                      className="p-1.5 rounded hover:bg-[var(--color-surface)] disabled:opacity-30 text-[var(--color-text-secondary)]"
-                                      title="Move up"
-                                    >
-                                      ↑
-                                    </button>
-                                    <button
-                                      onClick={() => {
-                                        const steps = [...filterChainForm.definition.steps];
-                                        if (index < steps.length - 1) {
-                                          [steps[index], steps[index + 1]] = [steps[index + 1], steps[index]];
-                                          setFilterChainForm(prev => ({ ...prev, definition: { steps } }));
-                                        }
-                                      }}
-                                      disabled={index === filterChainForm.definition.steps.length - 1}
-                                      className="p-1.5 rounded hover:bg-[var(--color-surface)] disabled:opacity-30 text-[var(--color-text-secondary)]"
-                                      title="Move down"
-                                    >
-                                      ↓
-                                    </button>
-                                    <button
-                                      onClick={() => updateStep(step.id, { enabled: step.enabled === false })}
-                                      className={`p-1.5 rounded hover:bg-[var(--color-surface)] ${step.enabled !== false ? 'text-green-500' : 'text-red-500'}`}
-                                      title={step.enabled !== false ? 'Disable step' : 'Enable step'}
-                                    >
-                                      {step.enabled !== false ? '●' : '○'}
-                                    </button>
-                                    <button
-                                      onClick={() => removeStep(step.id)}
-                                      className="p-1.5 rounded hover:bg-red-500/20 text-red-500"
-                                      title="Delete step"
-                                    >
-                                      ×
-                                    </button>
-                                  </div>
-                                </div>
-                                
-                                {/* Step Config - Dynamic based on type */}
-                                <div className="p-4 space-y-3">
-                                  {/* Ask AI / Generate Query */}
-                                  {(step.type === 'to_llm' || step.type === 'query') && (
-                                    <>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
-                                          {step.type === 'query' ? 'What to generate a query for:' : 'Question to ask AI:'}
-                                        </label>
-                                        {/* Clickable variable chips */}
-                                        <div className="flex flex-wrap gap-1 mb-2">
-                                          <span className="text-xs text-[var(--color-text-secondary)]">Insert:</span>
-                                          {availableVars.map(v => (
-                                            <button
-                                              key={v.value}
-                                              type="button"
-                                              onClick={() => {
-                                                const currentPrompt = step.config?.prompt || '';
-                                                updateStep(step.id, { config: { ...step.config, prompt: currentPrompt + `{${v.value}}` } });
-                                              }}
-                                              className="px-2 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
-                                              title={`Insert {${v.value}}`}
-                                            >
-                                              {v.label}
-                                            </button>
-                                          ))}
-                                        </div>
-                                        <textarea
-                                          value={step.config?.prompt || ''}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, prompt: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          rows={2}
-                                          placeholder={step.type === 'query' 
-                                            ? 'Generate a search query for: Query' 
-                                            : 'Can you answer this question without searching? Query'}
-                                        />
-                                        <div className="text-xs text-[var(--color-text-secondary)] mt-1">
-                                          💡 Click chips to insert. JSON paths: <code className="bg-[var(--color-surface)] px-1 rounded">SearchResults.results[0].url</code>
-                                        </div>
-                                      </div>
-                                      <div className="grid grid-cols-2 gap-3">
-                                        <div>
-                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
-                                            Append (if no variables used):
-                                          </label>
-                                          <select
-                                            value={step.config?.input_var || 'Query'}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, input_var: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          >
-                                            {availableVars.map(v => (
-                                              <option key={v.value} value={v.value}>{v.label}</option>
-                                            ))}
-                                          </select>
-                                        </div>
-                                        <div>
-                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Save result as:</label>
-                                          <input
-                                            type="text"
-                                            value={step.config?.output_var || ''}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, output_var: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                            placeholder="e.g., AIAnswer"
-                                          />
-                                        </div>
-                                      </div>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Instructions for AI (optional):</label>
-                                        <input
-                                          type="text"
-                                          value={step.config?.system_prompt || ''}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, system_prompt: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          placeholder="e.g., Reply with only YES or NO"
-                                        />
-                                      </div>
-                                    </>
-                                  )}
-                                  
-                                  {/* Run Tool */}
-                                  {step.type === 'to_tool' && (
-                                    <>
-                                      <div className="grid grid-cols-2 gap-3">
-                                        <div>
-                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Tool to run:</label>
-                                          <select
-                                            value={step.config?.tool_name || ''}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, tool_name: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          >
-                                            <option value="">Select a tool...</option>
-                                            {/* Group tools by category */}
-                                            {(() => {
-                                              const categories = [...new Set(availableTools.map(t => t.category))];
-                                              return categories.map(category => (
-                                                <optgroup key={category} label={category}>
-                                                  {availableTools
-                                                    .filter(t => t.category === category)
-                                                    .map(t => (
-                                                      <option key={t.value} value={t.value}>{t.label}</option>
-                                                    ))
-                                                  }
-                                                </optgroup>
-                                              ));
-                                            })()}
-                                          </select>
-                                        </div>
-                                        <div>
-                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Save result as:</label>
-                                          <input
-                                            type="text"
-                                            value={step.config?.output_var || ''}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, output_var: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                            placeholder="e.g., SearchResults"
-                                          />
-                                        </div>
-                                      </div>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Tool input:</label>
-                                        {(() => {
-                                          // Extract param_name and param_source from existing params if not set explicitly
-                                          let paramName = step.config?.param_name;
-                                          let paramSource = step.config?.param_source;
-                                          
-                                          if (!paramName && step.config?.params) {
-                                            const paramKeys = Object.keys(step.config.params);
-                                            if (paramKeys.length > 0) {
-                                              paramName = paramKeys[0];
-                                              paramSource = step.config.params[paramKeys[0]];
-                                            }
-                                          }
-                                          paramName = paramName || 'query';
-                                          paramSource = paramSource || '$PreviousResult';
-                                          
-                                          return (
-                                            <>
-                                              <div className="flex gap-2 items-center">
-                                                <input
-                                                  type="text"
-                                                  value={paramName}
-                                                  onChange={(e) => {
-                                                    const newParamName = e.target.value || 'query';
-                                                    updateStep(step.id, { 
-                                                      config: { 
-                                                        ...step.config, 
-                                                        param_name: newParamName,
-                                                        param_source: paramSource,
-                                                        params: { [newParamName]: paramSource } 
-                                                      } 
-                                                    });
-                                                  }}
-                                                  className="w-24 px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                                                  placeholder="query"
-                                                  title="Parameter name (e.g., query, urls, input)"
-                                                />
-                                                <span className="text-[var(--color-text-secondary)]">=</span>
-                                                <input
-                                                  type="text"
-                                                  value={paramSource}
-                                                  onChange={(e) => {
-                                                    updateStep(step.id, { 
-                                                      config: { 
-                                                        ...step.config, 
-                                                        param_name: paramName,
-                                                        param_source: e.target.value, 
-                                                        params: { [paramName]: e.target.value } 
-                                                      } 
-                                                    });
-                                                  }}
-                                                  className="flex-1 px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                                  placeholder="SearchResults.results[0].url"
-                                                />
-                                              </div>
-                                              {/* Variable chips for quick insertion */}
-                                              <div className="flex flex-wrap gap-1 mt-2">
-                                                <span className="text-xs text-[var(--color-text-secondary)]">Insert:</span>
-                                                {availableVars.map(v => (
-                                                  <button
-                                                    key={v.value}
-                                                    type="button"
-                                                    onClick={() => {
-                                                      updateStep(step.id, { 
-                                                        config: { 
-                                                          ...step.config, 
-                                                          param_name: paramName,
-                                                          param_source: v.value, 
-                                                          params: { [paramName]: v.value } 
-                                                        } 
-                                                      });
-                                                    }}
-                                                    className="px-2 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
-                                                    title={`Use ${v.value}`}
-                                                  >
-                                                    {v.label}
-                                                  </button>
-                                                ))}
-                                              </div>
-                                            </>
-                                          );
-                                        })()}
-                                        <div className="text-xs text-[var(--color-text-secondary)] mt-1">
-                                          💡 For arrays: <code className="bg-[var(--color-surface)] px-1 rounded">[url_out]</code> → <code className="bg-[var(--color-surface)] px-1 rounded">["https://..."]</code>. JSON path: <code className="bg-[var(--color-surface)] px-1 rounded">Results.results[0].url</code>
-                                        </div>
-                                      </div>
-                                      <label className="flex items-center gap-2 cursor-pointer">
-                                        <input
-                                          type="checkbox"
-                                          checked={step.config?.add_to_context !== false}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, add_to_context: e.target.checked } })}
-                                          className="rounded"
-                                        />
-                                        <span className="text-sm text-[var(--color-text)]">Add result to AI context</span>
-                                      </label>
-                                    </>
-                                  )}
-                                  
-                                  {/* Send to Main AI */}
-                                  {step.type === 'go_to_llm' && (
-                                    <>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Send this data to the main AI:</label>
-                                        <select
-                                          value={step.config?.input_var || 'Query'}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, input_var: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                        >
-                                          {availableVars.map(v => (
-                                            <option key={v.value} value={v.value}>{v.label}</option>
-                                          ))}
-                                        </select>
-                                      </div>
-                                      <label className="flex items-center gap-2 cursor-pointer">
-                                        <input
-                                          type="checkbox"
-                                          checked={step.config?.include_context !== false}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, include_context: e.target.checked } })}
-                                          className="rounded"
-                                        />
-                                        <span className="text-sm text-[var(--color-text)]">Include accumulated context</span>
-                                      </label>
-                                    </>
-                                  )}
-                                  
-                                  {/* Finish Chain */}
-                                  {step.type === 'filter_complete' && (
-                                    <div>
-                                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">What to do:</label>
-                                      <select
-                                        value={step.config?.action || 'go_to_llm'}
-                                        onChange={(e) => updateStep(step.id, { config: { ...step.config, action: e.target.value } })}
-                                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                      >
-                                        <option value="go_to_llm">Continue to main AI with results</option>
-                                        <option value="return">Return result directly to user</option>
-                                        <option value="stop">Stop without sending anything</option>
-                                      </select>
-                                    </div>
-                                  )}
-                                  
-                                  {/* Set Variable */}
-                                  {step.type === 'set_var' && (
-                                    <>
-                                      <div className="grid grid-cols-2 gap-3">
-                                        <div>
-                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Variable name:</label>
-                                          <input
-                                            type="text"
-                                            value={step.config?.var_name || ''}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, var_name: e.target.value, output_var: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                            placeholder="e.g., url_out"
-                                          />
-                                        </div>
-                                        <div>
-                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Value (with JSON path):</label>
-                                          <input
-                                            type="text"
-                                            value={step.config?.value || ''}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, value: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                            placeholder="e.g., SearchResults.results[0].url"
-                                          />
-                                        </div>
-                                      </div>
-                                      <div className="flex flex-wrap gap-1 mt-2">
-                                        <span className="text-xs text-[var(--color-text-secondary)]">Insert:</span>
-                                        {availableVars.map(v => (
-                                          <button
-                                            key={v.value}
-                                            type="button"
-                                            onClick={() => {
-                                              const currentValue = step.config?.value || '';
-                                              updateStep(step.id, { config: { ...step.config, value: currentValue + v.value } });
-                                            }}
-                                            className="px-2 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
-                                            title={`Insert ${v.value}`}
-                                          >
-                                            {v.label}
-                                          </button>
-                                        ))}
-                                      </div>
-                                      <div className="text-xs text-[var(--color-text-secondary)] mt-1">
-                                        💡 Use JSON paths: <code className="bg-[var(--color-surface)] px-1 rounded">SearchResults.results[0].url</code> or <code className="bg-[var(--color-surface)] px-1 rounded">PreviousResult.title</code>
-                                      </div>
-                                    </>
-                                  )}
-                                  
-                                  {/* Set Array */}
-                                  {step.type === 'set_array' && (
-                                    <>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Array name:</label>
-                                        <input
-                                          type="text"
-                                          value={step.config?.var_name || ''}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, var_name: e.target.value, output_var: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          placeholder="e.g., urls"
-                                        />
-                                      </div>
-                                      <div className="space-y-2">
-                                        <label className="block text-sm text-[var(--color-text-secondary)]">Array values:</label>
-                                        {(step.config?.values || ['']).map((value: string, valueIndex: number) => (
-                                          <div key={valueIndex} className="flex gap-2 items-center">
-                                            <span className="text-xs text-[var(--color-text-secondary)] w-8">[{valueIndex}]</span>
-                                            <input
-                                              type="text"
-                                              value={value}
-                                              onChange={(e) => {
-                                                const values = [...(step.config?.values || [''])];
-                                                values[valueIndex] = e.target.value;
-                                                updateStep(step.id, { config: { ...step.config, values } });
-                                              }}
-                                              className="flex-1 px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                              placeholder="e.g., SearchResults.results[0].url"
-                                            />
-                                            {(step.config?.values || ['']).length > 1 && (
-                                              <button
-                                                type="button"
-                                                onClick={() => {
-                                                  const values = [...(step.config?.values || [''])];
-                                                  values.splice(valueIndex, 1);
-                                                  updateStep(step.id, { config: { ...step.config, values } });
-                                                }}
-                                                className="p-2 text-red-400 hover:bg-red-500/20 rounded"
-                                                title="Remove value"
-                                              >
-                                                ✕
-                                              </button>
-                                            )}
-                                          </div>
-                                        ))}
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            const values = [...(step.config?.values || ['']), ''];
-                                            updateStep(step.id, { config: { ...step.config, values } });
-                                          }}
-                                          className="px-3 py-1.5 text-sm bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30"
-                                        >
-                                          + Add Value
-                                        </button>
-                                      </div>
-                                      <div className="flex flex-wrap gap-1 mt-2">
-                                        <span className="text-xs text-[var(--color-text-secondary)]">Insert into last value:</span>
-                                        {availableVars.map(v => (
-                                          <button
-                                            key={v.value}
-                                            type="button"
-                                            onClick={() => {
-                                              const values = [...(step.config?.values || [''])];
-                                              const lastIdx = values.length - 1;
-                                              values[lastIdx] = (values[lastIdx] || '') + v.value;
-                                              updateStep(step.id, { config: { ...step.config, values } });
-                                            }}
-                                            className="px-2 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
-                                            title={`Insert ${v.value}`}
-                                          >
-                                            {v.label}
-                                          </button>
-                                        ))}
-                                      </div>
-                                      <div className="text-xs text-[var(--color-text-secondary)] mt-1">
-                                        💡 Each value can use variables: <code className="bg-[var(--color-surface)] px-1 rounded">SearchResults.results[0].url</code>
-                                      </div>
-                                    </>
-                                  )}
-                                  
-                                  {/* Add to Context */}
-                                  {step.type === 'context_insert' && (
-                                    <div className="grid grid-cols-2 gap-3">
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Data to add:</label>
-                                        <select
-                                          value={step.config?.source_var || 'PreviousResult'}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, source_var: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                        >
-                                          {availableVars.map(v => (
-                                            <option key={v.value} value={v.value}>{v.label}</option>
-                                          ))}
-                                        </select>
-                                      </div>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Label:</label>
-                                        <input
-                                          type="text"
-                                          value={step.config?.label || ''}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, label: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          placeholder="e.g., Search Results"
-                                        />
-                                      </div>
-                                    </div>
-                                  )}
-                                  
-                                  {/* Compare Values */}
-                                  {step.type === 'compare' && (
-                                    <>
-                                      <div className="grid grid-cols-3 gap-2 items-end">
-                                        <div>
-                                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Check if:</label>
-                                          <select
-                                            value={step.config?.left || 'PreviousResult'}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, left: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          >
-                                            {availableVars.map(v => (
-                                              <option key={v.value} value={v.value}>{v.label}</option>
-                                            ))}
-                                          </select>
-                                        </div>
-                                        <div>
-                                          <select
-                                            value={step.config?.operator || 'contains'}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, operator: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          >
-                                            <option value="contains">contains</option>
-                                            <option value="not_contains">does not contain</option>
-                                            <option value="==">equals</option>
-                                            <option value="!=">does not equal</option>
-                                            <option value="starts_with">starts with</option>
-                                            <option value="ends_with">ends with</option>
-                                          </select>
-                                        </div>
-                                        <div>
-                                          <input
-                                            type="text"
-                                            value={step.config?.right || ''}
-                                            onChange={(e) => updateStep(step.id, { config: { ...step.config, right: e.target.value } })}
-                                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                            placeholder="value"
-                                          />
-                                        </div>
-                                      </div>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Save result (true/false) as:</label>
-                                        <input
-                                          type="text"
-                                          value={step.config?.output_var || ''}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, output_var: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          placeholder="e.g., NeedsSearch"
-                                        />
-                                      </div>
-                                    </>
-                                  )}
-                                  
-                                  {/* Modify Content */}
-                                  {step.type === 'modify' && (
-                                    <>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Create new content using:</label>
-                                        <textarea
-                                          value={step.config?.template || ''}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, template: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          rows={3}
-                                          placeholder="Type text and insert variables with {}"
-                                        />
-                                      </div>
-                                      <div className="text-xs text-[var(--color-text-secondary)]">
-                                        Insert variables: {availableVars.map(v => `{${v.value}}`).join(', ')}
-                                      </div>
-                                      <div>
-                                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Save as:</label>
-                                        <input
-                                          type="text"
-                                          value={step.config?.output_var || ''}
-                                          onChange={(e) => updateStep(step.id, { config: { ...step.config, output_var: e.target.value } })}
-                                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                          placeholder="e.g., FinalMessage"
-                                        />
-                                      </div>
-                                    </>
-                                  )}
-                                  
-                                  {/* Run Another Chain */}
-                                  {step.type === 'call_chain' && (
-                                    <div>
-                                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Chain to run:</label>
-                                      <select
-                                        value={step.config?.chain_name || ''}
-                                        onChange={(e) => updateStep(step.id, { config: { ...step.config, chain_name: e.target.value } })}
-                                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                      >
-                                        <option value="">Select a chain...</option>
-                                        {filterChains.filter(c => c.id !== editingFilterChain?.id).map(c => (
-                                          <option key={c.id} value={c.name}>{c.name}</option>
-                                        ))}
-                                      </select>
-                                    </div>
-                                  )}
-                                  
-                                  {/* Stop / Block */}
-                                  {(step.type === 'stop' || step.type === 'block') && (
-                                    <div>
-                                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
-                                        {step.type === 'block' ? 'Message to show user:' : 'Reason (for logs):'}
-                                      </label>
-                                      <input
-                                        type="text"
-                                        value={step.config?.message || ''}
-                                        onChange={(e) => updateStep(step.id, { config: { ...step.config, message: e.target.value } })}
-                                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)]"
-                                        placeholder={step.type === 'block' ? 'Your request was blocked' : 'Processing stopped'}
-                                      />
-                                    </div>
-                                  )}
-                                  
-                                  {/* Conditional - Simple UI */}
-                                  <div className="border-t border-[var(--color-border)] pt-3 mt-3">
-                                    <label className="flex items-center gap-2 cursor-pointer">
-                                      <input
-                                        type="checkbox"
-                                        checked={step.conditional?.enabled || false}
-                                        onChange={(e) => updateStep(step.id, { 
-                                          conditional: {
-                                            enabled: e.target.checked,
-                                            comparisons: step.conditional?.comparisons || [{ left: 'PreviousResult', operator: 'contains', right: '' }],
-                                            logic: step.conditional?.logic || 'and',
-                                            on_true: step.conditional?.on_true || [],
-                                            on_false: step.conditional?.on_false || []
-                                          }
-                                        })}
-                                        className="rounded"
-                                      />
-                                      <span className="text-sm text-[var(--color-text)]">Only run this step if condition is met</span>
-                                    </label>
-                                    
-                                    {step.conditional?.enabled && step.conditional.comparisons && (
-                                      <div className="mt-3 p-3 bg-[var(--color-surface)] rounded-lg">
-                                        <div className="grid grid-cols-3 gap-2 items-center">
-                                          <select
-                                            value={step.conditional.comparisons[0]?.left || 'PreviousResult'}
-                                            onChange={(e) => {
-                                              const newComparisons = [...(step.conditional?.comparisons || [])];
-                                              newComparisons[0] = { ...newComparisons[0], left: e.target.value };
-                                              updateStep(step.id, { 
-                                                conditional: { 
-                                                  enabled: true,
-                                                  logic: step.conditional?.logic || 'and',
-                                                  comparisons: newComparisons,
-                                                  on_true: step.conditional?.on_true || [],
-                                                  on_false: step.conditional?.on_false || []
-                                                } 
-                                              });
-                                            }}
-                                            className="px-2 py-1.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                                          >
-                                            {availableVars.map(v => (
-                                              <option key={v.value} value={v.value}>{v.label}</option>
-                                            ))}
-                                          </select>
-                                          <select
-                                            value={step.conditional.comparisons[0]?.operator || 'contains'}
-                                            onChange={(e) => {
-                                              const newComparisons = [...(step.conditional?.comparisons || [])];
-                                              newComparisons[0] = { ...newComparisons[0], operator: e.target.value };
-                                              updateStep(step.id, { 
-                                                conditional: { 
-                                                  enabled: true,
-                                                  logic: step.conditional?.logic || 'and',
-                                                  comparisons: newComparisons,
-                                                  on_true: step.conditional?.on_true || [],
-                                                  on_false: step.conditional?.on_false || []
-                                                } 
-                                              });
-                                            }}
-                                            className="px-2 py-1.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                                          >
-                                            <option value="contains">contains</option>
-                                            <option value="not_contains">does not contain</option>
-                                            <option value="==">equals</option>
-                                            <option value="!=">does not equal</option>
-                                          </select>
-                                          <input
-                                            type="text"
-                                            value={step.conditional.comparisons[0]?.right || ''}
-                                            onChange={(e) => {
-                                              const newComparisons = [...(step.conditional?.comparisons || [])];
-                                              newComparisons[0] = { ...newComparisons[0], right: e.target.value };
-                                              updateStep(step.id, { 
-                                                conditional: { 
-                                                  enabled: true,
-                                                  logic: step.conditional?.logic || 'and',
-                                                  comparisons: newComparisons,
-                                                  on_true: step.conditional?.on_true || [],
-                                                  on_false: step.conditional?.on_false || []
-                                                } 
-                                              });
-                                            }}
-                                            className="px-2 py-1.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                                            placeholder="value"
-                                          />
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                      
-                      {/* Add Step Button */}
-                      <div className="flex justify-center pt-4">
-                        <button
-                          onClick={() => addStep('to_llm')}
-                          className="px-6 py-3 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 font-medium"
-                        >
-                          + Add Step
-                        </button>
-                      </div>
-                    </div>
+                      }>
+                        <FlowEditor
+                          definition={filterChainForm.definition}
+                          onChange={(newDef) => setFilterChainForm(prev => ({ ...prev, definition: newDef }))}
+                          availableTools={availableTools}
+                          filterChains={filterChains
+                            .filter(c => c.id && c.id !== editingFilterChain?.id)
+                            .map(c => ({ id: c.id!, name: c.name }))
+                          }
+                        />
+                      </Suspense>
+                    )}
                   </div>
                   
                   {/* Footer */}
-                  <div className="p-6 border-t border-[var(--color-border)] flex justify-between">
-                    <button
-                      onClick={() => setFilterChainJsonMode(!filterChainJsonMode)}
-                      className="text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-                    >
-                      {filterChainJsonMode ? '← Back to Visual Editor' : 'Advanced: Edit JSON →'}
-                    </button>
+                  <div className="px-4 py-3 border-t border-[var(--color-border)] flex justify-between shrink-0">
+                    <div className="flex items-center gap-4 text-sm text-[var(--color-text-secondary)]">
+                      <span>{filterChainForm.definition?.steps?.length || 0} steps</span>
+                      <input
+                        type="text"
+                        value={filterChainForm.description || ''}
+                        onChange={(e) => setFilterChainForm({ ...filterChainForm, description: e.target.value })}
+                        className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm w-64"
+                        placeholder="Description (optional)..."
+                      />
+                    </div>
                     <div className="flex gap-3">
                       <button
                         onClick={() => { setShowFilterChainModal(false); resetFilterChainForm(); }}
@@ -3976,6 +3360,157 @@ export default function Admin() {
                       {JSON.stringify(previewJsonChain, null, 2)}
                     </pre>
                   </div>
+                </div>
+              </div>
+            )}
+            
+            {/* GLOBAL KNOWLEDGE STORES TAB */}
+            {activeTab === 'global_kb' && (
+              <div className="space-y-6">
+                {/* Feature Toggle */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-lg font-semibold text-[var(--color-text)]">Global Knowledge Stores</h3>
+                      <p className="text-sm text-[var(--color-text-secondary)] mt-1">
+                        Global stores are automatically searched on every query. Results are only included if they meet the relevance threshold.
+                      </p>
+                    </div>
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <span className="text-sm text-[var(--color-text-secondary)]">
+                        {globalKBEnabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                      <div 
+                        className={`relative w-12 h-6 rounded-full transition-colors cursor-pointer ${
+                          globalKBEnabled ? 'bg-green-500' : 'bg-gray-600'
+                        }`}
+                        onClick={toggleGlobalKBEnabled}
+                      >
+                        <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${
+                          globalKBEnabled ? 'translate-x-7' : 'translate-x-1'
+                        }`} />
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* Current Global Stores */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
+                    Active Global Stores ({globalKBStores.length})
+                  </h3>
+                  
+                  {globalKBLoading ? (
+                    <div className="text-[var(--color-text-secondary)]">Loading...</div>
+                  ) : globalKBStores.length === 0 ? (
+                    <div className="text-[var(--color-text-secondary)] py-8 text-center">
+                      No global stores configured. Add a store from the list below.
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {globalKBStores.map(store => (
+                        <div 
+                          key={store.id}
+                          className="flex items-center justify-between p-4 bg-[var(--color-background)] rounded-lg border border-green-500/30"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-2xl">{store.icon}</span>
+                            <div>
+                              <div className="font-medium text-[var(--color-text)]">{store.name}</div>
+                              <div className="text-xs text-[var(--color-text-secondary)]">
+                                Owner: {store.owner_username} • {store.document_count} docs
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                              <label className="text-xs text-[var(--color-text-secondary)]">Min Score:</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="1"
+                                step="0.05"
+                                value={store.global_min_score}
+                                onChange={(e) => {
+                                  const newScore = parseFloat(e.target.value);
+                                  if (!isNaN(newScore) && newScore >= 0 && newScore <= 1) {
+                                    updateGlobalStoreSettings(store, newScore, store.global_max_results);
+                                  }
+                                }}
+                                className="w-16 px-2 py-1 text-sm bg-[var(--color-surface)] border border-[var(--color-border)] rounded text-[var(--color-text)]"
+                              />
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <label className="text-xs text-[var(--color-text-secondary)]">Max Results:</label>
+                              <input
+                                type="number"
+                                min="1"
+                                max="20"
+                                value={store.global_max_results}
+                                onChange={(e) => {
+                                  const newMax = parseInt(e.target.value);
+                                  if (!isNaN(newMax) && newMax >= 1 && newMax <= 20) {
+                                    updateGlobalStoreSettings(store, store.global_min_score, newMax);
+                                  }
+                                }}
+                                className="w-16 px-2 py-1 text-sm bg-[var(--color-surface)] border border-[var(--color-border)] rounded text-[var(--color-text)]"
+                              />
+                            </div>
+                            <button
+                              onClick={() => toggleStoreGlobal(store, false)}
+                              className="px-3 py-1 text-sm bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                
+                {/* All Available Stores */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
+                    All Knowledge Stores ({allKBStores.length})
+                  </h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                    Select stores to make them global. Global stores are searched on every query for all users.
+                  </p>
+                  
+                  {globalKBLoading ? (
+                    <div className="text-[var(--color-text-secondary)]">Loading...</div>
+                  ) : allKBStores.filter(s => !s.is_global).length === 0 ? (
+                    <div className="text-[var(--color-text-secondary)] py-8 text-center">
+                      All stores are already global, or no stores exist.
+                    </div>
+                  ) : (
+                    <div className="grid gap-3 max-h-96 overflow-y-auto">
+                      {allKBStores.filter(s => !s.is_global).map(store => (
+                        <div 
+                          key={store.id}
+                          className="flex items-center justify-between p-4 bg-[var(--color-background)] rounded-lg"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-2xl">{store.icon}</span>
+                            <div>
+                              <div className="font-medium text-[var(--color-text)]">{store.name}</div>
+                              <div className="text-xs text-[var(--color-text-secondary)]">
+                                Owner: {store.owner_username} • {store.document_count} docs
+                                {store.description && ` • ${store.description.slice(0, 50)}${store.description.length > 50 ? '...' : ''}`}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => toggleStoreGlobal(store, true)}
+                            className="px-3 py-1 text-sm bg-green-500/20 text-green-400 rounded hover:bg-green-500/30"
+                          >
+                            Make Global
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -4064,6 +3599,21 @@ export default function Admin() {
                           <div className="text-[var(--color-text)] font-medium">Debug RAG</div>
                           <div className="text-sm text-[var(--color-text-secondary)]">
                             Logs all knowledge base queries: search terms, matched documents, relevance scores, and retrieved context
+                          </div>
+                        </div>
+                      </label>
+                      
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={debugFilterChains}
+                          onChange={(e) => saveDebugFilterChains(e.target.checked)}
+                          className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                        />
+                        <div>
+                          <div className="text-[var(--color-text)] font-medium">Debug Filter Chains</div>
+                          <div className="text-sm text-[var(--color-text-secondary)]">
+                            Logs detailed filter chain execution: step name, input values, output values, and execution time for each node
                           </div>
                         </div>
                       </label>

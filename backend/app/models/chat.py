@@ -44,6 +44,7 @@ class Chat(Base):
     
     # Public sharing
     share_id = Column(String(36), nullable=True, unique=True, index=True)
+    share_anonymous = Column(Boolean, default=False)  # If True, hide owner name in shared view
     
     # Token tracking
     total_input_tokens = Column(Integer, default=0)

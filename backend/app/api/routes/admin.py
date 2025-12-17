@@ -243,6 +243,55 @@ async def set_setting(db: AsyncSession, key: str, value: str) -> None:
 
 
 # =============================================================================
+# RAW SYSTEM SETTINGS (individual key-value access)
+# =============================================================================
+
+class RawSettingSchema(BaseModel):
+    """Single setting key-value pair"""
+    key: str
+    value: str
+
+
+class RawSettingsListSchema(BaseModel):
+    """List of raw settings"""
+    settings: List[RawSettingSchema]
+
+
+@router.get("/settings/raw", response_model=List[RawSettingSchema])
+async def get_raw_settings(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get all raw system settings as key-value pairs"""
+    result = await db.execute(select(SystemSetting))
+    settings = result.scalars().all()
+    return [RawSettingSchema(key=s.key, value=s.value) for s in settings]
+
+
+@router.get("/setting/{key}")
+async def get_single_setting(
+    key: str,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a single setting by key"""
+    value = await get_system_setting(db, key)
+    return {"key": key, "value": value}
+
+
+@router.put("/setting")
+async def set_single_setting(
+    data: RawSettingSchema,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a single setting by key"""
+    await set_setting(db, data.key, data.value)
+    await db.commit()
+    return {"key": data.key, "value": data.value}
+
+
+# =============================================================================
 # SYSTEM SETTINGS
 # =============================================================================
 
@@ -1413,6 +1462,7 @@ class DebugSettingsResponse(BaseModel):
     debug_token_resets: bool
     debug_document_queue: bool
     debug_rag: bool
+    debug_filter_chains: bool
     last_token_reset_timestamp: Optional[str] = None
     token_refill_interval_hours: int
 
@@ -1421,6 +1471,7 @@ class DebugSettingsUpdate(BaseModel):
     debug_token_resets: Optional[bool] = None
     debug_document_queue: Optional[bool] = None
     debug_rag: Optional[bool] = None
+    debug_filter_chains: Optional[bool] = None
 
 
 @router.get("/debug-settings", response_model=DebugSettingsResponse)
@@ -1432,6 +1483,7 @@ async def get_debug_settings(
     debug_token_resets = await get_system_setting(db, "debug_token_resets") == "true"
     debug_document_queue = await get_system_setting(db, "debug_document_queue") == "true"
     debug_rag = await get_system_setting(db, "debug_rag") == "true"
+    debug_filter_chains = await get_system_setting(db, "debug_filter_chains") == "true"
     last_token_reset = await get_system_setting(db, "last_token_reset_timestamp")
     refill_hours = await get_system_setting_int(db, "token_refill_interval_hours")
     
@@ -1439,6 +1491,7 @@ async def get_debug_settings(
         debug_token_resets=debug_token_resets,
         debug_document_queue=debug_document_queue,
         debug_rag=debug_rag,
+        debug_filter_chains=debug_filter_chains,
         last_token_reset_timestamp=last_token_reset if last_token_reset else None,
         token_refill_interval_hours=refill_hours,
     )
@@ -1457,6 +1510,8 @@ async def update_debug_settings(
         await set_setting(db, "debug_document_queue", "true" if data.debug_document_queue else "false")
     if data.debug_rag is not None:
         await set_setting(db, "debug_rag", "true" if data.debug_rag else "false")
+    if data.debug_filter_chains is not None:
+        await set_setting(db, "debug_filter_chains", "true" if data.debug_filter_chains else "false")
     
     await db.commit()
     

@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.38"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.39"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -192,6 +192,42 @@ def create_stream_chunk(message_id, content, chat_id?) -> dict
 def create_stream_end(message_id, chat_id, input_tokens, output_tokens, parent_id?) -> dict
 def create_stream_error(message_id, error) -> dict
 def create_error(message, code?) -> dict
+```
+
+### app/services/websocket.py (UPDATED NC-0.6.39)
+
+```python
+class StreamingHandler:
+    """Handler for LLM streaming responses over WebSocket"""
+    
+    def __init__(self, manager: WebSocketManager, connection: Connection)
+    
+    def set_streaming_task(self, task: asyncio.Task)
+        # Set the current streaming task for cancellation
+    
+    def set_active_stream(self, stream: Any)
+        # Set the active LLM stream for direct cancellation
+    
+    async def request_stop(self)
+        # Request to stop the current stream - AGGRESSIVE STOP (NC-0.6.39)
+        # 1. Sets _stop_requested flag
+        # 2. Closes httpx response via aclose()
+        # 3. Closes stream via close()
+        # 4. Closes underlying HTTP client if accessible
+        # 5. Cancels streaming task as backup
+        # 6. Clears stream reference
+    
+    def is_stop_requested(self) -> bool
+        # Check if stop has been requested
+    
+    def reset_stop(self)
+        # Reset the stop flag for new stream
+    
+    async def start_stream(self, message_id: str, chat_id: str)
+    async def add_content(self, content: str, force_flush: bool = False)
+    async def flush_buffer(self)
+    async def end_stream(self, input_tokens: int = 0, output_tokens: int = 0, parent_id: str = None)
+    async def send_error(self, error: str, message_id: str = None)
 ```
 
 ### app/services/token_manager.py (NEW)
@@ -552,6 +588,37 @@ class AssistantConversation(Base):
 
 ## Frontend Signatures
 
+### frontend/src/components/FlowEditor.tsx (NEW NC-0.6.41)
+
+Visual node-based filter chain editor using React Flow (@xyflow/react).
+
+```typescript
+interface FlowEditorProps {
+  definition: FilterChainDefinition;
+  onChange: (definition: FilterChainDefinition) => void;
+  availableTools?: Array<{ value: string; label: string; category: string }>;
+  filterChains?: Array<{ id: string; name: string }>;
+}
+
+// Custom node types:
+// - StepNode: Configurable step with type-specific config panel
+// - StartNode: Entry point for the flow
+
+// Step type categories:
+// - AI: to_llm, query
+// - Tools: to_tool
+// - Flow: go_to_llm, filter_complete, stop, block
+// - Data: set_var, set_array, context_insert, modify
+// - Logic: compare, call_chain
+
+// Features:
+// - Drag-and-drop node palette
+// - Click to expand/configure nodes
+// - Visual edge connections for jumps
+// - Supports all filter chain step types
+// - Real-time definition updates via onChange
+```
+
 ### frontend/src/stores/chat/types.ts (NEW)
 
 ```typescript
@@ -794,12 +861,111 @@ class DocumentProcessor:
 
 ---
 
-## Tool Registry (app/tools/registry.py)
+## Chats API (app/api/routes/chats.py)
 
-### Session File Storage (NEW NC-0.6.38)
+### POST /chats/{chat_id}/uploaded-files (NEW NC-0.6.39)
+
+Save an individual uploaded file to the database for persistence across page refreshes.
 
 ```python
-# Session-based file store for uploaded files
+@router.post("/{chat_id}/uploaded-files")
+async def save_uploaded_file(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    filename: str = Body(...),
+    content: str = Body(...),
+    language: str = Body(None),
+    signatures: list = Body(default=[]),
+) -> dict:
+    # Returns: { success: True, filename }
+    # Updates existing file if already present
+    # Stores in uploaded_files table (archive_name=None for individual uploads)
+```
+
+### GET /chats/{chat_id}/uploaded-files
+
+Get all uploaded files for a chat (for restoring artifacts after page refresh).
+
+```python
+@router.get("/{chat_id}/uploaded-files")
+async def get_chat_uploaded_files(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    # Returns: { artifacts: [...], archive: {...} | null }
+```
+
+---
+
+## WebSocket Routes (app/api/routes/websocket.py) (UPDATED NC-0.6.40)
+
+### Chat Title Generation (SINGLE PATH)
+
+```python
+async def generate_chat_title(first_message: str, db: AsyncSession) -> str:
+    # THE ONLY title generation function - no other paths
+    # Creates a FRESH LLMService instance to avoid custom assistant pollution
+    # Uses admin-configured title_generation_prompt
+    # Falls back to first 50 chars of message on error
+    # REST API (chats.py) does NOT generate titles - relies on this
+```
+
+### Knowledge Store Search Architecture (NC-0.6.40)
+
+```python
+# In handle_chat_message() - order matters:
+
+# 1. ALWAYS search global knowledge stores (regardless of RAG settings)
+global_results, global_store_names = await rag_service.search_global_stores(db, content)
+# Injected as "AUTHORITATIVE KNOWLEDGE BASE" with trusted_knowledge tags
+
+# 2. Check if chat is associated with a Custom GPT (assistant)
+assistant_conv = await db.execute(
+    select(AssistantConversation).where(AssistantConversation.chat_id == chat_id)
+)
+if assistant_conv:
+    # Search ONLY that assistant's knowledge stores
+    context = await rag_service.get_knowledge_store_context(
+        knowledge_store_ids=assistant_ks_ids,
+        bypass_access_check=True  # Allow access through public GPT
+    )
+elif enable_rag:
+    # 3. Search user's unitemized documents (NOT in any KB)
+    context = await rag_service.get_context_for_query(...)
+```
+
+**Search Priority:**
+1. Global KBs → Always searched, injected as authoritative
+2. Custom GPT KBs → Only when using that GPT, bypasses access check
+3. User documents → Only when `enable_rag=true` AND no Custom GPT active
+
+---
+
+## Chats API (app/api/routes/chats.py) (UPDATED NC-0.6.40)
+
+### send_message - KB Search (mirrors websocket.py)
+
+```python
+@router.post("/{chat_id}/messages")
+async def send_message(...):
+    # Same 3-tier KB search as websocket.py:
+    # 1. search_global_stores() - always
+    # 2. get_knowledge_store_context() - if Custom GPT active
+    # 3. get_context_for_query() - if enable_rag and no Custom GPT
+    
+    # NO title generation - handled by websocket.py
+```
+
+---
+
+## Tool Registry (app/tools/registry.py)
+
+### Session File Storage (UPDATED NC-0.6.39)
+
+```python
+# Session-based file store with database fallback for uploaded files
 # Key: chat_id, Value: Dict[filename, content]
 _session_files: Dict[str, Dict[str, str]]
 
@@ -807,32 +973,44 @@ def store_session_file(chat_id: str, filename: str, content: str)
 def get_session_file(chat_id: str, filename: str) -> Optional[str]
 def get_session_files(chat_id: str) -> Dict[str, str]
 def clear_session_files(chat_id: str)
+
+# Database fallback functions (NEW NC-0.6.39)
+async def get_session_file_with_db_fallback(chat_id: str, filename: str, db) -> Optional[str]
+    # Try in-memory first, then query uploaded_files table
+    # Caches DB results to session for future access
+
+async def get_session_files_with_db_fallback(chat_id: str, db) -> Dict[str, str]
+    # Merge in-memory files with database files
+    # Survives server restarts
 ```
 
-### File Viewing Tools (NEW NC-0.6.38)
+### File Viewing Tools (UPDATED NC-0.6.39)
 
 ```python
 class FileViewingTools:
     @staticmethod
     async def view_file_lines(arguments: Dict, context: Dict) -> Dict
         # View specific lines from an uploaded file
+        # Now uses DB fallback if file not in memory
         # Args: filename (str), start_line (int), end_line (int)
         # Returns: { filename, total_lines, showing, content }
 
     @staticmethod
     async def search_in_file(arguments: Dict, context: Dict) -> Dict
         # Search for pattern in file with context
+        # Now uses DB fallback if file not in memory
         # Args: filename (str), pattern (str), context_lines (int)
         # Returns: { filename, pattern, total_matches, results[] }
 
     @staticmethod
     async def list_uploaded_files(arguments: Dict, context: Dict) -> Dict
-        # List all uploaded files in session
+        # List all uploaded files in session and database
         # Returns: { file_count, files[{filename, lines, size, preview}] }
 
     @staticmethod
     async def view_signature(arguments: Dict, context: Dict) -> Dict
         # View code around a function/class signature
+        # Now uses DB fallback if file not in memory
         # Args: filename (str), signature_name (str), lines_after (int)
         # Returns: { filename, signature, start_line, content }
 ```
@@ -901,9 +1079,12 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.38**
+**NC-0.6.41**
 
 Changes:
+- NC-0.6.41: Visual node-based filter chain editor (FlowEditor.tsx), raw settings API endpoints (/admin/settings/raw, /admin/setting)
+- NC-0.6.40: Global KB authoritative injection, unified KB search (Global always, Custom GPT only when active), single-path title generation (websocket.py only)
+- NC-0.6.39: Aggressive stop generation (closes HTTP connection), file persistence to database, DB fallback for LLM file tools, remove KB upload rate limit
 - NC-0.6.38: File upload to artifacts, partial file viewing tools (view_file_lines, search_in_file, view_signature), removed 100K char filter limit
 - NC-0.6.37: LLM confirmation for image generation (safe fallback on error - returns False, not regex)
 - NC-0.6.36: API keys table with proper migration, parent_id branching fixes

@@ -10,7 +10,7 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.38
+**Current Version:** NC-0.6.41
 
 ---
 
@@ -95,6 +95,7 @@ frontend/src/
 ├── lib/
 │   ├── api.ts               # API client
 │   ├── artifacts.ts         # Artifact extraction
+│   ├── fileProcessor.ts     # File upload processing (NEW NC-0.6.38)
 │   ├── formatters.ts        # Shared formatting utilities (NEW)
 │   └── wsTypes.ts           # WebSocket type guards (NEW)
 ├── stores/
@@ -191,6 +192,65 @@ Enhanced zip extraction security:
 - Symlink detection
 - Size limits (500MB uncompressed, 10000 files)
 - Path depth limits (50 levels max)
+
+### Global Knowledge Stores (NC-0.6.40)
+
+Admins can mark knowledge stores as "global" - these are automatically searched on every chat message.
+
+**Authoritative Injection**: When matches are found in global stores, they are injected into the system prompt as **definitive and trusted** information:
+
+```
+## AUTHORITATIVE KNOWLEDGE BASE
+
+<trusted_knowledge source="{store names}">
+IMPORTANT: The following information comes from the organization's verified 
+global knowledge base. This content is DEFINITIVE and TRUSTED - treat it as 
+the authoritative source of truth for the topics it covers. When this 
+knowledge conflicts with your general training, defer to this information.
+
+{matched content with source and confidence}
+</trusted_knowledge>
+
+When answering questions related to the above topics, you MUST use this 
+authoritative information as your primary source.
+```
+
+**Configuration** (Admin Panel → Knowledge Stores → Set Global):
+- `is_global`: Enable/disable global search
+- `global_min_score`: Minimum relevance threshold (default 0.7)
+- `global_max_results`: Max results per store (default 3)
+
+### Knowledge Store Search Architecture (NC-0.6.40)
+
+Knowledge stores are searched based on context:
+
+| Search Type | When Triggered | Access Check |
+|-------------|----------------|--------------|
+| Global KB | Always (every message) | None - public |
+| Custom GPT KB | When using that Custom GPT | Bypassed via assistant |
+| User Documents | When `enable_rag=true` and no Custom GPT | User ownership |
+
+**Important Rules:**
+- Global KBs are searched on EVERY message, regardless of Custom GPT or RAG settings
+- Custom GPT KBs are ONLY searched when using that specific Custom GPT
+- User's unitemized documents are searched ONLY when `enable_rag=true` AND no Custom GPT is active
+- Both REST API (`chats.py`) and WebSocket (`websocket.py`) follow the same search logic
+
+### Chat Title Generation (NC-0.6.40)
+
+**Single Path**: Title generation happens ONLY in `websocket.py` via `generate_chat_title()`.
+
+**Location**: `websocket.py` → `generate_chat_title(first_message, db)`
+
+**Flow**:
+1. New chat created with title "New Chat"
+2. After first message streamed via WebSocket, title is generated via fresh LLM instance
+3. Frontend notified via `chat_updated` WebSocket event
+
+**Key Design Decisions:**
+- Uses a **fresh LLMService instance** (not the chat's LLM) to prevent Custom GPT configuration pollution
+- REST API (`chats.py`) does NOT generate titles - relies on WebSocket path
+- Single code path ensures consistent, high-quality titles
 
 ---
 
@@ -425,6 +485,18 @@ Code files automatically have signatures extracted:
 
 Admin-configurable message processing flows (Admin → Filter Chains tab).
 
+### Visual Editor (NC-0.6.41)
+
+Filter chains now use a **visual node-based editor** similar to n8n:
+
+- **Drag-and-drop nodes** from the palette (left side)
+- **Click nodes** to expand and configure
+- **Connect nodes** by dragging from output handles
+- **Jump connections** shown as animated edges
+- **JSON mode** toggle for advanced editing
+
+The editor uses React Flow and supports all step types with intuitive configuration panels.
+
 ### Step Types
 - `to_llm`: Ask LLM a question
 - `query`: Generate search query
@@ -475,6 +547,9 @@ Admin-configurable message processing flows (Admin → Filter Chains tab).
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.41 | 2025-12-17 | Visual node-based filter chain editor (n8n-style), raw settings API endpoints |
+| NC-0.6.40 | 2025-12-16 | Global KB authoritative injection, unified KB search architecture (Global always, Custom GPT only when active), single-path title generation |
+| NC-0.6.39 | 2025-12-16 | Aggressive stop generation (closes LLM connection), file persistence to DB, DB fallback for LLM tools, remove KB upload rate limit |
 | NC-0.6.38 | 2025-12-15 | File upload to artifacts, partial file viewing tools, remove 100K char filter limit |
 | NC-0.6.37 | 2025-12-13 | LLM confirmation for image generation (safe fallback on error) |
 | NC-0.6.36 | 2025-12-13 | API keys table migration, parent_id branching fix, shared chat "Show All" toggle, TTS ROCm MIOPEN_FIND_MODE |
@@ -549,11 +624,12 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.38**
+Current: **NC-0.6.40**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 
 Key tables added/modified:
+- `uploaded_files` - Persisted file uploads (NC-0.6.38/39)
 - `api_keys` - User-generated API keys for programmatic access (NC-0.6.36)
 
 ---

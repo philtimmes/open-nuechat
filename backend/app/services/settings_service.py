@@ -33,6 +33,7 @@ SETTING_DEFAULTS = {
     "debug_token_resets": "false",  # Log detailed token info on reset checks
     "debug_document_queue": "false",  # Log document queue processing
     "debug_rag": "false",  # Log all RAG queries, results, and context retrieval
+    "debug_filter_chains": "false",  # Log filter chain execution with full input/output
     
     # OAuth - Google
     "google_client_id": config_settings.GOOGLE_CLIENT_ID or "",

@@ -84,7 +84,7 @@ async def list_models(
     # 2. Get user's custom assistants
     result = await db.execute(
         select(CustomAssistant).where(
-            CustomAssistant.user_id == user.id,
+            CustomAssistant.owner_id == user.id,
             CustomAssistant.is_active == True,
         )
     )
@@ -174,7 +174,7 @@ async def get_model(
             raise HTTPException(status_code=404, detail="Model not found")
         
         # Check access
-        is_owner = assistant.user_id == user.id
+        is_owner = assistant.owner_id == user.id
         is_public = assistant.is_public
         
         # Check subscription

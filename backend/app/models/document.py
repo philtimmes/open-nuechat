@@ -8,7 +8,7 @@ Contains:
 - KnowledgeStoreShare: Sharing permissions
 """
 from sqlalchemy import (
-    Column, String, Integer, Boolean, DateTime, Text, 
+    Column, String, Integer, Boolean, DateTime, Text, Float,
     ForeignKey, Enum, JSON, LargeBinary, Index
 )
 from sqlalchemy.orm import relationship
@@ -93,6 +93,7 @@ class KnowledgeStore(Base):
     - Configurable embedding settings
     - Usage statistics
     - Public/discoverable visibility options
+    - Global stores auto-searched on every query
     """
     __tablename__ = "knowledge_stores"
     
@@ -107,6 +108,11 @@ class KnowledgeStore(Base):
     # Visibility
     is_public = Column(Boolean, default=False)  # Anyone can view/use
     is_discoverable = Column(Boolean, default=False)  # Shows in public directory
+    is_global = Column(Boolean, default=False)  # Auto-searched on every query (admin only)
+    
+    # Global store settings
+    global_min_score = Column(Float, default=0.7)  # Minimum relevance score to include results
+    global_max_results = Column(Integer, default=3)  # Max results to include from global search
     
     # Stats
     document_count = Column(Integer, default=0)
@@ -129,6 +135,7 @@ class KnowledgeStore(Base):
     __table_args__ = (
         Index("idx_knowledge_store_owner", "owner_id"),
         Index("idx_knowledge_store_public", "is_public", "is_discoverable"),
+        Index("idx_knowledge_store_global", "is_global"),
     )
 
 

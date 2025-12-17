@@ -120,11 +120,18 @@ class ProceduralMemoryService:
         """Lazy load the embedding model."""
         if cls._embedding_model is None:
             try:
+                import os
+                # Prevent accelerate from using device_map="auto" which causes meta tensor issues
+                os.environ["ACCELERATE_USE_CPU"] = "1"
+                
                 from sentence_transformers import SentenceTransformer
-                cls._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-                logger.info("Loaded embedding model for procedural memory")
+                # Use full HuggingFace repo path and device="cpu" to avoid meta tensor issues
+                cls._embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device="cpu")
+                logger.info("Loaded embedding model for procedural memory (on CPU)")
             except ImportError:
                 logger.warning("sentence-transformers not available, skill retrieval will use keyword matching")
+            except Exception as e:
+                logger.error(f"Failed to load embedding model: {e}")
         return cls._embedding_model
     
     @classmethod

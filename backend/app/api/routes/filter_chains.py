@@ -48,6 +48,7 @@ class StepConfig(BaseModel):
     source_var: Optional[str] = None
     target: Optional[str] = None
     include_context: Optional[bool] = None
+    include_vars: Optional[List[str]] = None  # For go_to_llm: variables to include in message
     action: Optional[str] = None
     chain_name: Optional[str] = None
     var_name: Optional[str] = None
@@ -62,6 +63,8 @@ class StepConfig(BaseModel):
     reason: Optional[str] = None
     message: Optional[str] = None
     level: Optional[str] = None
+    # Branch step outputs
+    outputs: Optional[List[Dict[str, Any]]] = None  # For branch step: [{id, label, condition?, jump_to?}]
 
 
 class Comparison(BaseModel):
@@ -90,6 +93,12 @@ class ConditionalConfig(BaseModel):
     on_false: List["StepDefinition"] = []
 
 
+class StepPosition(BaseModel):
+    """Position of a step in the visual editor."""
+    x: float
+    y: float
+
+
 class StepDefinition(BaseModel):
     """Definition of a single step."""
     id: Optional[str] = None
@@ -101,6 +110,10 @@ class StepDefinition(BaseModel):
     jump_to_step: Optional[str] = None
     conditional: Optional[ConditionalConfig] = None
     loop: Optional[LoopConfig] = None
+    position: Optional[StepPosition] = None  # Visual editor position
+    # Step-level context options (applies to any step type)
+    add_to_context: bool = False  # Add step output to context for main LLM
+    context_label: Optional[str] = None  # Label for context entry
 
 
 # Allow recursive definition
@@ -296,9 +309,19 @@ STEP_TYPE_SCHEMA = {
                 {"value": "<", "label": "less than"},
                 {"value": ">=", "label": "greater or equal"},
                 {"value": "<=", "label": "less or equal"},
+                {"value": "is_empty", "label": "is empty"},
+                {"value": "is_not_empty", "label": "is not empty"},
             ]},
             {"name": "right", "type": "text", "label": "Right Value", "required": True},
             {"name": "output_var", "type": "text", "label": "Store Result As", "default": "CompareResult"},
+        ],
+    },
+    "branch": {
+        "label": "Branch",
+        "description": "Conditional routing with multiple outputs",
+        "category": "logic",
+        "fields": [
+            {"name": "outputs", "type": "branch_outputs", "label": "Outputs", "description": "Each output can have a condition. First match wins. Last output is 'else'."},
         ],
     },
     "call_chain": {
