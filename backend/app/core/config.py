@@ -124,13 +124,16 @@ class Settings(BaseSettings):
     LLM_API_BASE_URL: str = "http://localhost:8080/v1"
     LLM_API_KEY: str = "not-needed"
     LLM_MODEL: str = "default"
-    LLM_TIMEOUT: int = 120
+    LLM_TIMEOUT: int = 300  # 5 minutes for large context requests
     LLM_MAX_TOKENS: int = 4096
     LLM_TEMPERATURE: float = 0.7
     LLM_STREAM_DEFAULT: bool = True
     
     # Default system prompt for new chats
     DEFAULT_SYSTEM_PROMPT: str = "You are a helpful AI assistant. Be concise, accurate, and helpful."
+    
+    # All models prompt (appended to ALL system prompts including Custom GPTs)
+    ALL_MODELS_PROMPT: str = ""
     
     # Title generation prompt (used to auto-generate chat titles)
     TITLE_GENERATION_PROMPT: str = "Generate a short, descriptive title (max 6 words) for a conversation that starts with this message. Return ONLY the title, no quotes or explanation:"

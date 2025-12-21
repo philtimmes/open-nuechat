@@ -49,6 +49,7 @@ class RateLimitToLLM(OverrideToLLM):
     async def process(self, content: str, context: FilterContext) -> FilterResult:
         window_seconds = self.get_config("window_seconds", 60)
         max_requests = self.get_config("max_requests", 20)
+        wait_time = 0
         
         async with self._lock:
             now = datetime.now(timezone.utc)
@@ -57,12 +58,23 @@ class RateLimitToLLM(OverrideToLLM):
             # Remove old requests outside the window
             cutoff = now.timestamp() - window_seconds
             user_requests = [r for r in user_requests if r.timestamp() > cutoff]
+            self._requests[context.user_id] = user_requests
             
             if len(user_requests) >= max_requests:
-                return FilterResult.block(
-                    f"Rate limit exceeded: {max_requests} requests per {window_seconds}s"
-                )
-            
+                # Calculate wait time until oldest request expires
+                oldest = min(r.timestamp() for r in user_requests)
+                wait_time = (oldest + window_seconds) - now.timestamp() + 0.1
+        
+        # Wait outside the lock if needed
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+        
+        # Record this request
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            user_requests = self._requests[context.user_id]
+            cutoff = now.timestamp() - window_seconds
+            user_requests = [r for r in user_requests if r.timestamp() > cutoff]
             user_requests.append(now)
             self._requests[context.user_id] = user_requests
         

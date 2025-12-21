@@ -10,7 +10,164 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.41
+**Current Version:** NC-0.6.51
+
+---
+
+## Recent Changes (NC-0.6.51)
+
+### Chat Knowledge Base Assistant Context Filtering
+- **Fixed**: Chat Knowledge was pulling results from ALL chats regardless of which assistant was used
+- **Problem**: When using Assistant B, knowledge from chats conducted with Assistant A was being returned
+- **Solution**: 
+  - Store `assistant_id` and `assistant_name` in chunk metadata when indexing chats
+  - Filter chat knowledge search results by current assistant context
+  - Chats without an assistant only match queries without an assistant
+  - Chats with Assistant X only match queries with Assistant X
+- **Files changed**:
+  - `user_settings.py`: Added assistant_id to chunk metadata in both bulk and incremental indexing
+  - `rag.py`: New `get_chat_knowledge_context()` method with assistant filtering
+  - `websocket.py`: Updated chat KB search to use filtered method
+- **Note**: Users should re-index their chat knowledge to populate assistant metadata for existing chats
+
+---
+
+## Recent Changes (NC-0.6.50)
+
+### RAG Embedding Model Loading Fix
+- Fixed "meta tensor" errors from `accelerate` library
+- Root cause: `low_cpu_mem_usage=True` creates placeholder tensors that can't be copied
+- Solution: Set `low_cpu_mem_usage=False` in all model loading:
+  - `rag.py`: Multiple loading strategies with fallbacks
+  - `procedural_memory.py`: Reuses RAGService model when available
+  - `stt.py`: Whisper model loading
+- Added environment variable workarounds (`ACCELERATE_USE_CPU=1`, etc.)
+
+### RAG Admin Endpoints
+- `GET /api/admin/rag/status` - Check model loading status
+- `POST /api/admin/rag/reset` - Reset failed model state and retry loading
+- Useful for debugging model loading issues without container restart
+
+### Artifact Streaming Detection
+- Added patterns to detect completed artifacts during streaming:
+  - XML artifacts: `<artifact title="...">...</artifact>`
+  - Equals format: `<artifact=filename>...</artifact>`
+  - Filename tags: `<Menu.cpp>...</Menu.cpp>`
+  - Code fences: `filename.ts\n```typescript...```
+- Artifacts are **tracked** but don't interrupt the stream (avoids race conditions)
+
+### Tool Result Notifications
+- When LLM uses tools (search_replace, find, request_file), the result includes:
+  ```
+  [FILES SAVED] The following files were saved during your response: file1.ts, file2.tsx
+  You can reference these files in your continued response.
+  ```
+- Gives LLM context about what files exist when editing them
+
+### Code Summary API Path Fix
+- Fixed frontend calling `/code-summary` when backend uses `/summary`
+- Corrected in `codeSummarySlice.ts`
+
+---
+
+## Recent Changes (NC-0.6.49)
+
+### Streaming Timeout Fix
+- Changed `AsyncOpenAI` timeout from simple int to `httpx.Timeout`
+- `read` timeout is per-chunk, so streams don't timeout while tokens flow
+- Affects: `llm.py`, `vision_router.py`
+
+### Chat Model Persistence on Reload
+- Now fetches individual chat via `GET /chats/{id}` on page load
+- Ensures model/assistant_id are correct even if not in paginated list
+- Updates chat in list with fresh data if present
+
+### New Chat Behavior
+- Now creates chat immediately with last used model
+- Falls back to default model if no current chat
+- Supports Custom GPTs (`gpt:` prefix) as last used model
+
+### Model Switching Fix
+- Can now switch from Custom GPT to regular model (clears `assistant_id`)
+- Backend clears `assistant_id`, `assistant_name`, and `AssistantConversation` link
+- UI correctly highlights only the active model/GPT (not both)
+
+### All Models Prompt
+- New admin setting: "All Models Prompt"
+- Appended to ALL system prompts including Custom GPT system prompts
+- Allows universal instructions (e.g., artifact format, feature awareness) to apply everywhere
+- Located in Admin → System Settings → Prompts
+
+### Stop Button Fix (Major)
+- **Root cause**: Streaming blocked the WebSocket receive loop, so `stop_generation` couldn't be processed
+- **Fix**: Run `handle_chat_message` and `handle_regenerate_message` in background tasks via `asyncio.create_task()`
+- Main loop now stays free to receive `stop_generation` immediately
+- `request_stop()` now cancels task FIRST, then closes stream with timeouts
+- Added error handling for cancelled tasks
+
+### Chat Deletion Removes Knowledge Index
+- Deleting a chat now removes its entry from the user's chat knowledge store
+- Uses `RAGService.delete_document()` to remove document and rebuild FAISS index
+- Deleting all chats removes the entire chat knowledge store
+- Prevents stale/orphaned data in search indexes
+
+### Artifact Extraction Improvements
+- Pattern 4b now handles text before `<artifact=file>` tag (e.g., `File main.cpp // comment <artifact=src/main.cpp>`)
+- End-of-content extraction for complete code fences without closing tags
+- Prefix text preserved in output placeholder
+
+### Model Selection Fixes
+- `newChatModel` initializes empty, syncs with `defaultModel` when loaded
+- New Chat navigates to `/chat` (empty state) instead of creating chat immediately
+- Chat switching clears all state via `setCurrentChat(null)`
+
+---
+
+## Recent Changes (NC-0.6.48)
+
+### Multi-Model / Hybrid Routing
+- New `llm_providers` table for configuring multiple LLM backends
+- Set one model as **Default** (text/reasoning) and another as **Vision Default** (image understanding)
+- **Hybrid routing**: When images are sent and primary model isn't multimodal:
+  1. Vision model describes images
+  2. Descriptions are injected into context
+  3. Primary model responds with full context
+- Admin UI: LLM tab now shows provider list with add/edit/delete/test
+- Legacy LLM settings preserved as fallback in collapsible section
+
+### Vision Router Service (`vision_router.py`)
+- Detects images in current turn attachments
+- Routes to vision model for descriptions
+- Caches descriptions in message metadata
+- Falls back to stripping images if no MM capability (Option A)
+
+---
+
+## Recent Changes (NC-0.6.47)
+
+### Agent Memory System
+- Automatically archives older conversation history to `{AgentNNNN}.md` files when context exceeds 50% of model limit
+- Agent files contain 50-line summary headers with searchable keywords
+- Files are automatically searched when LLM needs historical context
+- Hidden from Artifacts panel and excluded from zip downloads
+- Deleted automatically when chat is deleted (cascade)
+
+### Large Attachment Processing
+- Files > 100KB or total attachments > 200KB are stored as searchable artifacts
+- LLM receives compact manifest with:
+  - File list with sizes and languages
+  - Code signatures (functions, classes with line numbers)
+  - Instructions to use `<request_file path="..."/>` for full content
+- Prevents context window overflow while maintaining full file access
+
+### Export Data Feature
+- Settings → Preferences → Export All Data button
+- Downloads zip with all chats, messages, and knowledge store metadata
+
+### Bug Fixes
+- Fixed `MultipleResultsFound` errors in file queries
+- Fixed missing `update` import in LLM service
+- Increased default LLM timeout to 300 seconds
 
 ---
 
@@ -547,6 +704,14 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.51 | 2025-12-20 | Chat Knowledge assistant context filtering - prevents knowledge leakage between different GPTs |
+| NC-0.6.50 | 2025-12-19 | RAG model loading fix (meta tensor errors), RAG admin endpoints, artifact streaming detection, tool result notifications |
+| NC-0.6.49 | 2025-12-18 | Stop button fix, chat deletion removes knowledge index, streaming timeout, All Models Prompt |
+| NC-0.6.46 | 2025-12-17 | Filter chain skip_if_rag_hit option, RAG search before filter chains (Global → Chat History → Assistant KB) |
+| NC-0.6.45 | 2025-12-17 | Chat Knowledge Base feature - index all chats into personal knowledge store, green dot indicators |
+| NC-0.6.44 | 2025-12-17 | Chat search searches message content, infinite scroll pagination, import chats sorted newest-to-oldest |
+| NC-0.6.43 | 2025-12-17 | Grok chat import parser fix for nested response structure |
+| NC-0.6.42 | 2025-12-17 | Anonymous sharing option for shared chats (hide owner name) |
 | NC-0.6.41 | 2025-12-17 | Visual node-based filter chain editor (n8n-style), raw settings API endpoints |
 | NC-0.6.40 | 2025-12-16 | Global KB authoritative injection, unified KB search architecture (Global always, Custom GPT only when active), single-path title generation |
 | NC-0.6.39 | 2025-12-16 | Aggressive stop generation (closes LLM connection), file persistence to DB, DB fallback for LLM tools, remove KB upload rate limit |
@@ -624,11 +789,16 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.40**
+Current: **NC-0.6.51**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 
 Key tables added/modified:
+- NC-0.6.50: No schema changes (RAG model loading fix, frontend streaming improvements)
+- NC-0.6.49: No schema changes (timeout/frontend fixes only)
+- `filter_chains` - Added skip_if_rag_hit flag (NC-0.6.46)
+- `users` - Added chat knowledge fields (NC-0.6.45)
+- `chats` - Added is_knowledge_indexed flag (NC-0.6.45)
 - `uploaded_files` - Persisted file uploads (NC-0.6.38/39)
 - `api_keys` - User-generated API keys for programmatic access (NC-0.6.36)
 

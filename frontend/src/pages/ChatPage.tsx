@@ -641,16 +641,26 @@ export default function ChatPage() {
     setZipUploadResult,
   } = useChatStore();
   
+  // Helper to check if a file is an agent memory file (hidden from user)
+  const isAgentFile = (filename: string | undefined) => {
+    if (!filename) return false;
+    return filename.startsWith('{Agent') && filename.endsWith('}.md');
+  };
+  
   // Combine saved artifacts with streaming and uploaded artifacts for real-time updates
+  // Filter out agent memory files - they're internal and invisible to user
   const artifacts = useMemo(() => {
     const combined = [...savedArtifacts, ...streamingArtifacts, ...uploadedArtifacts];
+    const filtered = combined.filter(a => !isAgentFile(a.filename));
     console.log('[ChatPage] Combined artifacts:', {
       saved: savedArtifacts.length,
       streaming: streamingArtifacts.length,
       uploaded: uploadedArtifacts.length,
       total: combined.length,
+      visible: filtered.length,
+      agentFilesHidden: combined.length - filtered.length,
     });
-    return combined;
+    return filtered;
   }, [savedArtifacts, streamingArtifacts, uploadedArtifacts]);
   
   // Debug: log showArtifacts value on each render
@@ -670,7 +680,14 @@ export default function ChatPage() {
   const { models, subscribedAssistants, defaultModel, getDisplayName: getModelDisplayName } = useModelsStore();
   
   // State for new chat model selection (before chat is created)
-  const [newChatModel, setNewChatModel] = useState<string>(defaultModel);
+  const [newChatModel, setNewChatModel] = useState<string>('');
+  
+  // Sync newChatModel with defaultModel when it loads (if user hasn't selected one)
+  useEffect(() => {
+    if (!newChatModel && defaultModel) {
+      setNewChatModel(defaultModel);
+    }
+  }, [defaultModel, newChatModel]);
   
   // Zip upload state
   const [isUploadingZip, setIsUploadingZip] = useState(false);
@@ -785,15 +802,49 @@ export default function ChatPage() {
   
   // Update chat model
   const handleModelChange = async (modelId: string) => {
-    if (!currentChat || currentChat.model === modelId) {
+    if (!currentChat) {
       setShowModelSelector(false);
       return;
     }
     
+    // Check if selecting a Custom GPT (gpt: prefix from assistant.id)
+    const isSelectingGPT = modelId.startsWith('gpt:');
+    const currentlyUsingGPT = !!currentChat.assistant_id;
+    
+    // Skip if already using the same model/GPT
+    if (isSelectingGPT) {
+      // Selecting a Custom GPT - check if already using this GPT
+      const selectedAssistantId = modelId.substring(4);
+      if (currentChat.assistant_id === selectedAssistantId) {
+        setShowModelSelector(false);
+        return;
+      }
+    } else {
+      // Selecting a regular model - skip only if same model AND not using a GPT
+      if (currentChat.model === modelId && !currentlyUsingGPT) {
+        setShowModelSelector(false);
+        return;
+      }
+    }
+    
     try {
       await chatApi.update(currentChat.id, { model: modelId });
-      // Update local state
-      setCurrentChat({ ...currentChat, model: modelId });
+      
+      // Update local state - clear assistant fields if switching to regular model
+      if (isSelectingGPT) {
+        // Switching to a GPT - the backend will set assistant_id/name
+        // Refetch to get the updated chat
+        const response = await chatApi.get(currentChat.id);
+        setCurrentChat(response.data);
+      } else {
+        // Switching to regular model - clear assistant fields
+        setCurrentChat({ 
+          ...currentChat, 
+          model: modelId,
+          assistant_id: undefined,
+          assistant_name: undefined,
+        });
+      }
       // Refetch chats to update sidebar
       fetchChats();
     } catch (err) {
@@ -814,13 +865,25 @@ export default function ChatPage() {
   // Load chat when URL changes
   useEffect(() => {
     if (chatId) {
-      const { chats } = useChatStore.getState();
-      const safeChats = Array.isArray(chats) ? chats : [];
-      const chat = safeChats.find((c) => c.id === chatId);
-      if (chat) {
-        setCurrentChat(chat);
-      } else {
-        // Fetch chats if not loaded
+      // Fetch the individual chat directly to ensure we have the correct model/assistant_id
+      // The paginated chats list might not include this chat or might be stale
+      chatApi.get(chatId).then((response) => {
+        const chat = response.data;
+        if (chat) {
+          setCurrentChat(chat);
+          // Also update the chat in the chats list if present
+          const { chats } = useChatStore.getState();
+          const chatIndex = chats.findIndex((c) => c.id === chatId);
+          if (chatIndex >= 0) {
+            // Update the chat in the list with fresh data
+            const updatedChats = [...chats];
+            updatedChats[chatIndex] = chat;
+            useChatStore.setState({ chats: updatedChats });
+          }
+        }
+      }).catch((err) => {
+        console.error('Failed to fetch chat:', err);
+        // Fallback to paginated list
         fetchChats().then(() => {
           const refreshedChats = useChatStore.getState().chats;
           const safeRefreshed = Array.isArray(refreshedChats) ? refreshedChats : [];
@@ -829,7 +892,10 @@ export default function ChatPage() {
             setCurrentChat(foundChat);
           }
         });
-      }
+      });
+    } else {
+      // No chatId - clear everything for fresh start (New Chat)
+      setCurrentChat(null);
     }
   }, [chatId, setCurrentChat, fetchChats]);
   
@@ -991,13 +1057,20 @@ export default function ChatPage() {
     // Create new chat if none exists
     if (!targetChatId) {
       // Use selected model for new chat (newChatModel or default)
-      const newChat = await createChat(newChatModel || defaultModel);
+      const modelForNewChat = newChatModel || defaultModel;
+      console.log('[handleSendMessage] Creating new chat with model:', {
+        newChatModel,
+        defaultModel,
+        modelForNewChat,
+        isAssistant: modelForNewChat?.startsWith('gpt:'),
+      });
+      const newChat = await createChat(modelForNewChat);
       targetChatId = newChat.id;
       // Update URL without navigation
       window.history.pushState({}, '', `/chat/${newChat.id}`);
       // New chat has no parent - first message is root
       parentId = null;
-      console.log('[handleSendMessage] Created new chat:', targetChatId);
+      console.log('[handleSendMessage] Created new chat:', targetChatId, 'with assistant_id:', newChat.assistant_id);
     }
     
     // Pass the current leaf assistant ID as parent_id for linear conversation
@@ -1208,6 +1281,40 @@ export default function ChatPage() {
         uploadedArtifacts: uploadedArtifacts,
       }));
       
+      // Update code summary from zip signatures
+      if (result.signature_index && Object.keys(result.signature_index).length > 0) {
+        const { updateCodeSummary } = useChatStore.getState();
+        const now = new Date().toISOString();
+        const files = Object.entries(result.signature_index).map(([path, signatures]) => ({
+          path,
+          action: 'created' as const,
+          signatures: (signatures || []).map(sig => {
+            // Map CodeSignature kind to CodeSignatureEntry type
+            const typeMap: Record<string, 'function' | 'class' | 'method' | 'variable' | 'interface' | 'type' | 'endpoint'> = {
+              'function': 'function',
+              'class': 'class',
+              'method': 'method',
+              'variable': 'variable',
+              'interface': 'interface',
+              'type': 'type',
+              'struct': 'type',
+              'export': 'variable',
+              'import': 'variable',
+            };
+            return {
+              name: sig.name,
+              type: typeMap[sig.kind] || 'function',
+              signature: sig.signature || `${sig.kind} ${sig.name}`,
+              file: path,
+              line: sig.line,
+            };
+          }),
+          timestamp: now,
+        }));
+        updateCodeSummary(files, []);
+        console.log('Updated code summary from zip signatures:', files.length, 'files');
+      }
+      
       // Open artifacts panel if we have files
       if (result.artifacts.length > 0) {
         setShowArtifacts(true);
@@ -1243,6 +1350,7 @@ export default function ChatPage() {
   
   const handleDownloadAll = async () => {
     // Get only the latest version of each unique file
+    // Note: artifacts array already filters out agent memory files
     const latestArtifacts = getLatestArtifacts(artifacts);
     if (latestArtifacts.length === 0) {
       alert('No files to download');
@@ -1255,6 +1363,8 @@ export default function ChatPage() {
     
     for (const artifact of latestArtifacts) {
       const filename = artifact.filename || `${artifact.title.replace(/\s+/g, '_')}.txt`;
+      // Double-check: skip any agent memory files
+      if (isAgentFile(filename)) continue;
       zip.file(filename, artifact.content);
     }
     
@@ -1495,22 +1605,25 @@ export default function ChatPage() {
                       <div className="px-3 py-1.5 text-xs text-[var(--color-text-secondary)] uppercase tracking-wide">
                         Models
                       </div>
-                      {models.filter(model => model.id).map((model) => (
+                      {models.filter(model => model.id).map((model) => {
+                        // Only highlight if using this model AND not using a Custom GPT
+                        const isSelected = currentChat?.model === model.id && !currentChat?.assistant_id;
+                        return (
                         <button
                           key={model.id}
                           onClick={() => handleModelChange(model.id)}
                           className={`w-full px-3 py-2 text-left text-sm hover:bg-[var(--color-background)] flex items-center justify-between ${
-                            currentChat?.model === model.id ? 'text-[var(--color-primary)]' : 'text-[var(--color-text)]'
+                            isSelected ? 'text-[var(--color-primary)]' : 'text-[var(--color-text)]'
                           }`}
                         >
                           <span className="truncate">{getModelDisplayName(model.id)}</span>
-                          {currentChat?.model === model.id && (
+                          {isSelected && (
                             <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                               <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                             </svg>
                           )}
                         </button>
-                      ))}
+                      );})}
                     </>
                   )}
                   

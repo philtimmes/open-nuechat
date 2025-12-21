@@ -2,6 +2,8 @@
 Database session and connection management
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 from app.core.config import settings
 from app.models.models import Base
@@ -20,6 +22,24 @@ engine = create_async_engine(
 async_session_maker = async_sessionmaker(
     engine,
     class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
+# Sync engine for background tasks (convert async URL to sync)
+_sync_url = settings.DATABASE_URL.replace("sqlite+aiosqlite", "sqlite")
+sync_engine = create_engine(
+    _sync_url,
+    echo=settings.DEBUG,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+
+# Sync session factory for background tasks
+sync_session_maker = sessionmaker(
+    sync_engine,
+    class_=Session,
     expire_on_commit=False,
     autocommit=False,
     autoflush=False,
@@ -51,3 +71,4 @@ async def init_db():
 async def close_db():
     """Close database connections"""
     await engine.dispose()
+    sync_engine.dispose()

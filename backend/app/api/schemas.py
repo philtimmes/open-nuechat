@@ -93,6 +93,7 @@ class ChatResponse(BaseModel):
     assistant_name: Optional[str] = None
     system_prompt: Optional[str]
     is_shared: bool
+    is_knowledge_indexed: bool = False
     total_input_tokens: int
     total_output_tokens: int
     selected_versions: Optional[dict] = None

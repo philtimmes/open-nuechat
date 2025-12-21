@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.api.routes import (
     auth, chats, billing, documents, themes, websocket, filters,
     api_keys, knowledge_stores, assistants, branding, admin, tools, utils, tts, stt, images,
-    filter_chains, vibe, procedural_memory
+    filter_chains, vibe, procedural_memory, user_settings
 )
 from app.api.routes.v1 import router as v1_router
 from app.services.rag import RAGService
@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.42"
+SCHEMA_VERSION = "NC-0.6.51"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -258,6 +258,49 @@ async def run_migrations(conn):
         "NC-0.6.42": [
             # Anonymous sharing option for chats
             ("ALTER TABLE chats ADD COLUMN share_anonymous BOOLEAN DEFAULT 0", "chats.share_anonymous"),
+        ],
+        "NC-0.6.43": [
+            # Grok import parser fix - no schema changes, just code fix
+        ],
+        "NC-0.6.44": [
+            # Chat import sorting and infinite scroll - no schema changes
+        ],
+        "NC-0.6.45": [
+            # Chat Knowledge Base feature
+            ("ALTER TABLE users ADD COLUMN all_chats_knowledge_enabled BOOLEAN DEFAULT 0", "users.all_chats_knowledge_enabled"),
+            ("ALTER TABLE users ADD COLUMN chat_knowledge_status VARCHAR(20) DEFAULT 'idle'", "users.chat_knowledge_status"),
+            ("ALTER TABLE users ADD COLUMN chat_knowledge_store_id VARCHAR(36)", "users.chat_knowledge_store_id"),
+            ("ALTER TABLE users ADD COLUMN chat_knowledge_last_indexed TIMESTAMP", "users.chat_knowledge_last_indexed"),
+            ("ALTER TABLE chats ADD COLUMN is_knowledge_indexed BOOLEAN DEFAULT 0", "chats.is_knowledge_indexed"),
+        ],
+        "NC-0.6.46": [
+            # Filter chain skip if RAG hit option
+            ("ALTER TABLE filter_chains ADD COLUMN skip_if_rag_hit BOOLEAN DEFAULT 1", "filter_chains.skip_if_rag_hit"),
+        ],
+        "NC-0.6.47": [
+            # LLM Providers table for multi-model support
+            ("""CREATE TABLE IF NOT EXISTS llm_providers (
+                id VARCHAR(36) PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                base_url VARCHAR(500) NOT NULL,
+                api_key VARCHAR(500),
+                model_id VARCHAR(200) NOT NULL,
+                is_multimodal BOOLEAN DEFAULT 0,
+                supports_tools BOOLEAN DEFAULT 1,
+                supports_streaming BOOLEAN DEFAULT 1,
+                is_default BOOLEAN DEFAULT 0,
+                is_vision_default BOOLEAN DEFAULT 0,
+                is_enabled BOOLEAN DEFAULT 1,
+                timeout INTEGER DEFAULT 300,
+                max_tokens INTEGER DEFAULT 8192,
+                context_size INTEGER DEFAULT 128000,
+                temperature VARCHAR(10) DEFAULT '0.7',
+                vision_prompt TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""", "llm_providers table"),
+            ("CREATE INDEX IF NOT EXISTS idx_llm_provider_default ON llm_providers(is_default)", "llm_providers.idx_default"),
+            ("CREATE INDEX IF NOT EXISTS idx_llm_provider_vision ON llm_providers(is_vision_default)", "llm_providers.idx_vision"),
         ],
     }
     
@@ -547,6 +590,7 @@ app.include_router(images.router, prefix="/api", tags=["Images"])  # Routes /api
 app.include_router(filter_chains.router, prefix="/api/admin", tags=["Filter Chains"])  # Routes /api/admin/filter-chains/*
 app.include_router(vibe.router, prefix="/api/vibe", tags=["VibeCode"])  # AI code editor endpoints
 app.include_router(procedural_memory.router, prefix="/api", tags=["Procedural Memory"])  # Skill learning endpoints
+app.include_router(user_settings.router, prefix="/api/user", tags=["User Settings"])  # User settings endpoints
 
 # OpenAI-compatible API (v1)
 app.include_router(v1_router)  # Routes /v1/* (models, chat/completions, images/generations, embeddings)
@@ -803,8 +847,8 @@ async def get_shared_chat(share_id: str):
         # Get owner name (unless anonymous)
         owner_name = None
         if not chat.share_anonymous and chat.owner:
-            # Use display_name if set, otherwise username
-            owner_name = chat.owner.display_name or chat.owner.username
+            # Use full_name if set, otherwise username
+            owner_name = chat.owner.full_name or chat.owner.username
         
         # Debug logging
         logger.info(f"[SHARED_CHAT] share_id={share_id}, chat_id={chat.id}, message_count={len(chat.messages)}, owner={owner_name}, anonymous={chat.share_anonymous}")

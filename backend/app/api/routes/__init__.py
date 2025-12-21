@@ -20,6 +20,7 @@ from . import (
     filter_chains,
     vibe,
     procedural_memory,
+    user_settings,
 )
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "filter_chains",
     "vibe",
     "procedural_memory",
+    "user_settings",
 ]

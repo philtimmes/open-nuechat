@@ -14,6 +14,7 @@ Module Structure:
 - filter.py: ChatFilter
 - upload.py: UploadedFile, UploadedArchive
 - settings.py: SystemSetting, Theme
+- llm_provider.py: LLMProvider (multi-model support)
 
 All models are re-exported here for backward compatibility.
 Usage:
@@ -63,6 +64,9 @@ from .upload import UploadedFile, UploadedArchive
 # Settings models
 from .settings import SystemSetting, Theme
 
+# LLM Provider models
+from .llm_provider import LLMProvider
+
 # Export all for "from app.models import *"
 __all__ = [
     # Base
@@ -108,4 +112,6 @@ __all__ = [
     # Settings
     "SystemSetting",
     "Theme",
+    # LLM Provider
+    "LLMProvider",
 ]

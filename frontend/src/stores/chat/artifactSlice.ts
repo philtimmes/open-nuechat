@@ -108,4 +108,50 @@ export const createArtifactSlice: SliceCreator<ArtifactSlice> = (set, get) => ({
       generatedImages: { ...state.generatedImages, [messageId]: image },
     }));
   },
+
+  setArtifacts: (artifacts: Artifact[]) => {
+    set({ artifacts });
+  },
+
+  updateArtifact: (key: string, artifact: Artifact) => {
+    set((state) => {
+      const normalizedKey = key.replace(/^\.?\//, '');
+      
+      // Helper to check if an artifact matches the key
+      const matches = (a: Artifact) => {
+        const artKey = (a.filename || a.title || '').replace(/^\.?\//, '');
+        return artKey === normalizedKey || artKey.split('/').pop() === normalizedKey.split('/').pop();
+      };
+      
+      // First check if it's in artifacts
+      let foundInArtifacts = state.artifacts.some(matches);
+      let foundInUploaded = state.uploadedArtifacts.some(matches);
+      
+      // Update artifacts array
+      const newArtifacts = state.artifacts.map((a) => {
+        if (matches(a)) {
+          return { ...a, ...artifact };
+        }
+        return a;
+      });
+      
+      // Update uploadedArtifacts array
+      const newUploadedArtifacts = state.uploadedArtifacts.map((a) => {
+        if (matches(a)) {
+          return { ...a, ...artifact };
+        }
+        return a;
+      });
+      
+      // If not found in either, add to artifacts
+      if (!foundInArtifacts && !foundInUploaded) {
+        newArtifacts.push(artifact);
+      }
+      
+      return { 
+        artifacts: newArtifacts,
+        uploadedArtifacts: newUploadedArtifacts,
+      };
+    });
+  },
 });

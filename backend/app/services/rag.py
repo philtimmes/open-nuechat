@@ -372,22 +372,55 @@ class RAGService:
     
     _model = None
     _model_loaded = False
+    _model_load_failed = False  # Track if model loading permanently failed
     _index_manager = None
+    
+    @classmethod
+    def reset_model(cls):
+        """Reset model state to allow retry of loading"""
+        logger.info("[RAG] Resetting model state for retry...")
+        cls._model = None
+        cls._model_loaded = False
+        cls._model_load_failed = False
+    
+    @classmethod
+    def get_model_status(cls) -> dict:
+        """Get current model status for debugging"""
+        return {
+            "loaded": cls._model_loaded,
+            "failed": cls._model_load_failed,
+            "model_exists": cls._model is not None,
+        }
     
     @classmethod
     def get_model(cls):
         """Lazy load the embedding model with GPU support"""
+        # If model loading already failed, don't retry (avoid repeated slow failures)
+        if cls._model_load_failed:
+            return None
+        
         if not cls._model_loaded:
             try:
                 import torch
                 import os
                 
                 # CRITICAL: Disable accelerate's device_map which causes meta tensor issues
-                # Must be set BEFORE importing sentence_transformers
+                # Must be set BEFORE importing sentence_transformers/transformers
                 os.environ["ACCELERATE_DISABLE_RICH"] = "1"
                 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
-                # Prevent accelerate from using device_map="auto" 
                 os.environ["ACCELERATE_USE_CPU"] = "1"
+                # Disable low_cpu_mem_usage which triggers meta tensors
+                os.environ["TRANSFORMERS_OFFLINE"] = "0"
+                
+                # Force reload transformers modules to pick up env vars
+                import importlib
+                import sys
+                for mod_name in list(sys.modules.keys()):
+                    if 'transformers' in mod_name or 'accelerate' in mod_name:
+                        try:
+                            del sys.modules[mod_name]
+                        except:
+                            pass
                 
                 from sentence_transformers import SentenceTransformer
                 
@@ -397,30 +430,48 @@ class RAGService:
                 
                 model = None
                 
-                # Load with device="cpu" to avoid meta tensor issues
-                # The model weights are loaded into real memory on CPU first,
-                # then we can move to GPU after
-                try:
-                    logger.info("Loading embedding model with device=cpu...")
-                    model = SentenceTransformer(
+                # Try multiple loading strategies
+                loading_strategies = [
+                    # Strategy 1: Force no accelerate features
+                    lambda: SentenceTransformer(
                         settings.EMBEDDING_MODEL, 
                         device="cpu",
-                        trust_remote_code=True,  # Some models need this
-                    )
-                    logger.info("Model loaded on CPU successfully")
-                except Exception as e:
-                    logger.error(f"Failed to load with device=cpu: {e}")
-                    # Try without trust_remote_code
+                        model_kwargs={"low_cpu_mem_usage": False},
+                    ),
+                    # Strategy 2: Basic load
+                    lambda: SentenceTransformer(
+                        settings.EMBEDDING_MODEL, 
+                        device="cpu",
+                    ),
+                    # Strategy 3: Trust remote code
+                    lambda: SentenceTransformer(
+                        settings.EMBEDDING_MODEL, 
+                        device="cpu",
+                        trust_remote_code=True,
+                    ),
+                    # Strategy 4: Direct from local cache if available
+                    lambda: SentenceTransformer(
+                        settings.EMBEDDING_MODEL,
+                        device="cpu",
+                        cache_folder="/root/.cache/huggingface/hub",
+                    ),
+                ]
+                
+                for i, strategy in enumerate(loading_strategies):
                     try:
-                        logger.info("Retrying without trust_remote_code...")
-                        model = SentenceTransformer(settings.EMBEDDING_MODEL, device="cpu")
-                        logger.info("Model loaded on CPU (retry) successfully")
-                    except Exception as e2:
-                        logger.error(f"Retry also failed: {e2}")
-                        raise
+                        logger.info(f"Trying loading strategy {i+1}/{len(loading_strategies)}...")
+                        model = strategy()
+                        logger.info(f"Strategy {i+1} succeeded!")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Strategy {i+1} failed: {e}")
+                        model = None
                 
                 if model is None:
-                    raise RuntimeError("Failed to load embedding model")
+                    logger.error("All loading strategies failed")
+                    cls._model_load_failed = True
+                    cls._model = None
+                    return None
                 
                 logger.info(f"Model loaded, current device: {model.device}")
                 
@@ -1340,6 +1391,63 @@ class RAGService:
             )
         
         return context
+    
+    async def get_chat_knowledge_context(
+        self,
+        db: AsyncSession,
+        user: User,
+        query: str,
+        chat_knowledge_store_id: str,
+        current_assistant_id: Optional[str] = None,
+        top_k: int = 5,
+    ) -> str:
+        """
+        Get formatted context from user's chat history knowledge store.
+        
+        Filters results to match current assistant context:
+        - If current_assistant_id is None: only return results from chats without an assistant
+        - If current_assistant_id is set: only return results from chats with that specific assistant
+        
+        This prevents knowledge leakage between different assistant contexts.
+        """
+        # First get all results from the chat knowledge store
+        results = await self.search_knowledge_stores(
+            db, user, query, [chat_knowledge_store_id], top_k * 3,  # Get more to filter
+            bypass_access_check=True,  # User owns this KB
+        )
+        
+        if not results:
+            return ""
+        
+        # Filter by assistant context
+        filtered_results = []
+        for result in results:
+            # Note: _get_chunks_by_ids returns 'metadata' not 'chunk_metadata'
+            chunk_metadata = result.get("metadata", {}) or {}
+            result_assistant_id = chunk_metadata.get("assistant_id")
+            
+            # Match assistant context:
+            # - Both None: chat without assistant matches query without assistant
+            # - Both same ID: chat with assistant X matches query with assistant X
+            if result_assistant_id == current_assistant_id:
+                filtered_results.append(result)
+                if len(filtered_results) >= top_k:
+                    break
+        
+        if not filtered_results:
+            logger.debug(f"[CHAT_KB] No results after assistant filter (current_assistant_id={current_assistant_id})")
+            return ""
+        
+        logger.info(f"[CHAT_KB] Filtered {len(results)} -> {len(filtered_results)} results for assistant_id={current_assistant_id}")
+        
+        context_parts = []
+        for i, result in enumerate(filtered_results, 1):
+            chat_title = (result.get("metadata") or {}).get("chat_title", "Previous Chat")
+            context_parts.append(
+                f"[From: {chat_title}]\n{result['content']}"
+            )
+        
+        return "\n\n---\n\n".join(context_parts)
     
     async def rebuild_all_indexes(self, db: AsyncSession) -> Dict[str, int]:
         """Rebuild all knowledge store FAISS indexes"""

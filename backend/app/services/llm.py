@@ -20,7 +20,7 @@ import asyncio
 import time
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.config import settings
 from app.core.logging import get_logger, log_llm_request, log_duration
@@ -57,18 +57,61 @@ class LLMService:
         self.max_tokens = max_tokens or settings.LLM_MAX_TOKENS
         self.temperature = temperature or settings.LLM_TEMPERATURE
         
+        # Use httpx.Timeout for granular control:
+        # - connect: initial connection timeout
+        # - read: time between chunks during streaming (needs to be long for slow LLMs)
+        # - write: time to send request
+        # - pool: time to acquire connection from pool
+        import httpx
         self.client = AsyncOpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
-            timeout=self.timeout,
+            timeout=httpx.Timeout(
+                connect=30.0,
+                read=float(self.timeout),  # Per-chunk read timeout
+                write=30.0,
+                pool=10.0,
+            ),
         )
         self.billing_service = BillingService()
     
     @classmethod
     async def from_database(cls, db: AsyncSession) -> "LLMService":
-        """Create an LLMService using settings from the database."""
+        """
+        Create an LLMService using settings from the database.
+        
+        Priority:
+        1. LLMProvider with is_default=True (new multi-provider system)
+        2. Legacy system settings (llm_api_base_url, llm_api_key, etc.)
+        """
         from app.services.settings_service import SettingsService
         
+        # Try new provider system first
+        try:
+            from app.models.llm_provider import LLMProvider
+            from sqlalchemy import select
+            
+            result = await db.execute(
+                select(LLMProvider)
+                .where(LLMProvider.is_default == True)
+                .where(LLMProvider.is_enabled == True)
+                .limit(1)
+            )
+            provider = result.scalar_one_or_none()
+            
+            if provider:
+                logger.info(f"[LLM] Using provider: {provider.name} ({provider.model_id})")
+                return cls(
+                    base_url=provider.base_url,
+                    api_key=provider.api_key,
+                    timeout=provider.timeout,
+                    max_tokens=provider.max_tokens,
+                    temperature=float(provider.temperature) if provider.temperature else 0.7,
+                )
+        except Exception as e:
+            logger.debug(f"[LLM] Provider lookup failed, using legacy settings: {e}")
+        
+        # Fallback to legacy settings
         llm_settings = await SettingsService.get_llm_settings(db)
         
         return cls(
@@ -553,11 +596,10 @@ class LLMService:
             parent_id=parent_id,  # Link to user message for conversation branching
         )
         db.add(assistant_message)
-        # CRITICAL: Commit immediately to ensure message exists before any child messages
-        # are created. Without this, if the user sends another message before streaming
-        # completes, the child would reference a non-existent parent (orphaned message).
+        # Flush to populate ID, then commit to persist
+        # Note: refresh() removed due to SQLAlchemy async/greenlet issues in rapid tool loops
+        await db.flush()
         await db.commit()
-        await db.refresh(assistant_message)
         
         yield {
             "type": "message_start",
@@ -877,7 +919,8 @@ class LLMService:
             }
             
         except Exception as e:
-            logger.error(f"Stream error: {e}")
+            error_msg = str(e) or f"{type(e).__name__}: No error message"
+            logger.error(f"Stream error ({type(e).__name__}): {error_msg}")
             # Use direct SQL for error update too
             message_id = str(assistant_message.id) if assistant_message else None
             if message_id:
@@ -886,7 +929,7 @@ class LLMService:
                         update(Message)
                         .where(Message.id == message_id)
                         .values(
-                            content=f"Error: {str(e)}",
+                            content=f"Error: {error_msg}",
                             is_error=True,
                             is_streaming=False,
                         )
@@ -896,7 +939,7 @@ class LLMService:
             
             yield {
                 "type": "error",
-                "error": str(e),
+                "error": error_msg,
             }
     
     async def _check_needs_search(self, model: str, messages: List[Dict], user_query: str) -> bool:
@@ -1083,6 +1126,15 @@ When you receive search results or external data in the conversation, follow the
             
             system_prompt = system_prompt + tools_instruction
         
+        # Append all_models_prompt (admin-configurable, applies to all models including Custom GPTs)
+        try:
+            from app.services.settings_service import SettingsService
+            all_models_prompt = await SettingsService.get(db, "all_models_prompt")
+            if all_models_prompt and all_models_prompt.strip():
+                system_prompt = system_prompt + "\n\n" + all_models_prompt
+        except Exception as e:
+            logger.debug(f"Could not fetch all_models_prompt: {e}")
+        
         messages.append({
             "role": "system",
             "content": system_prompt,
@@ -1139,8 +1191,8 @@ When you receive search results or external data in the conversation, follow the
             "content": content,
         })
         
-        # Apply history compression if needed
-        messages = await self._maybe_compress_history(db, messages)
+        # Apply history compression if needed (pass chat_id for agent memory)
+        messages = await self._maybe_compress_history(db, messages, chat_id=str(chat.id))
         
         return messages
     
@@ -1148,18 +1200,14 @@ When you receive search results or external data in the conversation, follow the
         self,
         db: AsyncSession,
         messages: List[Dict],
+        chat_id: str = None,
     ) -> List[Dict]:
         """
         Compress history if it exceeds thresholds.
-        This helps manage context window limits for long conversations.
+        Uses Agent Memory files to store overflow history.
         """
         import logging
         from app.services.settings_service import SettingsService
-        from app.services.history_compression import (
-            get_compression_service, 
-            CompressionConfig,
-            estimate_message_tokens
-        )
         
         logger = logging.getLogger(__name__)
         
@@ -1167,6 +1215,43 @@ When you receive search results or external data in the conversation, follow the
         enabled = await SettingsService.get_bool(db, "history_compression_enabled")
         if not enabled:
             return messages
+        
+        # Use agent memory compression if chat_id is available
+        if chat_id:
+            try:
+                from app.services.agent_memory import compress_chat_history, estimate_message_tokens
+                
+                # Get model context size - use dedicated setting or default to 128k
+                # Most modern models (Claude, GPT-4, etc.) have 128k+ context
+                model_context = int(await SettingsService.get(db, "model_context_size") or "128000")
+                keep_recent = int(await SettingsService.get(db, "history_compression_keep_recent") or "10")
+                
+                compressed, was_compressed = await compress_chat_history(
+                    db=db,
+                    chat_id=chat_id,
+                    messages=messages,
+                    model=await self._get_effective_model(None),
+                    api_base=self.base_url,
+                    api_key=self.api_key,
+                    model_context_size=model_context,
+                    keep_recent=keep_recent,
+                )
+                
+                if was_compressed:
+                    logger.info(f"[AGENT_MEMORY] Chat {chat_id} compressed via agent memory files")
+                
+                return compressed
+                
+            except Exception as e:
+                logger.error(f"Agent memory compression failed: {e}")
+                # Fall back to original compression
+        
+        # Fallback to original compression service
+        from app.services.history_compression import (
+            get_compression_service, 
+            CompressionConfig,
+            estimate_message_tokens
+        )
         
         # Load compression settings
         threshold = int(await SettingsService.get(db, "history_compression_threshold") or "20")
@@ -1198,7 +1283,7 @@ When you receive search results or external data in the conversation, follow the
         try:
             compressed = await compression_service.compress_history(
                 messages=messages,
-                llm_client=None,  # We'll use our own client
+                llm_client=None,
                 model=await self._get_effective_model(None),
                 api_base=self.base_url,
                 api_key=self.api_key,
@@ -1206,7 +1291,7 @@ When you receive search results or external data in the conversation, follow the
             return compressed
         except Exception as e:
             logger.error(f"History compression failed: {e}")
-            return messages  # Return original on failure
+            return messages
     
     def _build_user_content(
         self,

@@ -49,6 +49,12 @@ class User(Base):
     theme = Column(String(50), default="dark")
     preferences = Column(JSON, default=dict)
     
+    # Chat Knowledge Base
+    all_chats_knowledge_enabled = Column(Boolean, default=False)
+    chat_knowledge_status = Column(String(20), default="idle")  # idle, processing, completed
+    chat_knowledge_store_id = Column(String(36), nullable=True)  # FK to knowledge store
+    chat_knowledge_last_indexed = Column(DateTime, nullable=True)
+    
     # Timestamps
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())

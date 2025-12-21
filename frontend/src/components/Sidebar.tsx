@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Link, useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore } from '../stores/authStore';
 import { useModelsStore } from '../stores/modelsStore';
 import { formatRelativeTime } from '../lib/formatters';
+import api from '../lib/api';
 import type { Chat } from '../types';
 
 interface SidebarProps {
@@ -20,29 +21,156 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   const [searchQuery, setSearchQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
+  const [isImporting, setIsImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{ success: number; failed: number } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   const { user } = useAuthStore();
   const {
     chats,
     isLoadingChats,
+    hasMoreChats,
+    chatSearchQuery,
     createChat,
     deleteChat,
     updateChatTitle,
     setCurrentChat,
+    fetchChats,
   } = useChatStore();
   
   const { getDisplayName } = useModelsStore();
+  const chatListRef = useRef<HTMLDivElement>(null);
   
-  // Defensive: ensure chats is an array before filtering
+  // Debounced search - triggers backend search
+  useEffect(() => {
+    // Clear any existing timeout
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    
+    // Debounce search by 300ms
+    searchTimeoutRef.current = setTimeout(() => {
+      fetchChats(false, searchQuery);
+    }, 300);
+    
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+      }
+    };
+  }, [searchQuery, fetchChats]);
+  
+  // Handle infinite scroll
+  const handleScroll = useCallback(() => {
+    const container = chatListRef.current;
+    if (!container || isLoadingChats || !hasMoreChats) return;
+    
+    // Load more when scrolled near bottom (within 100px)
+    const { scrollTop, scrollHeight, clientHeight } = container;
+    if (scrollHeight - scrollTop - clientHeight < 100) {
+      fetchChats(true, chatSearchQuery);
+    }
+  }, [isLoadingChats, hasMoreChats, fetchChats, chatSearchQuery]);
+  
+  // Attach scroll listener
+  useEffect(() => {
+    const container = chatListRef.current;
+    if (container) {
+      container.addEventListener('scroll', handleScroll);
+      return () => container.removeEventListener('scroll', handleScroll);
+    }
+  }, [handleScroll]);
+  
+  // Use chats directly - backend does the filtering now
   const safeChats = Array.isArray(chats) ? chats : [];
-  const filteredChats = safeChats.filter((chat) =>
-    chat.title?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  
+  // Get current chat to know last used model
+  const { currentChat } = useChatStore.getState();
+  const { defaultModel } = useModelsStore.getState();
   
   const handleNewChat = async () => {
-    const chat = await createChat();
-    navigate(`/chat/${chat.id}`);
+    // Get the last used model from current chat, or fall back to default
+    const lastModel = currentChat?.assistant_id 
+      ? `gpt:${currentChat.assistant_id}`  // Custom GPT
+      : currentChat?.model || defaultModel;
+    
+    try {
+      // Create new chat with last used model
+      const newChat = await createChat(lastModel);
+      if (newChat?.id) {
+        navigate(`/chat/${newChat.id}`);
+      }
+    } catch (err) {
+      console.error('Failed to create new chat:', err);
+      // Fallback to empty state on error
+      navigate('/chat');
+    }
     onClose?.();
+  };
+  
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+  
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    setIsImporting(true);
+    setImportResult(null);
+    
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      // Get auth token
+      const authData = localStorage.getItem('nexus-auth');
+      let token = '';
+      if (authData) {
+        try {
+          const { state } = JSON.parse(authData);
+          token = state?.accessToken || '';
+        } catch {}
+      }
+      
+      // Use native fetch to avoid axios default Content-Type header issues
+      const response = await fetch('/api/chats/import', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        body: formData
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || errorData.message || `HTTP ${response.status}`);
+      }
+      
+      const result = await response.json();
+      setImportResult({ success: result.total_imported, failed: result.total_failed });
+      
+      // Refresh chat list
+      await fetchChats();
+      
+      // Navigate to the first imported chat if any
+      if (result.results?.length > 0 && result.results[0].chat_id) {
+        navigate(`/chat/${result.results[0].chat_id}`);
+      }
+      
+      // Clear the result after 5 seconds
+      setTimeout(() => setImportResult(null), 5000);
+    } catch (err: any) {
+      console.error('Import failed:', err);
+      alert(err.message || 'Failed to import chats');
+    } finally {
+      setIsImporting(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
   };
   
   const handleSelectChat = (chat: Chat) => {
@@ -89,7 +217,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   };
   
   // Group chats by date
-  const groupedChats = filteredChats.reduce((groups, chat) => {
+  const groupedChats = safeChats.reduce((groups, chat) => {
     const date = formatDate(chat.updated_at);
     if (!groups[date]) groups[date] = [];
     groups[date].push(chat);
@@ -133,15 +261,51 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
         </div>
         
         {/* New chat button */}
-        <button
-          onClick={handleNewChat}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 md:py-2.5 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 transition-opacity text-base md:text-sm"
-        >
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          New Chat
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={handleNewChat}
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-3 md:py-2.5 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 transition-opacity text-base md:text-sm"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            New Chat
+          </button>
+          
+          {/* Import button */}
+          <button
+            onClick={handleImportClick}
+            disabled={isImporting}
+            title="Import chats from ChatGPT, Grok, Claude, etc."
+            className="px-3 py-3 md:py-2.5 bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] rounded-lg hover:bg-[var(--color-background)] transition-colors disabled:opacity-50"
+          >
+            {isImporting ? (
+              <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+            ) : (
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              </svg>
+            )}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            onChange={handleImportFile}
+            className="hidden"
+          />
+        </div>
+        
+        {/* Import result notification */}
+        {importResult && (
+          <div className="mt-2 px-3 py-2 rounded-lg bg-green-500/20 border border-green-500/30 text-green-400 text-sm">
+            ✓ Imported {importResult.success} chat{importResult.success !== 1 ? 's' : ''}
+            {importResult.failed > 0 && ` (${importResult.failed} failed)`}
+          </div>
+        )}
         
         {/* Search */}
         <div className="mt-3 flex items-center gap-2">
@@ -159,15 +323,15 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
       </div>
       
       {/* Chat list */}
-      <div className="flex-1 overflow-y-auto py-2">
-        {isLoadingChats ? (
+      <div ref={chatListRef} className="flex-1 overflow-y-auto py-2">
+        {isLoadingChats && chats.length === 0 ? (
           <div className="flex items-center justify-center py-8">
             <svg className="animate-spin h-6 w-6 text-[var(--color-text-secondary)]" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
             </svg>
           </div>
-        ) : filteredChats.length === 0 ? (
+        ) : safeChats.length === 0 ? (
           <div className="text-center py-8 px-4">
             <p className="text-[var(--color-text-secondary)] text-base md:text-sm">
               {searchQuery ? 'No chats found' : 'No chats yet'}
@@ -209,9 +373,14 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
                         autoFocus
                       />
                     ) : (
-                      <span className="text-base md:text-sm text-[var(--color-text)] truncate flex-1">
-                        {chat.title}
-                      </span>
+                      <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                        {chat.is_knowledge_indexed && (
+                          <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" title="Indexed in knowledge base" />
+                        )}
+                        <span className="text-base md:text-sm text-[var(--color-text)] truncate">
+                          {chat.title}
+                        </span>
+                      </div>
                     )}
                     
                     {/* Actions - always visible on mobile */}
@@ -248,6 +417,16 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
               ))}
             </div>
           ))
+        )}
+        
+        {/* Loading more indicator */}
+        {isLoadingChats && chats.length > 0 && (
+          <div className="flex items-center justify-center py-4">
+            <svg className="animate-spin h-5 w-5 text-[var(--color-text-secondary)]" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+          </div>
         )}
       </div>
       

@@ -26,6 +26,7 @@ export interface Chat {
   assistant_name?: string;  // Custom GPT name (denormalized)
   system_prompt?: string;
   is_shared: boolean;
+  is_knowledge_indexed?: boolean;  // Part of user's chat knowledge base
   created_at: string;
   updated_at: string;
   total_input_tokens: number;
@@ -118,7 +119,7 @@ export interface Message {
   current_branch?: number;
   // Metadata for special message types (file content, generated images, etc.)
   metadata?: {
-    type?: 'file_content' | 'context';
+    type?: 'file_content' | 'context' | 'find_line_result' | 'find_result' | 'search_replace_result';
     path?: string;
     source?: string;
     // Generated image data

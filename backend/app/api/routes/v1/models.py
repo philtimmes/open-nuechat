@@ -85,7 +85,6 @@ async def list_models(
     result = await db.execute(
         select(CustomAssistant).where(
             CustomAssistant.owner_id == user.id,
-            CustomAssistant.is_active == True,
         )
     )
     user_assistants = result.scalars().all()
@@ -111,7 +110,6 @@ async def list_models(
             result = await db.execute(
                 select(CustomAssistant).where(
                     CustomAssistant.id.in_(subscribed_ids),
-                    CustomAssistant.is_active == True,
                     CustomAssistant.is_public == True,
                 )
             )
@@ -165,7 +163,6 @@ async def get_model(
         result = await db.execute(
             select(CustomAssistant).where(
                 CustomAssistant.id == assistant_id,
-                CustomAssistant.is_active == True,
             )
         )
         assistant = result.scalar_one_or_none()

@@ -78,7 +78,7 @@ export const createCodeSummarySlice: SliceCreator<CodeSummarySlice> = (set, get)
 
   fetchCodeSummary: async (chatId: string) => {
     try {
-      const response = await api.get(`/chats/${chatId}/code-summary`);
+      const response = await api.get(`/chats/${chatId}/summary`);
       if (response.data) {
         set({ codeSummary: response.data });
       }
@@ -93,10 +93,11 @@ export const createCodeSummarySlice: SliceCreator<CodeSummarySlice> = (set, get)
     if (!currentChat || !codeSummary) return;
     
     try {
-      await api.put(`/chats/${currentChat.id}/code-summary`, {
+      await api.put(`/chats/${currentChat.id}/summary`, {
         files: codeSummary.files,
         warnings: codeSummary.warnings,
       });
+      console.log('[CODE_SUMMARY] Saved to backend');
     } catch (error) {
       console.error('Failed to save code summary:', error);
     }

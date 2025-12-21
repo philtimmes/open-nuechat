@@ -121,13 +121,64 @@ class ProceduralMemoryService:
         if cls._embedding_model is None:
             try:
                 import os
-                # Prevent accelerate from using device_map="auto" which causes meta tensor issues
+                import sys
+                
+                # CRITICAL: Disable accelerate's device_map which causes meta tensor issues
+                os.environ["ACCELERATE_DISABLE_RICH"] = "1"
+                os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
                 os.environ["ACCELERATE_USE_CPU"] = "1"
                 
+                # Try to reuse the RAG service's model if already loaded
+                try:
+                    from app.services.rag import RAGService
+                    rag_model = RAGService.get_model()
+                    if rag_model is not None:
+                        logger.info("Reusing embedding model from RAGService")
+                        cls._embedding_model = rag_model
+                        return cls._embedding_model
+                except Exception as e:
+                    logger.debug(f"Could not reuse RAG model: {e}")
+                
+                # Force reload transformers modules to pick up env vars
+                for mod_name in list(sys.modules.keys()):
+                    if 'transformers' in mod_name or 'accelerate' in mod_name:
+                        try:
+                            del sys.modules[mod_name]
+                        except:
+                            pass
+                
                 from sentence_transformers import SentenceTransformer
-                # Use full HuggingFace repo path and device="cpu" to avoid meta tensor issues
-                cls._embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device="cpu")
-                logger.info("Loaded embedding model for procedural memory (on CPU)")
+                
+                # Try multiple loading strategies
+                model = None
+                strategies = [
+                    lambda: SentenceTransformer(
+                        'sentence-transformers/all-MiniLM-L6-v2', 
+                        device="cpu",
+                        model_kwargs={"low_cpu_mem_usage": False},
+                    ),
+                    lambda: SentenceTransformer(
+                        'sentence-transformers/all-MiniLM-L6-v2', 
+                        device="cpu",
+                    ),
+                ]
+                
+                for i, strategy in enumerate(strategies):
+                    try:
+                        logger.info(f"Procedural memory: trying loading strategy {i+1}...")
+                        model = strategy()
+                        logger.info(f"Strategy {i+1} succeeded!")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Strategy {i+1} failed: {e}")
+                        model = None
+                
+                if model:
+                    cls._embedding_model = model
+                    logger.info("Loaded embedding model for procedural memory (on CPU)")
+                else:
+                    logger.error("All embedding loading strategies failed for procedural memory")
+                    
             except ImportError:
                 logger.warning("sentence-transformers not available, skill retrieval will use keyword matching")
             except Exception as e:

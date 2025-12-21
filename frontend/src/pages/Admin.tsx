@@ -8,6 +8,7 @@ const FlowEditor = lazy(() => import('../components/FlowEditor'));
 
 interface SystemSettings {
   default_system_prompt: string;
+  all_models_prompt: string;
   title_generation_prompt: string;
   rag_context_prompt: string;
   input_token_price: number;
@@ -16,6 +17,12 @@ interface SystemSettings {
   free_tier_tokens: number;
   pro_tier_tokens: number;
   enterprise_tier_tokens: number;
+  // Storage limits
+  max_upload_size_mb: number;
+  max_knowledge_store_size_mb: number;
+  max_knowledge_stores_free: number;
+  max_knowledge_stores_pro: number;
+  max_knowledge_stores_enterprise: number;
 }
 
 interface OAuthSettings {
@@ -37,11 +44,33 @@ interface LLMSettings {
   llm_max_tokens: number;
   llm_temperature: number;
   llm_stream_default: boolean;
+  llm_multimodal: boolean;  // Whether legacy model supports vision
   // History compression
   history_compression_enabled: boolean;
   history_compression_threshold: number;
   history_compression_keep_recent: number;
   history_compression_target_tokens: number;
+}
+
+interface LLMProvider {
+  id: string;
+  name: string;
+  base_url: string;
+  api_key: string;
+  model_id: string;
+  is_multimodal: boolean;
+  supports_tools: boolean;
+  supports_streaming: boolean;
+  is_default: boolean;
+  is_vision_default: boolean;
+  is_enabled: boolean;
+  timeout: number;
+  max_tokens: number;
+  context_size: number;
+  temperature: string;
+  vision_prompt: string | null;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 interface FeatureFlags {
@@ -172,6 +201,10 @@ export default function Admin() {
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
   const [oauthSettings, setOAuthSettings] = useState<OAuthSettings | null>(null);
   const [llmSettings, setLLMSettings] = useState<LLMSettings | null>(null);
+  const [llmProviders, setLLMProviders] = useState<LLMProvider[]>([]);
+  const [editingProvider, setEditingProvider] = useState<LLMProvider | null>(null);
+  const [showProviderForm, setShowProviderForm] = useState(false);
+  const [testingProvider, setTestingProvider] = useState<string | null>(null);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags | null>(null);
   const [apiRateLimits, setApiRateLimits] = useState<APIRateLimits | null>(null);
   const [tiers, setTiers] = useState<TierConfig[]>([]);
@@ -309,6 +342,7 @@ export default function Admin() {
     outbound_chain_id?: string;
     max_iterations: number;
     debug: boolean;
+    skip_if_rag_hit: boolean;
     definition: { steps: FilterChainStep[] };
     created_at?: string;
     updated_at?: string;
@@ -349,6 +383,7 @@ export default function Admin() {
     bidirectional: false,
     max_iterations: 10,
     debug: false,
+    skip_if_rag_hit: true,
     definition: { steps: [] },
   });
   const [filterChainJsonMode, setFilterChainJsonMode] = useState(false);
@@ -621,6 +656,67 @@ export default function Admin() {
     }
   };
   
+  // LLM Provider management
+  const loadLLMProviders = async () => {
+    try {
+      const response = await api.get('/admin/llm-providers');
+      setLLMProviders(response.data.providers || []);
+    } catch (err) {
+      console.error('Failed to load LLM providers:', err);
+    }
+  };
+  
+  const saveProvider = async (provider: Partial<LLMProvider>) => {
+    setIsSaving(true);
+    setError(null);
+    try {
+      if (editingProvider?.id) {
+        await api.put(`/admin/llm-providers/${editingProvider.id}`, provider);
+        setSuccess('Provider updated successfully');
+      } else {
+        await api.post('/admin/llm-providers', provider);
+        setSuccess('Provider created successfully');
+      }
+      setTimeout(() => setSuccess(null), 3000);
+      setShowProviderForm(false);
+      setEditingProvider(null);
+      loadLLMProviders();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save provider');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  const deleteProvider = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this provider?')) return;
+    try {
+      await api.delete(`/admin/llm-providers/${id}`);
+      setSuccess('Provider deleted successfully');
+      setTimeout(() => setSuccess(null), 3000);
+      loadLLMProviders();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to delete provider');
+    }
+  };
+  
+  const testProvider = async (id: string) => {
+    setTestingProvider(id);
+    try {
+      const response = await api.post(`/admin/llm-providers/${id}/test`);
+      if (response.data.status === 'ok') {
+        setSuccess(`Connection OK: ${response.data.message}`);
+      } else {
+        setError(response.data.message || 'Test failed');
+      }
+      setTimeout(() => { setSuccess(null); setError(null); }, 5000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Connection test failed');
+    } finally {
+      setTestingProvider(null);
+    }
+  };
+  
   const saveFeatureFlags = async () => {
     if (!featureFlags) return;
     setIsSaving(true);
@@ -885,6 +981,13 @@ export default function Admin() {
   useEffect(() => {
     if (activeTab === 'tools') {
       fetchTools();
+    }
+  }, [activeTab]);
+  
+  // Load LLM providers when LLM tab is active
+  useEffect(() => {
+    if (activeTab === 'llm') {
+      loadLLMProviders();
     }
   }, [activeTab]);
   
@@ -1204,6 +1307,7 @@ export default function Admin() {
       bidirectional: false,
       max_iterations: 10,
       debug: false,
+      skip_if_rag_hit: true,
       definition: { steps: [] },
     });
     setEditingFilterChain(null);
@@ -1235,6 +1339,7 @@ export default function Admin() {
         outbound_chain_id: filterChainForm.outbound_chain_id || undefined,
         max_iterations: filterChainForm.max_iterations,
         debug: filterChainForm.debug,
+        skip_if_rag_hit: filterChainForm.skip_if_rag_hit,
         definition,
       };
       
@@ -1469,6 +1574,20 @@ export default function Admin() {
                     </div>
                     
                     <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                        All Models Prompt
+                        <span className="ml-2 text-xs text-[var(--color-text-muted)]">(appended to ALL system prompts including Custom GPTs)</span>
+                      </label>
+                      <textarea
+                        value={systemSettings.all_models_prompt || ''}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, all_models_prompt: e.target.value })}
+                        rows={4}
+                        placeholder="Instructions that apply to all models and Custom GPTs..."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
                       <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Title Generation Prompt</label>
                       <textarea
                         value={systemSettings.title_generation_prompt}
@@ -1561,6 +1680,74 @@ export default function Admin() {
                         onChange={(e) => setSystemSettings({ ...systemSettings, enterprise_tier_tokens: parseInt(e.target.value) || 0 })}
                         className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Storage Limits</h2>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Max File Upload Size (MB)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="10000"
+                        value={systemSettings.max_upload_size_mb}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, max_upload_size_mb: parseInt(e.target.value) || 100 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">Maximum size per uploaded file</p>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Max Knowledge Store Size (MB)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100000"
+                        value={systemSettings.max_knowledge_store_size_mb}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, max_knowledge_store_size_mb: parseInt(e.target.value) || 500 })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">Total size limit per knowledge base</p>
+                    </div>
+                    
+                    <div className="col-span-full">
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-2">Max Knowledge Stores per Tier</label>
+                      <div className="grid grid-cols-3 gap-4">
+                        <div>
+                          <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Free</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={systemSettings.max_knowledge_stores_free}
+                            onChange={(e) => setSystemSettings({ ...systemSettings, max_knowledge_stores_free: parseInt(e.target.value) || 0 })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Pro</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={systemSettings.max_knowledge_stores_pro}
+                            onChange={(e) => setSystemSettings({ ...systemSettings, max_knowledge_stores_pro: parseInt(e.target.value) || 0 })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Enterprise</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={systemSettings.max_knowledge_stores_enterprise}
+                            onChange={(e) => setSystemSettings({ ...systemSettings, max_knowledge_stores_enterprise: parseInt(e.target.value) || 0 })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1693,79 +1880,341 @@ export default function Admin() {
             {/* LLM SETTINGS TAB */}
             {activeTab === 'llm' && llmSettings && (
               <div className="space-y-6">
+                {/* LLM PROVIDERS SECTION */}
                 <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">LLM Connection</h2>
+                  <div className="flex items-center justify-between mb-4">
+                    <div>
+                      <h2 className="text-lg font-semibold text-[var(--color-text)]">LLM Providers</h2>
+                      <p className="text-xs text-[var(--color-text-secondary)]">Configure multiple models with hybrid routing (smart text + vision)</p>
+                    </div>
+                    <button
+                      onClick={() => { setEditingProvider(null); setShowProviderForm(true); }}
+                      className="px-3 py-1.5 bg-[var(--color-primary)] text-white rounded-lg text-sm hover:opacity-90"
+                    >
+                      + Add Provider
+                    </button>
+                  </div>
                   
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Base URL</label>
-                      <input
-                        type="text"
-                        value={llmSettings.llm_api_base_url}
-                        onChange={(e) => setLLMSettings({ ...llmSettings, llm_api_base_url: e.target.value })}
-                        placeholder="http://localhost:11434/v1"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                      />
-                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)</p>
+                  {llmProviders.length === 0 ? (
+                    <div className="text-center py-8 text-[var(--color-text-secondary)]">
+                      <p>No providers configured. Add a provider or use legacy settings below.</p>
                     </div>
-                    
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Key</label>
-                      <input
-                        type="password"
-                        value={llmSettings.llm_api_key}
-                        onChange={(e) => setLLMSettings({ ...llmSettings, llm_api_key: e.target.value })}
-                        placeholder="sk-xxxxx or leave empty"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                      />
+                  ) : (
+                    <div className="space-y-3">
+                      {llmProviders.map((provider) => (
+                        <div key={provider.id} className="p-4 bg-[var(--color-background)] rounded-lg border border-[var(--color-border)]">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium text-[var(--color-text)]">{provider.name}</span>
+                                {provider.is_default && (
+                                  <span className="px-2 py-0.5 text-xs bg-blue-500/20 text-blue-400 rounded">Default</span>
+                                )}
+                                {provider.is_vision_default && (
+                                  <span className="px-2 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">Vision</span>
+                                )}
+                                {provider.is_multimodal && (
+                                  <span className="px-2 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">MM</span>
+                                )}
+                                {!provider.is_enabled && (
+                                  <span className="px-2 py-0.5 text-xs bg-red-500/20 text-red-400 rounded">Disabled</span>
+                                )}
+                              </div>
+                              <p className="text-sm text-[var(--color-text-secondary)] mt-1">{provider.model_id}</p>
+                              <p className="text-xs text-[var(--color-text-secondary)]">{provider.base_url}</p>
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => testProvider(provider.id)}
+                                disabled={testingProvider === provider.id}
+                                className="px-2 py-1 text-xs bg-[var(--color-surface)] border border-[var(--color-border)] rounded hover:bg-[var(--color-background)]"
+                              >
+                                {testingProvider === provider.id ? '...' : 'Test'}
+                              </button>
+                              <button
+                                onClick={() => { setEditingProvider(provider); setShowProviderForm(true); }}
+                                className="px-2 py-1 text-xs bg-[var(--color-surface)] border border-[var(--color-border)] rounded hover:bg-[var(--color-background)]"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => deleteProvider(provider.id)}
+                                className="px-2 py-1 text-xs bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Default Model</label>
-                      <input
-                        type="text"
-                        value={llmSettings.llm_model}
-                        onChange={(e) => setLLMSettings({ ...llmSettings, llm_model: e.target.value })}
-                        placeholder="default"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                      />
+                  )}
+                  
+                  {/* Hybrid routing explanation */}
+                  {llmProviders.length > 0 && (
+                    <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-sm">
+                      <p className="text-blue-400 font-medium">Hybrid Routing</p>
+                      <p className="text-[var(--color-text-secondary)] text-xs mt-1">
+                        Set one model as <b>Default</b> (text/reasoning) and another as <b>Vision</b> (image understanding).
+                        When images are sent, the Vision model describes them, then the Default model responds.
+                      </p>
                     </div>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  )}
+                </div>
+                
+                {/* Provider Form Modal */}
+                {showProviderForm && (
+                  <div className="bg-[var(--color-surface)] rounded-xl p-6 border-2 border-[var(--color-primary)]">
+                    <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
+                      {editingProvider ? 'Edit Provider' : 'Add Provider'}
+                    </h3>
+                    <form onSubmit={(e) => {
+                      e.preventDefault();
+                      const form = e.target as HTMLFormElement;
+                      const formData = new FormData(form);
+                      saveProvider({
+                        name: formData.get('name') as string,
+                        base_url: formData.get('base_url') as string,
+                        api_key: (formData.get('api_key') as string) || undefined,
+                        model_id: formData.get('model_id') as string,
+                        is_multimodal: formData.get('is_multimodal') === 'on',
+                        supports_tools: formData.get('supports_tools') === 'on',
+                        supports_streaming: formData.get('supports_streaming') === 'on',
+                        is_default: formData.get('is_default') === 'on',
+                        is_vision_default: formData.get('is_vision_default') === 'on',
+                        is_enabled: formData.get('is_enabled') === 'on',
+                        timeout: parseInt(formData.get('timeout') as string) || 300,
+                        max_tokens: parseInt(formData.get('max_tokens') as string) || 8192,
+                        context_size: parseInt(formData.get('context_size') as string) || 128000,
+                        temperature: formData.get('temperature') as string || '0.7',
+                        vision_prompt: (formData.get('vision_prompt') as string) || undefined,
+                      });
+                    }} className="space-y-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Display Name *</label>
+                          <input
+                            name="name"
+                            required
+                            defaultValue={editingProvider?.name || ''}
+                            placeholder="GPT-4o, Llama 70B, etc."
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Model ID *</label>
+                          <input
+                            name="model_id"
+                            required
+                            defaultValue={editingProvider?.model_id || ''}
+                            placeholder="gpt-4o, llama3.1:70b, etc."
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                      </div>
+                      
                       <div>
-                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Timeout (seconds)</label>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Base URL *</label>
                         <input
-                          type="number"
-                          min="10"
-                          max="600"
-                          value={llmSettings.llm_timeout}
-                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_timeout: parseInt(e.target.value) || 120 })}
-                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          name="base_url"
+                          required
+                          defaultValue={editingProvider?.base_url || ''}
+                          placeholder="http://localhost:11434/v1"
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
                         />
                       </div>
                       
                       <div>
-                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Max Tokens (default)</label>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Key</label>
                         <input
-                          type="number"
-                          min="1"
-                          value={llmSettings.llm_max_tokens}
-                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_max_tokens: parseInt(e.target.value) || 4096 })}
-                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          name="api_key"
+                          type="password"
+                          defaultValue=""
+                          placeholder="Leave empty for local models"
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
                         />
+                        {editingProvider?.api_key && (
+                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">Current: {editingProvider.api_key}</p>
+                        )}
+                      </div>
+                      
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Timeout (s)</label>
+                          <input
+                            name="timeout"
+                            type="number"
+                            defaultValue={editingProvider?.timeout || 300}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Max Tokens</label>
+                          <input
+                            name="max_tokens"
+                            type="number"
+                            defaultValue={editingProvider?.max_tokens || 8192}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Context Size</label>
+                          <input
+                            name="context_size"
+                            type="number"
+                            defaultValue={editingProvider?.context_size || 128000}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Temperature</label>
+                          <input
+                            name="temperature"
+                            type="text"
+                            defaultValue={editingProvider?.temperature || '0.7'}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                      </div>
+                      
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                        <label className="flex items-center gap-2 p-3 bg-[var(--color-background)] rounded-lg cursor-pointer">
+                          <input name="is_enabled" type="checkbox" defaultChecked={editingProvider?.is_enabled ?? true} className="w-4 h-4" />
+                          <span className="text-sm text-[var(--color-text)]">Enabled</span>
+                        </label>
+                        <label className="flex items-center gap-2 p-3 bg-[var(--color-background)] rounded-lg cursor-pointer">
+                          <input name="is_default" type="checkbox" defaultChecked={editingProvider?.is_default ?? false} className="w-4 h-4" />
+                          <span className="text-sm text-[var(--color-text)]">Default Model</span>
+                        </label>
+                        <label className="flex items-center gap-2 p-3 bg-[var(--color-background)] rounded-lg cursor-pointer">
+                          <input name="is_vision_default" type="checkbox" defaultChecked={editingProvider?.is_vision_default ?? false} className="w-4 h-4" />
+                          <span className="text-sm text-[var(--color-text)]">Vision Model</span>
+                        </label>
+                      </div>
+                      
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                        <label className="flex items-center gap-2 p-3 bg-[var(--color-background)] rounded-lg cursor-pointer">
+                          <input name="is_multimodal" type="checkbox" defaultChecked={editingProvider?.is_multimodal ?? false} className="w-4 h-4" />
+                          <span className="text-sm text-[var(--color-text)]">Multimodal (Vision)</span>
+                        </label>
+                        <label className="flex items-center gap-2 p-3 bg-[var(--color-background)] rounded-lg cursor-pointer">
+                          <input name="supports_tools" type="checkbox" defaultChecked={editingProvider?.supports_tools ?? true} className="w-4 h-4" />
+                          <span className="text-sm text-[var(--color-text)]">Supports Tools</span>
+                        </label>
+                        <label className="flex items-center gap-2 p-3 bg-[var(--color-background)] rounded-lg cursor-pointer">
+                          <input name="supports_streaming" type="checkbox" defaultChecked={editingProvider?.supports_streaming ?? true} className="w-4 h-4" />
+                          <span className="text-sm text-[var(--color-text)]">Supports Streaming</span>
+                        </label>
                       </div>
                       
                       <div>
-                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Temperature (default)</label>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Vision Prompt (optional)</label>
+                        <textarea
+                          name="vision_prompt"
+                          rows={3}
+                          defaultValue={editingProvider?.vision_prompt || ''}
+                          placeholder="Custom prompt for image descriptions. Use {user_message} placeholder."
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                        />
+                      </div>
+                      
+                      <div className="flex gap-3">
+                        <button
+                          type="submit"
+                          disabled={isSaving}
+                          className="px-4 py-2 bg-[var(--color-primary)] text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+                        >
+                          {isSaving ? 'Saving...' : editingProvider ? 'Update Provider' : 'Add Provider'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setShowProviderForm(false); setEditingProvider(null); }}
+                          className="px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] rounded-lg hover:bg-[var(--color-background)]"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                )}
+                
+                {/* LEGACY LLM CONNECTION */}
+                <details className="bg-[var(--color-surface)] rounded-xl border border-[var(--color-border)]">
+                  <summary className="p-4 cursor-pointer text-[var(--color-text)] font-medium">
+                    Legacy LLM Settings (fallback if no providers configured)
+                  </summary>
+                  <div className="p-6 pt-0">
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Base URL</label>
                         <input
-                          type="number"
-                          min="0"
-                          max="2"
-                          step="0.1"
-                          value={llmSettings.llm_temperature}
-                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_temperature: parseFloat(e.target.value) || 0.7 })}
+                          type="text"
+                          value={llmSettings.llm_api_base_url}
+                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_api_base_url: e.target.value })}
+                          placeholder="http://localhost:11434/v1"
                           className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                         />
+                        <p className="text-xs text-[var(--color-text-secondary)] mt-1">OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, etc.)</p>
+                      </div>
+                    
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Key</label>
+                        <input
+                          type="password"
+                          value={llmSettings.llm_api_key}
+                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_api_key: e.target.value })}
+                          placeholder="sk-xxxxx or leave empty"
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        />
+                      </div>
+                    
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Default Model</label>
+                        <input
+                          type="text"
+                          value={llmSettings.llm_model}
+                          onChange={(e) => setLLMSettings({ ...llmSettings, llm_model: e.target.value })}
+                          placeholder="default"
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        />
+                      </div>
+                    
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Timeout (seconds)</label>
+                          <input
+                            type="number"
+                            min="10"
+                            max="600"
+                            value={llmSettings.llm_timeout}
+                            onChange={(e) => setLLMSettings({ ...llmSettings, llm_timeout: parseInt(e.target.value) || 300 })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                        </div>
+                      
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Max Tokens (default)</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={llmSettings.llm_max_tokens}
+                            onChange={(e) => setLLMSettings({ ...llmSettings, llm_max_tokens: parseInt(e.target.value) || 4096 })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                        </div>
+                      
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Temperature (default)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="2"
+                            step="0.1"
+                            value={llmSettings.llm_temperature}
+                            onChange={(e) => setLLMSettings({ ...llmSettings, llm_temperature: parseFloat(e.target.value) || 0.7 })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                        </div>
                       </div>
                     </div>
                     
@@ -1778,6 +2227,19 @@ export default function Admin() {
                         className="rounded"
                       />
                       <label htmlFor="llm-stream" className="text-sm text-[var(--color-text)]">Enable streaming by default</label>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="llm-multimodal"
+                        checked={llmSettings.llm_multimodal}
+                        onChange={(e) => setLLMSettings({ ...llmSettings, llm_multimodal: e.target.checked })}
+                        className="rounded"
+                      />
+                      <label htmlFor="llm-multimodal" className="text-sm text-[var(--color-text)]">
+                        Model supports vision/images (multimodal)
+                      </label>
                     </div>
                     
                     {/* History Compression Settings */}
@@ -1884,15 +2346,15 @@ export default function Admin() {
                       )}
                     </div>
                   </div>
-                </div>
-                
-                <button
-                  onClick={saveLLMSettings}
-                  disabled={isSaving}
-                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
-                >
-                  {isSaving ? 'Saving...' : 'Save LLM Settings'}
-                </button>
+                  
+                  <button
+                    onClick={saveLLMSettings}
+                    disabled={isSaving}
+                    className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50 mt-4"
+                  >
+                    {isSaving ? 'Saving...' : 'Save Legacy Settings'}
+                  </button>
+                </details>
               </div>
             )}
             
@@ -2215,6 +2677,11 @@ export default function Admin() {
                               {chain.debug && (
                                 <span className="px-2 py-0.5 rounded text-xs bg-yellow-500/20 text-yellow-400">
                                   🐛 Debug
+                                </span>
+                              )}
+                              {chain.skip_if_rag_hit && (
+                                <span className="px-2 py-0.5 rounded text-xs bg-green-500/20 text-green-400">
+                                  Skip if RAG
                                 </span>
                               )}
                             </div>
@@ -3244,6 +3711,15 @@ export default function Admin() {
                           className="rounded"
                         />
                         <span className="text-[var(--color-text)]">🐛 Debug</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer text-sm" title="Skip this filter chain if RAG (knowledge base) found results">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.skip_if_rag_hit}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, skip_if_rag_hit: e.target.checked })}
+                          className="rounded"
+                        />
+                        <span className="text-[var(--color-text)]">Skip if RAG hit</span>
                       </label>
                       <button
                         onClick={() => setFilterChainJsonMode(!filterChainJsonMode)}

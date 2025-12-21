@@ -51,6 +51,14 @@ async def upload_document(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload a document for RAG"""
+    from app.models.models import SystemSetting
+    
+    # Get max upload size from system settings
+    result = await db.execute(
+        select(SystemSetting).where(SystemSetting.key == "max_upload_size_mb")
+    )
+    setting = result.scalar_one_or_none()
+    max_upload_size_mb = int(setting.value) if setting else settings.MAX_UPLOAD_SIZE_MB
     
     # Check file type - allow by MIME type OR by extension
     file_ext = Path(file.filename).suffix.lower() if file.filename else ""
@@ -67,10 +75,10 @@ async def upload_document(
     contents = await file.read()
     file_size = len(contents)
     
-    if file_size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+    if file_size > max_upload_size_mb * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File too large. Max size: {settings.MAX_UPLOAD_SIZE_MB}MB",
+            detail=f"File too large. Max size: {max_upload_size_mb}MB",
         )
     
     # Save file with UUID name (prevents path traversal)

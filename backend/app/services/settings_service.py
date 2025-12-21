@@ -67,8 +67,9 @@ SETTING_DEFAULTS = {
     # History compression (reduce context window usage for long conversations)
     "history_compression_enabled": "true",  # Compress old messages into summaries
     "history_compression_threshold": "20",  # Compress after this many messages
-    "history_compression_keep_recent": "6",  # Keep this many recent message pairs intact
+    "history_compression_keep_recent": "10",  # Keep this many recent message pairs intact
     "history_compression_target_tokens": "8000",  # Target total tokens after compression
+    "model_context_size": "128000",  # Model context window size (for agent memory threshold)
     
     # API Rate Limits (per minute, per API key)
     "api_rate_limit_completions": "60",  # Chat completions per minute
@@ -174,7 +175,7 @@ class SettingsService:
             "base_url": settings["llm_api_base_url"],
             "api_key": settings["llm_api_key"],
             "model": settings["llm_model"],
-            "timeout": int(settings["llm_timeout"]) if settings["llm_timeout"] else 120,
+            "timeout": int(settings["llm_timeout"]) if settings["llm_timeout"] else 300,
             "max_tokens": int(settings["llm_max_tokens"]) if settings["llm_max_tokens"] else 4096,
             "temperature": float(settings["llm_temperature"]) if settings["llm_temperature"] else 0.7,
             "stream": settings["llm_stream_default"].lower() in ("true", "1", "yes", "on"),

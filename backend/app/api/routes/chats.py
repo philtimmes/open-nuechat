@@ -3,9 +3,9 @@ Chat API routes
 """
 import logging
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, or_
 from typing import Optional, List, Dict
 from datetime import datetime, timezone
 from pydantic import BaseModel
@@ -124,18 +124,35 @@ async def list_chats(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List user's chats with pagination"""
+    """List user's chats with pagination. Search queries both title and message content."""
     
-    query = select(Chat).where(Chat.owner_id == user.id)
+    base_filter = Chat.owner_id == user.id
     
     if search:
-        query = query.where(Chat.title.ilike(f"%{search}%"))
+        # Search in both title and message content
+        # Find chat IDs that have matching messages
+        message_search = (
+            select(Message.chat_id)
+            .join(Chat, Message.chat_id == Chat.id)
+            .where(Chat.owner_id == user.id)
+            .where(Message.content.ilike(f"%{search}%"))
+            .distinct()
+        )
+        message_result = await db.execute(message_search)
+        matching_chat_ids = [row[0] for row in message_result.all()]
+        
+        # Combine: title matches OR has matching messages
+        search_filter = or_(
+            Chat.title.ilike(f"%{search}%"),
+            Chat.id.in_(matching_chat_ids) if matching_chat_ids else False
+        )
+        query = select(Chat).where(base_filter, search_filter)
+        count_query = select(func.count(Chat.id)).where(base_filter, search_filter)
+    else:
+        query = select(Chat).where(base_filter)
+        count_query = select(func.count(Chat.id)).where(base_filter)
     
     # Get total count
-    count_query = select(func.count(Chat.id)).where(Chat.owner_id == user.id)
-    if search:
-        count_query = count_query.where(Chat.title.ilike(f"%{search}%"))
-    
     total_result = await db.execute(count_query)
     total = total_result.scalar()
     
@@ -229,6 +246,8 @@ async def update_chat(
                 # Use the assistant's actual model
                 chat.model = assistant.model
                 chat.system_prompt = assistant.system_prompt
+                chat.assistant_id = assistant.id
+                chat.assistant_name = assistant.name
                 
                 # Check if already linked to this assistant
                 existing_conv = await db.execute(
@@ -254,7 +273,20 @@ async def update_chat(
                 # Assistant not found, store the raw model value
                 chat.model = new_model
         else:
+            # Switching to a regular model - clear assistant association
             chat.model = new_model
+            chat.assistant_id = None
+            chat.assistant_name = None
+            
+            # Remove assistant conversation link if exists
+            existing_conv = await db.execute(
+                select(AssistantConversation).where(
+                    AssistantConversation.chat_id == chat_id
+                )
+            )
+            existing = existing_conv.scalar_one_or_none()
+            if existing:
+                await db.delete(existing)
             
     if updates.system_prompt is not None:
         chat.system_prompt = updates.system_prompt
@@ -326,7 +358,8 @@ async def delete_chat(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a chat and all its messages and generated images"""
+    """Delete a chat and all its messages, generated images, and knowledge index entries"""
+    from app.models.models import Document
     
     chat = await _get_user_chat(db, user, chat_id)
     
@@ -334,6 +367,26 @@ async def delete_chat(
     deleted_images = await delete_chat_images(db, chat_id)
     if deleted_images > 0:
         logger.debug(f"Deleted {deleted_images} generated images for chat {chat_id}")
+    
+    # Remove from chat knowledge index if indexed
+    if chat.is_knowledge_indexed and user.chat_knowledge_store_id:
+        try:
+            # Find the document representing this chat in the knowledge store
+            result = await db.execute(
+                select(Document).where(
+                    Document.knowledge_store_id == user.chat_knowledge_store_id,
+                    Document.file_path == f"chat://{chat_id}"
+                )
+            )
+            doc = result.scalar_one_or_none()
+            
+            if doc:
+                rag_service = RAGService()
+                await rag_service.delete_document(db, doc.id)
+                logger.info(f"Removed chat {chat_id} from knowledge index")
+        except Exception as e:
+            logger.warning(f"Failed to remove chat from knowledge index: {e}")
+            # Don't fail the deletion if index removal fails
     
     await db.delete(chat)
     await db.commit()
@@ -346,12 +399,49 @@ async def delete_all_chats(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete all user's chats and their generated images"""
+    """Delete all user's chats, their generated images, and chat knowledge index"""
+    from app.models.models import Document, DocumentChunk, KnowledgeStore
     
     # Delete all generated images first
     deleted_images = await delete_user_images(db, user.id)
     if deleted_images > 0:
         logger.debug(f"Deleted {deleted_images} generated images for user {user.id}")
+    
+    # Clear the entire chat knowledge store if exists
+    if user.chat_knowledge_store_id:
+        try:
+            # Delete all documents and chunks in the chat knowledge store
+            result = await db.execute(
+                select(Document.id).where(
+                    Document.knowledge_store_id == user.chat_knowledge_store_id
+                )
+            )
+            doc_ids = [row[0] for row in result.all()]
+            
+            if doc_ids:
+                # Delete chunks for all documents
+                await db.execute(
+                    delete(DocumentChunk).where(DocumentChunk.document_id.in_(doc_ids))
+                )
+                # Delete documents
+                await db.execute(
+                    delete(Document).where(Document.knowledge_store_id == user.chat_knowledge_store_id)
+                )
+            
+            # Delete the knowledge store itself
+            await db.execute(
+                delete(KnowledgeStore).where(KnowledgeStore.id == user.chat_knowledge_store_id)
+            )
+            
+            # Clear user's chat knowledge settings
+            user.chat_knowledge_store_id = None
+            user.all_chats_knowledge_enabled = False
+            user.chat_knowledge_status = "idle"
+            
+            logger.info(f"Deleted chat knowledge store for user {user.id}")
+        except Exception as e:
+            logger.warning(f"Failed to delete chat knowledge store: {e}")
+            # Don't fail the deletion if knowledge store removal fails
     
     await db.execute(delete(Chat).where(Chat.owner_id == user.id))
     await db.commit()
@@ -915,14 +1005,24 @@ zip_logger = logging.getLogger(__name__)
 async def get_zip_manifest_from_db(db: AsyncSession, chat_id: str) -> str | None:
     """Get the LLM manifest for a chat's uploaded zip from database"""
     result = await db.execute(
-        select(UploadedArchive).where(UploadedArchive.chat_id == chat_id)
+        select(UploadedArchive)
+        .where(UploadedArchive.chat_id == chat_id)
+        .order_by(UploadedArchive.created_at.desc())
+        .limit(1)
     )
     archive = result.scalar_one_or_none()
     return archive.llm_manifest if archive else None
 
 
-async def get_uploaded_files_for_chat(db: AsyncSession, chat_id: str) -> list[dict]:
-    """Get all uploaded files for a chat as artifact-format dicts"""
+async def get_uploaded_files_for_chat(db: AsyncSession, chat_id: str, include_agent_files: bool = False) -> list[dict]:
+    """
+    Get all uploaded files for a chat as artifact-format dicts.
+    
+    Args:
+        include_agent_files: If False (default), excludes {AgentNNNN}.md files
+    """
+    from app.services.agent_memory import is_agent_file
+    
     result = await db.execute(
         select(UploadedFile)
         .where(UploadedFile.chat_id == chat_id)
@@ -932,6 +1032,10 @@ async def get_uploaded_files_for_chat(db: AsyncSession, chat_id: str) -> list[di
     
     artifacts = []
     for f in files:
+        # Skip agent memory files unless explicitly requested
+        if not include_agent_files and is_agent_file(f.filepath):
+            continue
+            
         artifacts.append({
             "id": f.id,
             "title": f.filename,
@@ -962,9 +1066,12 @@ async def get_chat_uploaded_files(
     
     artifacts = await get_uploaded_files_for_chat(db, chat_id)
     
-    # Also get archive metadata
+    # Also get archive metadata (most recent if multiple)
     result = await db.execute(
-        select(UploadedArchive).where(UploadedArchive.chat_id == chat_id)
+        select(UploadedArchive)
+        .where(UploadedArchive.chat_id == chat_id)
+        .order_by(UploadedArchive.created_at.desc())
+        .limit(1)
     )
     archive = result.scalar_one_or_none()
     
@@ -1014,6 +1121,8 @@ async def save_uploaded_file(
         select(UploadedFile)
         .where(UploadedFile.chat_id == chat_id)
         .where(UploadedFile.filepath == filename)
+        .order_by(UploadedFile.created_at.desc())
+        .limit(1)
     )
     existing = result.scalar_one_or_none()
     
@@ -1024,6 +1133,18 @@ async def save_uploaded_file(
         existing.size = len(content)
         existing.signatures = json.dumps(signatures) if signatures else None
         logger.info(f"[SAVE_UPLOAD] Updated existing file {filename}")
+        
+        # Clean up any duplicate files (keep only the one we're updating)
+        dup_result = await db.execute(
+            select(UploadedFile)
+            .where(UploadedFile.chat_id == chat_id)
+            .where(UploadedFile.filepath == filename)
+            .where(UploadedFile.id != existing.id)
+        )
+        duplicates = dup_result.scalars().all()
+        for dup in duplicates:
+            await db.delete(dup)
+            logger.info(f"[SAVE_UPLOAD] Cleaned up duplicate file {filename}")
     else:
         # Create new file
         uploaded_file = UploadedFile(
@@ -1186,10 +1307,13 @@ async def get_zip_file(
     
     # Try exact path match first
     result = await db.execute(
-        select(UploadedFile).where(
+        select(UploadedFile)
+        .where(
             UploadedFile.chat_id == chat_id,
             UploadedFile.filepath == path
         )
+        .order_by(UploadedFile.created_at.desc())
+        .limit(1)
     )
     uploaded_file = result.scalar_one_or_none()
     
@@ -1306,3 +1430,525 @@ async def delete_code_summary(
     await db.commit()
     
     return {"message": "Code summary deleted"}
+
+
+# =============================================================================
+# CHAT IMPORT
+# =============================================================================
+
+class ImportedMessage(BaseModel):
+    role: str
+    content: str
+    created_at: Optional[datetime] = None
+
+class ImportedChat(BaseModel):
+    title: str
+    messages: List[ImportedMessage]
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+class ImportResult(BaseModel):
+    success: bool
+    chat_id: Optional[str] = None
+    title: str
+    message_count: int
+    source: str
+    error: Optional[str] = None
+
+class ImportResponse(BaseModel):
+    total_imported: int
+    total_failed: int
+    results: List[ImportResult]
+
+
+def parse_chatgpt_export(data: dict) -> List[ImportedChat]:
+    """Parse ChatGPT export format (conversations.json)"""
+    chats = []
+    
+    # ChatGPT exports as a list of conversations
+    conversations = data if isinstance(data, list) else data.get("conversations", [data])
+    
+    for conv in conversations:
+        title = conv.get("title", "Imported Chat")
+        messages = []
+        created_at = None
+        
+        # ChatGPT format has a mapping of message IDs to message objects
+        mapping = conv.get("mapping", {})
+        
+        # Find the root and traverse the tree
+        def extract_messages(node_id: str):
+            if not node_id or node_id not in mapping:
+                return
+            
+            node = mapping[node_id]
+            message = node.get("message")
+            
+            if message:
+                author_role = message.get("author", {}).get("role", "")
+                content_parts = message.get("content", {}).get("parts", [])
+                
+                if author_role in ["user", "assistant"] and content_parts:
+                    content = "\n".join(str(p) for p in content_parts if isinstance(p, str))
+                    if content.strip():
+                        create_time = message.get("create_time")
+                        msg_time = datetime.fromtimestamp(create_time, tz=timezone.utc) if create_time else None
+                        
+                        messages.append(ImportedMessage(
+                            role=author_role,
+                            content=content,
+                            created_at=msg_time
+                        ))
+            
+            # Follow children
+            for child_id in node.get("children", []):
+                extract_messages(child_id)
+        
+        # Find root nodes (nodes with no parent)
+        for node_id, node in mapping.items():
+            if node.get("parent") is None:
+                extract_messages(node_id)
+                break
+        
+        # Get conversation create time
+        create_time = conv.get("create_time")
+        if create_time:
+            created_at = datetime.fromtimestamp(create_time, tz=timezone.utc)
+        
+        if messages:
+            chats.append(ImportedChat(
+                title=title,
+                messages=messages,
+                created_at=created_at
+            ))
+    
+    return chats
+
+
+def parse_grok_export(data: dict) -> List[ImportedChat]:
+    """Parse Grok/X.AI export format
+    
+    Grok export structure:
+    {
+      "conversations": [
+        {
+          "conversation": { "title": "...", "create_time": "...", ... },
+          "responses": [
+            {
+              "response": {
+                "message": "content",
+                "sender": "human" | "assistant",
+                "create_time": { "$date": { "$numberLong": "1764622426262" } },
+                "model": "grok-3",
+                ...
+              },
+              "share_link": null
+            }
+          ]
+        }
+      ]
+    }
+    """
+    chats = []
+    
+    # Get conversations array
+    conversations = data.get("conversations", [])
+    if not conversations and isinstance(data, list):
+        conversations = data
+    
+    for conv_wrapper in conversations:
+        # Handle the nested structure: { "conversation": {...}, "responses": [...] }
+        conv_metadata = conv_wrapper.get("conversation", conv_wrapper)
+        responses = conv_wrapper.get("responses", [])
+        
+        # If no responses array, try to get messages from the conversation directly
+        if not responses:
+            responses = conv_metadata.get("messages", conv_metadata.get("responses", []))
+        
+        title = conv_metadata.get("title", conv_metadata.get("name", "Imported from Grok"))
+        messages = []
+        
+        # Get conversation-level timestamp
+        conv_time = None
+        conv_create_time = conv_metadata.get("create_time")
+        if conv_create_time:
+            try:
+                if isinstance(conv_create_time, str):
+                    conv_time = datetime.fromisoformat(conv_create_time.replace("Z", "+00:00"))
+            except:
+                pass
+        
+        for resp_wrapper in responses:
+            # Handle nested response: { "response": {...}, "share_link": null }
+            resp = resp_wrapper.get("response", resp_wrapper)
+            
+            # Get sender/role
+            role = resp.get("sender", resp.get("role", "")).lower()
+            
+            # Get message content
+            content = resp.get("message", resp.get("content", resp.get("text", "")))
+            
+            # Map roles to standard roles
+            if role in ["human", "user"]:
+                role = "user"
+            elif role in ["grok", "assistant", "ai", "bot"]:
+                role = "assistant"
+            else:
+                continue
+            
+            if content and content.strip():
+                # Parse timestamp - Grok uses MongoDB-style dates
+                msg_time = None
+                create_time = resp.get("create_time")
+                
+                if create_time:
+                    if isinstance(create_time, dict):
+                        # MongoDB format: { "$date": { "$numberLong": "1764622426262" } }
+                        date_obj = create_time.get("$date", {})
+                        if isinstance(date_obj, dict):
+                            timestamp_ms = date_obj.get("$numberLong")
+                            if timestamp_ms:
+                                try:
+                                    msg_time = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc)
+                                except:
+                                    pass
+                        elif isinstance(date_obj, (int, float)):
+                            try:
+                                msg_time = datetime.fromtimestamp(date_obj / 1000, tz=timezone.utc)
+                            except:
+                                pass
+                    elif isinstance(create_time, (int, float)):
+                        # Unix timestamp (seconds or milliseconds)
+                        try:
+                            if create_time > 1e12:  # Milliseconds
+                                msg_time = datetime.fromtimestamp(create_time / 1000, tz=timezone.utc)
+                            else:  # Seconds
+                                msg_time = datetime.fromtimestamp(create_time, tz=timezone.utc)
+                        except:
+                            pass
+                    elif isinstance(create_time, str):
+                        try:
+                            msg_time = datetime.fromisoformat(create_time.replace("Z", "+00:00"))
+                        except:
+                            pass
+                
+                messages.append(ImportedMessage(
+                    role=role,
+                    content=content,
+                    created_at=msg_time
+                ))
+        
+        if messages:
+            chats.append(ImportedChat(
+                title=title,
+                messages=messages,
+                created_at=conv_time
+            ))
+    
+    return chats
+
+
+def parse_claude_export(data: dict) -> List[ImportedChat]:
+    """Parse Claude/Anthropic export format"""
+    chats = []
+    
+    conversations = data if isinstance(data, list) else [data]
+    
+    for conv in conversations:
+        title = conv.get("title", conv.get("name", "Imported from Claude"))
+        messages = []
+        
+        msg_list = conv.get("messages", conv.get("chat_messages", []))
+        
+        for msg in msg_list:
+            role = msg.get("role", msg.get("sender", "")).lower()
+            content = msg.get("content", msg.get("text", ""))
+            
+            # Handle content that might be a list of content blocks
+            if isinstance(content, list):
+                content = "\n".join(
+                    c.get("text", str(c)) if isinstance(c, dict) else str(c) 
+                    for c in content
+                )
+            
+            if role in ["human", "user"]:
+                role = "user"
+            elif role in ["assistant", "claude"]:
+                role = "assistant"
+            else:
+                continue
+            
+            if content and content.strip():
+                timestamp = msg.get("created_at", msg.get("timestamp"))
+                msg_time = None
+                if timestamp:
+                    try:
+                        if isinstance(timestamp, str):
+                            msg_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    except:
+                        pass
+                
+                messages.append(ImportedMessage(
+                    role=role,
+                    content=content,
+                    created_at=msg_time
+                ))
+        
+        if messages:
+            chats.append(ImportedChat(
+                title=title,
+                messages=messages
+            ))
+    
+    return chats
+
+
+def parse_generic_export(data: dict) -> List[ImportedChat]:
+    """Parse generic chat export format - tries to be flexible"""
+    chats = []
+    
+    # Try to find conversations array
+    conversations = data
+    if isinstance(data, dict):
+        for key in ["conversations", "chats", "data", "items", "history"]:
+            if key in data and isinstance(data[key], list):
+                conversations = data[key]
+                break
+        if conversations == data:
+            conversations = [data]
+    
+    if not isinstance(conversations, list):
+        conversations = [conversations]
+    
+    for conv in conversations:
+        if not isinstance(conv, dict):
+            continue
+            
+        # Find title
+        title = None
+        for key in ["title", "name", "subject", "topic"]:
+            if key in conv:
+                title = conv[key]
+                break
+        title = title or "Imported Chat"
+        
+        # Find messages
+        messages = []
+        msg_list = None
+        for key in ["messages", "conversation", "chat", "history", "turns"]:
+            if key in conv and isinstance(conv[key], list):
+                msg_list = conv[key]
+                break
+        
+        if not msg_list:
+            continue
+        
+        for msg in msg_list:
+            if not isinstance(msg, dict):
+                continue
+            
+            # Find role
+            role = None
+            for key in ["role", "sender", "author", "from", "type"]:
+                if key in msg:
+                    role = str(msg[key]).lower()
+                    break
+            
+            # Normalize role
+            if role in ["human", "user", "you", "me"]:
+                role = "user"
+            elif role in ["assistant", "ai", "bot", "gpt", "claude", "grok", "model", "system_response"]:
+                role = "assistant"
+            else:
+                continue
+            
+            # Find content
+            content = None
+            for key in ["content", "text", "message", "body", "value"]:
+                if key in msg:
+                    content = msg[key]
+                    break
+            
+            if isinstance(content, list):
+                content = "\n".join(str(c.get("text", c) if isinstance(c, dict) else c) for c in content)
+            
+            if content and str(content).strip():
+                messages.append(ImportedMessage(
+                    role=role,
+                    content=str(content)
+                ))
+        
+        if messages:
+            chats.append(ImportedChat(
+                title=title,
+                messages=messages
+            ))
+    
+    return chats
+
+
+def detect_and_parse_export(data: dict) -> tuple[List[ImportedChat], str]:
+    """Detect export format and parse accordingly"""
+    
+    # Check for ChatGPT format (has mapping with message tree structure)
+    if isinstance(data, list) and data and "mapping" in data[0]:
+        return parse_chatgpt_export(data), "ChatGPT"
+    if isinstance(data, dict) and "mapping" in data:
+        return parse_chatgpt_export(data), "ChatGPT"
+    
+    # Check for conversations array with mapping
+    if isinstance(data, dict) and "conversations" in data:
+        if data["conversations"] and isinstance(data["conversations"], list):
+            first_conv = data["conversations"][0]
+            if isinstance(first_conv, dict):
+                if "mapping" in first_conv:
+                    return parse_chatgpt_export(data), "ChatGPT"
+                # Check for Grok's specific nested structure: { "conversation": {...}, "responses": [...] }
+                if "conversation" in first_conv and "responses" in first_conv:
+                    return parse_grok_export(data), "Grok"
+    
+    # Check for Grok format (has specific grok indicators or xai)
+    if isinstance(data, dict):
+        data_str = str(data).lower()[:5000]
+        if "grok" in data_str or "xai_user_id" in data_str or '"sender": "human"' in str(data)[:5000]:
+            return parse_grok_export(data), "Grok"
+    
+    # Check for Claude format
+    if isinstance(data, dict):
+        data_str = str(data).lower()[:1000]
+        if "claude" in data_str or "anthropic" in data_str:
+            return parse_claude_export(data), "Claude"
+    
+    # Fall back to generic parser
+    return parse_generic_export(data), "Generic"
+
+
+@router.post("/import", response_model=ImportResponse)
+async def import_chats(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    file: UploadFile = File(...),
+):
+    """
+    Import chats from other AI platforms.
+    
+    Supported formats:
+    - ChatGPT (conversations.json export)
+    - Grok/X.AI exports
+    - Claude/Anthropic exports
+    - Generic JSON chat formats
+    
+    The importer will auto-detect the format and parse accordingly.
+    """
+    import json
+    import uuid
+    
+    # Read file content
+    try:
+        content = await file.read()
+        data = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid JSON: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to read file: {str(e)}"
+        )
+    
+    # Parse the export
+    try:
+        parsed_chats, source = detect_and_parse_export(data)
+    except Exception as e:
+        logger.error(f"Failed to parse export: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to parse export: {str(e)}"
+        )
+    
+    if not parsed_chats:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No valid chats found in the export file"
+        )
+    
+    # Sort chats from newest to oldest based on created_at or first message time
+    def get_chat_time(chat):
+        if chat.created_at:
+            return chat.created_at
+        # Fall back to first message time if available
+        if chat.messages and chat.messages[0].created_at:
+            return chat.messages[0].created_at
+        return datetime.min.replace(tzinfo=timezone.utc)
+    
+    parsed_chats.sort(key=get_chat_time, reverse=True)
+    
+    results = []
+    total_imported = 0
+    total_failed = 0
+    
+    for parsed_chat in parsed_chats:
+        try:
+            # Create the chat
+            chat_id = str(uuid.uuid4())
+            chat = Chat(
+                id=chat_id,
+                owner_id=user.id,
+                title=parsed_chat.title[:200],  # Truncate long titles
+                model=parsed_chat.model or settings.LLM_MODEL,
+                system_prompt=parsed_chat.system_prompt,
+                created_at=parsed_chat.created_at or datetime.now(timezone.utc),
+            )
+            db.add(chat)
+            await db.flush()
+            
+            # Create messages
+            parent_id = None
+            for i, msg in enumerate(parsed_chat.messages):
+                msg_id = str(uuid.uuid4())
+                message = Message(
+                    id=msg_id,
+                    chat_id=chat_id,
+                    sender_id=user.id if msg.role == "user" else None,
+                    role=MessageRole.USER if msg.role == "user" else MessageRole.ASSISTANT,
+                    content=msg.content,
+                    content_type=ContentType.TEXT,
+                    parent_id=parent_id,
+                    created_at=msg.created_at or datetime.now(timezone.utc),
+                )
+                db.add(message)
+                parent_id = msg_id
+            
+            await db.commit()
+            
+            results.append(ImportResult(
+                success=True,
+                chat_id=chat_id,
+                title=parsed_chat.title,
+                message_count=len(parsed_chat.messages),
+                source=source
+            ))
+            total_imported += 1
+            
+        except Exception as e:
+            logger.error(f"Failed to import chat '{parsed_chat.title}': {e}")
+            await db.rollback()
+            results.append(ImportResult(
+                success=False,
+                title=parsed_chat.title,
+                message_count=len(parsed_chat.messages),
+                source=source,
+                error=str(e)
+            ))
+            total_failed += 1
+    
+    logger.info(f"[IMPORT] User {user.id} imported {total_imported} chats from {source}, {total_failed} failed")
+    
+    return ImportResponse(
+        total_imported=total_imported,
+        total_failed=total_failed,
+        results=results
+    )

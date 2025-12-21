@@ -12,8 +12,11 @@ export interface ChatSlice {
   chats: Chat[];
   currentChat: Chat | null;
   isLoadingChats: boolean;
+  hasMoreChats: boolean;
+  chatPage: number;
+  chatSearchQuery: string;
   
-  fetchChats: () => Promise<void>;
+  fetchChats: (loadMore?: boolean, search?: string) => Promise<void>;
   createChat: (model?: string, systemPrompt?: string) => Promise<Chat>;
   setCurrentChat: (chat: Chat | null) => void;
   deleteChat: (chatId: string) => Promise<void>;
@@ -83,6 +86,8 @@ export interface ArtifactSlice {
   fetchUploadedData: (chatId: string) => Promise<void>;
   setZipContext: (context: string | null) => void;
   setGeneratedImage: (messageId: string, image: GeneratedImage) => void;
+  setArtifacts: (artifacts: Artifact[]) => void;
+  updateArtifact: (key: string, artifact: Artifact) => void;
 }
 
 /**

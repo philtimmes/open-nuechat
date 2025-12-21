@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 class RateLimitPart(ToLLMPart):
-    """Rate limits requests per user."""
+    """Rate limits requests per user. Pauses instead of failing."""
     
     def __init__(self, max_requests: int = 20, window_seconds: int = 60, enabled: bool = True):
         super().__init__("rate_limit", enabled=enabled)
@@ -49,16 +49,30 @@ class RateLimitPart(ToLLMPart):
     async def process(self, content: Any, ctx: ChainContext) -> ChainResult:
         max_req = self.get_config("max_requests", 20)
         window = self.get_config("window_seconds", 60)
+        wait_time = 0
         
         async with self._lock:
             now = datetime.now(timezone.utc)
             reqs = self._requests[ctx.user_id]
             cutoff = now.timestamp() - window
             reqs = [r for r in reqs if r.timestamp() > cutoff]
+            self._requests[ctx.user_id] = reqs
             
             if len(reqs) >= max_req:
-                return ChainResult.block(f"Rate limit: {max_req}/{window}s")
-            
+                # Calculate wait time until oldest request expires
+                oldest = min(r.timestamp() for r in reqs)
+                wait_time = (oldest + window) - now.timestamp() + 0.1  # +0.1s buffer
+        
+        # Wait outside the lock if needed
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+        
+        # Record this request
+        async with self._lock:
+            now = datetime.now(timezone.utc)
+            reqs = self._requests[ctx.user_id]
+            cutoff = now.timestamp() - window
+            reqs = [r for r in reqs if r.timestamp() > cutoff]
             reqs.append(now)
             self._requests[ctx.user_id] = reqs
         

@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.39"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.51"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -194,7 +194,7 @@ def create_stream_error(message_id, error) -> dict
 def create_error(message, code?) -> dict
 ```
 
-### app/services/websocket.py (UPDATED NC-0.6.39)
+### app/services/websocket.py (UPDATED NC-0.6.49)
 
 ```python
 class StreamingHandler:
@@ -209,13 +209,12 @@ class StreamingHandler:
         # Set the active LLM stream for direct cancellation
     
     async def request_stop(self)
-        # Request to stop the current stream - AGGRESSIVE STOP (NC-0.6.39)
+        # Request to stop the current stream - AGGRESSIVE STOP (NC-0.6.49)
         # 1. Sets _stop_requested flag
-        # 2. Closes httpx response via aclose()
-        # 3. Closes stream via close()
-        # 4. Closes underlying HTTP client if accessible
-        # 5. Cancels streaming task as backup
-        # 6. Clears stream reference
+        # 2. Cancels streaming task FIRST (most reliable)
+        # 3. Closes httpx response via aclose() with timeout
+        # 4. Closes stream via close() with timeout
+        # 5. Clears task and stream references
     
     def is_stop_requested(self) -> bool
         # Check if stop has been requested
@@ -619,6 +618,34 @@ interface FlowEditorProps {
 // - Real-time definition updates via onChange
 ```
 
+### frontend/src/contexts/WebSocketContext.tsx (UPDATED NC-0.6.50)
+
+Streaming detection patterns for real-time tool execution and artifact tracking.
+
+```typescript
+// Tool detection patterns (interrupt stream when matched)
+const STREAM_FIND_LINE_PATTERN = /<find_line\s+path=["']...\/?>/i;
+const STREAM_FIND_PATTERN_WITH_PATH = /<find\s+path=["']...["']\s+search=["']...["']\s*\/?>/i;
+const STREAM_FIND_PATTERN_NO_PATH = /<find\s+search=["']...["']\s*\/?>/i;
+const STREAM_REQUEST_FILE_PATTERN = /<request_file\s+path=["']...["']\s*\/?>/i;
+const STREAM_SEARCH_REPLACE_PATTERN = /<search_replace\s+path=...>...SEARCH...REPLACE...</search_replace>/i;
+
+// Artifact detection patterns (track but don't interrupt)
+const STREAM_ARTIFACT_XML_PATTERN = /<artifact\s+...title=["']...["']...>...</artifact>/gi;
+const STREAM_ARTIFACT_EQUALS_PATTERN = /<artifact=...>...</artifact>/gi;
+const STREAM_ARTIFACT_FILENAME_PATTERN = /<filename.ext>...</filename.ext>/gi;
+const STREAM_CODE_FENCE_PATTERN = /filename.ext\n```lang\n...\n```/gi;
+
+// Refs for tracking during stream
+processedToolTagsRef: Set<string>        // Prevents duplicate processing
+savedArtifactsDuringStreamRef: string[]  // Artifact names for notification
+toolCallHistoryRef: { key, timestamp }[] // Loop detection (max 3 same calls in 60s)
+
+// Tool result notification includes saved artifacts:
+// "[FILES SAVED] The following files were saved during your response: file1.ts, file2.tsx
+//  You can reference these files in your continued response."
+```
+
 ### frontend/src/stores/chat/types.ts (NEW)
 
 ```typescript
@@ -861,6 +888,41 @@ class DocumentProcessor:
 
 ---
 
+## User Settings API (app/api/routes/user_settings.py) (NEW NC-0.6.45)
+
+### GET /user/chat-knowledge
+
+Get current chat knowledge indexing status.
+
+```python
+@router.get("/chat-knowledge")
+async def get_chat_knowledge_status(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ChatKnowledgeStatus:
+    # Returns: { enabled, status, indexed_count, total_count, last_indexed }
+    # status: "idle" | "processing" | "completed"
+```
+
+### POST /user/chat-knowledge
+
+Toggle chat knowledge indexing on/off.
+
+```python
+@router.post("/chat-knowledge")
+async def toggle_chat_knowledge(
+    request: ChatKnowledgeToggle,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ChatKnowledgeStatus:
+    # When enabled: Creates "My Chat History" knowledge store
+    # Starts background task to index all chats (newest first)
+    # When disabled: Clears indexed flags and deletes knowledge store
+```
+
+---
+
 ## Chats API (app/api/routes/chats.py)
 
 ### POST /chats/{chat_id}/uploaded-files (NEW NC-0.6.39)
@@ -956,6 +1018,91 @@ async def send_message(...):
     # 3. get_context_for_query() - if enable_rag and no Custom GPT
     
     # NO title generation - handled by websocket.py
+```
+
+---
+
+## Admin Routes (app/api/routes/admin.py) (UPDATED NC-0.6.50)
+
+### RAG Model Management
+
+```python
+@router.get("/admin/rag/status")
+async def get_rag_status(user: User = Depends(get_current_user)) -> dict:
+    # Returns: { status, details: {loaded, failed, model_exists}, message? }
+    # status: "ok" if loaded, "not_loaded" otherwise
+    # message: Hints to use reset endpoint if failed
+
+@router.post("/admin/rag/reset")
+async def reset_rag_model(user: User = Depends(get_current_user)) -> dict:
+    # Resets model state and retries loading
+    # Returns: { status, details, message }
+    # Use after model loading failures to retry
+```
+
+---
+
+## RAG Service (app/services/rag.py) (UPDATED NC-0.6.51)
+
+### Chat Knowledge Context with Assistant Filtering (NEW NC-0.6.51)
+
+```python
+async def get_chat_knowledge_context(
+    self,
+    db: AsyncSession,
+    user: User,
+    query: str,
+    chat_knowledge_store_id: str,
+    current_assistant_id: Optional[str] = None,
+    top_k: int = 5,
+) -> str:
+    """
+    Get context from user's chat history knowledge store with assistant filtering.
+    
+    Filters results to match current assistant context:
+    - If current_assistant_id is None: only return results from chats without an assistant
+    - If current_assistant_id is set: only return results from chats with that specific assistant
+    
+    This prevents knowledge leakage between different assistant contexts.
+    """
+```
+
+### Chunk Metadata for Chat History (UPDATED NC-0.6.51)
+
+```python
+# When indexing chats, chunk_metadata now includes:
+{
+    "chat_id": str,           # ID of the source chat
+    "chat_title": str,        # Title of the source chat
+    "source": "chat_history", # Constant identifier
+    "assistant_id": str|None, # ID of assistant used (None if no assistant)
+    "assistant_name": str|None # Name of assistant used
+}
+```
+
+### Model Loading Fix
+
+```python
+# Fixed "meta tensor" errors from accelerate library
+# Key change: low_cpu_mem_usage=False in all model loading
+
+class RAGService:
+    @classmethod
+    def get_model(cls):
+        # Multiple loading strategies with fallbacks:
+        # 1. model_kwargs={"low_cpu_mem_usage": False}
+        # 2. Basic load with device="cpu"
+        # 3. trust_remote_code=True
+        # 4. Explicit cache_folder
+        
+    @classmethod
+    def reset_model(cls):
+        # Reset model state to allow retry of loading
+        # Sets _model=None, _model_loaded=False, _model_load_failed=False
+        
+    @classmethod
+    def get_model_status(cls) -> dict:
+        # Returns: { loaded, failed, model_exists }
 ```
 
 ---
@@ -1079,9 +1226,17 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.41**
+**NC-0.6.51**
 
 Changes:
+- NC-0.6.51: **Chat Knowledge assistant context filtering** - filter chat history search by current assistant to prevent knowledge leakage between different GPTs
+- NC-0.6.50: **RAG model loading fix** (meta tensor errors), RAG admin endpoints, artifact streaming detection, tool result notifications with saved file context
+- NC-0.6.49: **Stop button fix** (background tasks), chat deletion removes knowledge index, streaming timeout (httpx.Timeout), All Models Prompt
+- NC-0.6.46: Filter chain skip_if_rag_hit option, RAG search order reorganization (Global KB → Chat History KB → Assistant/User KB → Filter Chains)
+- NC-0.6.45: Chat Knowledge Base feature - index all chats into personal knowledge store, green dot indicators for indexed chats
+- NC-0.6.44: Chat search searches message content, infinite scroll pagination for chat list, import chats sorted newest-to-oldest
+- NC-0.6.43: Grok chat import parser fix for nested response structure
+- NC-0.6.42: Anonymous sharing option for shared chats
 - NC-0.6.41: Visual node-based filter chain editor (FlowEditor.tsx), raw settings API endpoints (/admin/settings/raw, /admin/setting)
 - NC-0.6.40: Global KB authoritative injection, unified KB search (Global always, Custom GPT only when active), single-path title generation (websocket.py only)
 - NC-0.6.39: Aggressive stop generation (closes HTTP connection), file persistence to database, DB fallback for LLM file tools, remove KB upload rate limit

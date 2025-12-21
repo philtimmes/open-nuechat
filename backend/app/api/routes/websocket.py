@@ -136,17 +136,53 @@ async def websocket_endpoint(
                     logger.debug(f"chat_message content head: {content[:100]}")
                     logger.debug(f"chat_message content tail: {content[-100:]}")
                 
-                await handle_chat_message(connection, streaming_handler, user_id, payload)
+                # Run in background task so we can still receive stop_generation
+                async def run_chat_message():
+                    try:
+                        await handle_chat_message(connection, streaming_handler, user_id, payload)
+                    except asyncio.CancelledError:
+                        logger.info("Chat message task cancelled by user")
+                    except Exception as e:
+                        logger.exception(f"Error in chat message handler: {e}")
+                        try:
+                            await ws_manager.send_to_connection(connection, {
+                                "type": "stream_error",
+                                "payload": {"error": str(e)},
+                            })
+                        except Exception:
+                            pass
+                
+                task = asyncio.create_task(run_chat_message())
+                streaming_handler.set_streaming_task(task)
             
             elif msg_type == "regenerate_message":
-                await handle_regenerate_message(connection, streaming_handler, user_id, payload)
+                # Run in background task so we can still receive stop_generation
+                async def run_regenerate():
+                    try:
+                        await handle_regenerate_message(connection, streaming_handler, user_id, payload)
+                    except asyncio.CancelledError:
+                        logger.info("Regenerate task cancelled by user")
+                    except Exception as e:
+                        logger.exception(f"Error in regenerate handler: {e}")
+                        try:
+                            await ws_manager.send_to_connection(connection, {
+                                "type": "stream_error",
+                                "payload": {"error": str(e)},
+                            })
+                        except Exception:
+                            pass
+                
+                task = asyncio.create_task(run_regenerate())
+                streaming_handler.set_streaming_task(task)
             
             elif msg_type == "stop_generation":
                 chat_id = payload.get("chat_id")
                 logger.info(f"Stop generation requested for chat: {chat_id}")
                 if chat_id:
-                    # Set cancellation flag and close the stream
+                    # Set cancellation flag and close the stream IMMEDIATELY
                     await streaming_handler.request_stop()
+                    
+                    # Send confirmation to client
                     await ws_manager.send_to_connection(connection, {
                         "type": "stream_stopped",
                         "payload": {"chat_id": chat_id, "message": "Generation stopped by user"},
@@ -322,8 +358,8 @@ async def handle_chat_message(
                 },
             )
             db.add(assistant_message)
+            await db.flush()
             await db.commit()
-            await db.refresh(assistant_message)
             
             message_id = assistant_message.id
             
@@ -543,8 +579,171 @@ async def handle_chat_message(
             logger.info(f"File content continuation mode (save_user_message=False), content_len={len(content)}, assistant_parent_id={assistant_parent_id}")
             # Keep assistant_parent_id as-is for tree structure
         
+        # ==== SYSTEM PROMPT SETUP ====
+        from app.api.routes.admin import get_system_setting
+        default_prompt = await get_system_setting(db, "default_system_prompt")
+        system_prompt = chat.system_prompt or default_prompt
+        
+        # ==== RAG SEARCHES ====
+        # Track if any RAG source had results (for filter chain skip logic)
+        rag_had_results = False
+        import time
+        
+        # Skip RAG for tool result continuations (save_user_message=False)
+        # These are system-generated responses that don't need knowledge retrieval
+        is_tool_result = not save_user_message
+        
+        # 1. Global Knowledge Base search (automatic, independent of user RAG settings)
+        # Skip for tool results to avoid unnecessary searches and potential GPU issues
+        if is_tool_result:
+            logger.debug("[GLOBAL_RAG_DEBUG] Skipping RAG search for tool result continuation")
+        else:
+            try:
+                from app.models.models import KnowledgeStore
+                global_store_check = await db.execute(
+                    select(KnowledgeStore.id).where(KnowledgeStore.is_global == True).limit(1)
+                )
+                has_global_stores = global_store_check.scalar_one_or_none() is not None
+                
+                if has_global_stores:
+                    global_kb_start = time.time()
+                    rag_service = RAGService()
+                    global_results, global_store_names = await rag_service.search_global_stores(db, content)
+                    global_kb_search_time = time.time() - global_kb_start
+                    
+                    logger.info(f"[GLOBAL_RAG_DEBUG] Search completed in {global_kb_search_time:.3f}s - Found {len(global_results)} results from stores: {global_store_names}")
+                
+                    if global_results:
+                        rag_had_results = True
+                        # Format global context
+                        global_context_parts = []
+                        for i, result in enumerate(global_results):
+                            doc_name = result.get("document_name", "Unknown")
+                            chunk_content = result.get("content", "")
+                            score = result.get("similarity", 0)
+                            chunk_id = result.get("chunk_id", "N/A")
+                            
+                            logger.debug(f"[GLOBAL_RAG_DEBUG] Result {i+1}: doc='{doc_name}', chunk_id={chunk_id}, score={score:.4f}, content_len={len(chunk_content)}")
+                            
+                            global_context_parts.append(
+                                f"[Source: {doc_name} | Confidence: {score:.0%}]\n{chunk_content}"
+                            )
+                        
+                        global_context = "\n\n---\n\n".join(global_context_parts)
+                        global_stores_list = ", ".join(global_store_names)
+                        
+                        # Build the authoritative knowledge addendum
+                        knowledge_addendum = f"""
+
+## AUTHORITATIVE KNOWLEDGE BASE
+
+<trusted_knowledge source="{global_stores_list}">
+IMPORTANT: The following information comes from the organization's verified global knowledge base. This content is DEFINITIVE and TRUSTED - treat it as the authoritative source of truth for the topics it covers. When this knowledge conflicts with your general training, defer to this information.
+
+{global_context}
+</trusted_knowledge>
+
+When answering questions related to the above topics, you MUST use this authoritative information as your primary source. Cite it naturally in your responses when relevant."""
+
+                        system_prompt = f"{system_prompt}{knowledge_addendum}"
+                        logger.info(f"[GLOBAL_RAG_DEBUG] Injected {len(global_results)} results from global KB")
+                else:
+                    logger.debug("[GLOBAL_RAG_DEBUG] No global knowledge stores exist, skipping search")
+            except Exception as e:
+                logger.warning(f"[GLOBAL_RAG_DEBUG] Failed to search global stores: {e}")
+        
+        # 2. User's Chat History Knowledge Base search (also skip for tool results)
+        # Filter by current assistant context to prevent knowledge leakage between different GPTs
+        if not is_tool_result:
+            try:
+                chat_kb_enabled = getattr(user, 'all_chats_knowledge_enabled', False)
+                chat_kb_store = getattr(user, 'chat_knowledge_store_id', None)
+                if chat_kb_enabled and chat_kb_store:
+                    chat_kb_start = time.time()
+                    rag_service = RAGService()
+                    # Use chat.assistant_id to filter results to matching assistant context
+                    # This prevents knowledge from Assistant A appearing when using Assistant B
+                    chat_kb_results = await rag_service.get_chat_knowledge_context(
+                        db=db,
+                        user=user,
+                        query=content,
+                        chat_knowledge_store_id=chat_kb_store,
+                        current_assistant_id=chat.assistant_id,  # None if no assistant
+                    )
+                    chat_kb_time = time.time() - chat_kb_start
+                    
+                    if chat_kb_results:
+                        rag_had_results = True
+                        chat_kb_addendum = f"""
+
+## YOUR CHAT HISTORY KNOWLEDGE
+
+<chat_history_context>
+The following is relevant information from your previous conversations:
+
+{chat_kb_results}
+</chat_history_context>
+"""
+                        system_prompt = f"{system_prompt}{chat_kb_addendum}"
+                        logger.info(f"[CHAT_KB_DEBUG] Found chat history context in {chat_kb_time:.3f}s (assistant_id={chat.assistant_id})")
+            except Exception as e:
+                logger.warning(f"[CHAT_KB_DEBUG] Failed to search chat history KB: {e}")
+        
+        # 3. Assistant KB and User RAG search (also skip for tool results)
+        if not is_tool_result:
+            assistant_result = await db.execute(
+                select(AssistantConversation)
+                .where(AssistantConversation.chat_id == chat_id)
+            )
+            assistant_conv = assistant_result.scalar_one_or_none()
+            assistant_ks_ids = []
+            
+            if assistant_conv:
+                # Get the assistant's knowledge stores
+                assistant_result = await db.execute(
+                    select(CustomAssistant)
+                    .where(CustomAssistant.id == assistant_conv.assistant_id)
+                    .options(selectinload(CustomAssistant.knowledge_stores))
+                )
+                assistant = assistant_result.scalar_one_or_none()
+                
+                if assistant and assistant.knowledge_stores:
+                    assistant_ks_ids = [str(ks.id) for ks in assistant.knowledge_stores]
+                    enable_rag = True
+                    logger.info(f"Auto-enabled RAG for assistant with knowledge stores: {assistant_ks_ids}")
+            
+            if enable_rag:
+                rag_service = RAGService()
+                
+                if assistant_ks_ids:
+                    # Use assistant's knowledge stores
+                    context = await rag_service.get_knowledge_store_context(
+                        db=db,
+                        user=user,
+                        query=content,
+                        knowledge_store_ids=assistant_ks_ids,
+                        bypass_access_check=True,
+                    )
+                    logger.debug(f"Using assistant knowledge stores for chat {chat_id}: {assistant_ks_ids}")
+                else:
+                    # Regular user documents
+                    context = await rag_service.get_context_for_query(
+                        db=db,
+                        user=user,
+                        query=content,
+                        document_ids=document_ids,
+                    )
+                
+                if context:
+                    rag_had_results = True
+                    rag_prompt = await get_system_setting(db, "rag_context_prompt")
+                    system_prompt = f"{system_prompt}\n\n{rag_prompt}\n\n{context}"
+        
+        logger.info(f"[RAG_SUMMARY] rag_had_results={rag_had_results}, is_tool_result={is_tool_result}")
+        
         # ==== FILTER CHAIN EXECUTION ====
         # Run enabled filter chains on the user message before LLM processing
+        # Chains with skip_if_rag_hit=True will be skipped if RAG found results
         from app.filters.manager import get_chain_manager
         from app.filters.executor import ChainExecutor
         
@@ -558,30 +757,37 @@ async def handle_chat_message(
         logger.info(f"[CONTENT_TRACE] Before filter chains: content='{content[:50]}...' len={len(content)}")
         
         if enabled_chains:
-            logger.info(f"[FILTER_CHAINS] {len(enabled_chains)} chains enabled, executing...")
-            # Pre-load MCP/OpenAPI tools for filter chains
-            mcp_tools_cache = {}
+            # Filter out chains that should be skipped due to RAG hit
+            if rag_had_results:
+                chains_to_run = [c for c in enabled_chains if not c.get("skip_if_rag_hit", True)]
+                skipped_count = len(enabled_chains) - len(chains_to_run)
+                if skipped_count > 0:
+                    logger.info(f"[FILTER_CHAINS] Skipping {skipped_count} chains due to RAG hit (skip_if_rag_hit=True)")
+                enabled_chains = chains_to_run
             
-            try:
-                # Load enabled tools from database
-                from app.models.models import Tool
-                query = select(Tool).where(Tool.is_enabled == True)
-                # For filter chains (admin-defined), use all enabled tools
-                # Non-admins would only see public tools in normal chat
-                if not user.is_admin:
-                    query = query.where(Tool.is_public == True)
-                tools_result = await db.execute(query)
-                for tool in tools_result.scalars().all():
-                    mcp_tools_cache[tool.name] = tool
-                    logger.debug(f"Loaded MCP tool for filter chains: {tool.name}")
-            except Exception as e:
-                logger.debug(f"No MCP tools loaded for filter chains: {e}")
-            
-            if mcp_tools_cache:
-                logger.debug(f"MCP tools cache has {len(mcp_tools_cache)} tools: {list(mcp_tools_cache.keys())}")
-            
-            # Create tool service for MCP tool execution
-            tool_service = ToolService()
+            if enabled_chains:
+                logger.info(f"[FILTER_CHAINS] {len(enabled_chains)} chains to execute...")
+                # Pre-load MCP/OpenAPI tools for filter chains
+                mcp_tools_cache = {}
+                
+                try:
+                    # Load enabled tools from database
+                    from app.models.models import Tool
+                    query = select(Tool).where(Tool.is_enabled == True)
+                    if not user.is_admin:
+                        query = query.where(Tool.is_public == True)
+                    tools_result = await db.execute(query)
+                    for tool in tools_result.scalars().all():
+                        mcp_tools_cache[tool.name] = tool
+                        logger.debug(f"Loaded MCP tool for filter chains: {tool.name}")
+                except Exception as e:
+                    logger.debug(f"No MCP tools loaded for filter chains: {e}")
+                
+                if mcp_tools_cache:
+                    logger.debug(f"MCP tools cache has {len(mcp_tools_cache)} tools: {list(mcp_tools_cache.keys())}")
+                
+                # Create tool service for MCP tool execution
+                tool_service = ToolService()
             
             # Create executor with LLM and tool execution functions
             async def filter_llm_func(prompt: str, system: str = None) -> str:
@@ -728,132 +934,6 @@ async def handle_chat_message(
         
         logger.info(f"[CONTENT_TRACE] After filter chains: content='{content[:50]}...' len={len(content)}, modified={content != original_content}")
         
-        # Get system prompt from chat, admin settings, or config default
-        from app.api.routes.admin import get_system_setting
-        default_prompt = await get_system_setting(db, "default_system_prompt")
-        system_prompt = chat.system_prompt or default_prompt
-        
-        # Search global knowledge stores (automatic, independent of user RAG settings)
-        # Only attempt if global stores might exist - skip expensive model loading otherwise
-        import time
-        global_kb_start = time.time()
-        try:
-            # First check if any global stores exist before loading embedding model
-            from app.models.knowledge import KnowledgeStore
-            global_store_check = await db.execute(
-                select(KnowledgeStore.id).where(KnowledgeStore.is_global == True).limit(1)
-            )
-            has_global_stores = global_store_check.scalar_one_or_none() is not None
-            
-            if not has_global_stores:
-                logger.debug("[GLOBAL_RAG_DEBUG] No global knowledge stores exist, skipping search")
-            else:
-                rag_service = RAGService()
-                global_results, global_store_names = await rag_service.search_global_stores(db, content)
-                global_kb_search_time = time.time() - global_kb_start
-                
-                logger.info(f"[GLOBAL_RAG_DEBUG] Search completed in {global_kb_search_time:.3f}s - Found {len(global_results)} results from stores: {global_store_names}")
-            
-                if global_results:
-                    # Format global context
-                    global_context_parts = []
-                    for i, result in enumerate(global_results):
-                        doc_name = result.get("document_name", "Unknown")
-                        chunk_content = result.get("content", "")
-                        score = result.get("similarity", 0)
-                        chunk_id = result.get("chunk_id", "N/A")
-                        
-                        # Debug log each result
-                        logger.debug(f"[GLOBAL_RAG_DEBUG] Result {i+1}: doc='{doc_name}', chunk_id={chunk_id}, score={score:.4f}, content_len={len(chunk_content)}")
-                        
-                        global_context_parts.append(
-                            f"[Source: {doc_name} | Confidence: {score:.0%}]\n{chunk_content}"
-                        )
-                    
-                    global_context = "\n\n---\n\n".join(global_context_parts)
-                    global_stores_list = ", ".join(global_store_names)
-                    
-                    # Build the authoritative knowledge addendum
-                    knowledge_addendum = f"""
-
-## AUTHORITATIVE KNOWLEDGE BASE
-
-<trusted_knowledge source="{global_stores_list}">
-IMPORTANT: The following information comes from the organization's verified global knowledge base. This content is DEFINITIVE and TRUSTED - treat it as the authoritative source of truth for the topics it covers. When this knowledge conflicts with your general training, defer to this information.
-
-{global_context}
-</trusted_knowledge>
-
-When answering questions related to the above topics, you MUST use this authoritative information as your primary source. Cite it naturally in your responses when relevant."""
-
-                    system_prompt = f"{system_prompt}{knowledge_addendum}"
-                    
-                    # Detailed debug output showing exactly what's being sent to LLM
-                    logger.info(f"[GLOBAL_RAG_DEBUG] === GLOBAL KB INJECTION SUMMARY ===")
-                    logger.info(f"[GLOBAL_RAG_DEBUG] Query: '{content[:100]}...'")
-                    logger.info(f"[GLOBAL_RAG_DEBUG] Search time: {global_kb_search_time:.3f}s")
-                    logger.info(f"[GLOBAL_RAG_DEBUG] Stores searched: {global_store_names}")
-                    logger.info(f"[GLOBAL_RAG_DEBUG] Results count: {len(global_results)}")
-                    logger.info(f"[GLOBAL_RAG_DEBUG] Injected context length: {len(knowledge_addendum)} chars")
-                    logger.info(f"[GLOBAL_RAG_DEBUG] === FULL INJECTED CONTENT START ===")
-                    logger.info(f"[GLOBAL_RAG_DEBUG]\n{knowledge_addendum}")
-                    logger.info(f"[GLOBAL_RAG_DEBUG] === FULL INJECTED CONTENT END ===")
-                else:
-                    logger.info(f"[GLOBAL_RAG_DEBUG] No results found (search took {global_kb_search_time:.3f}s)")
-        except Exception as e:
-            global_kb_error_time = time.time() - global_kb_start
-            logger.warning(f"[GLOBAL_RAG_DEBUG] Failed to search global stores after {global_kb_error_time:.3f}s: {e}")
-        
-        # Check if this chat is associated with an assistant (for RAG auto-enable)
-        assistant_result = await db.execute(
-            select(AssistantConversation)
-            .where(AssistantConversation.chat_id == chat_id)
-        )
-        assistant_conv = assistant_result.scalar_one_or_none()
-        assistant_ks_ids = []
-        
-        if assistant_conv:
-            # Get the assistant's knowledge stores
-            assistant_result = await db.execute(
-                select(CustomAssistant)
-                .where(CustomAssistant.id == assistant_conv.assistant_id)
-                .options(selectinload(CustomAssistant.knowledge_stores))
-            )
-            assistant = assistant_result.scalar_one_or_none()
-            
-            if assistant and assistant.knowledge_stores:
-                assistant_ks_ids = [str(ks.id) for ks in assistant.knowledge_stores]
-                # Auto-enable RAG for assistants with knowledge stores
-                enable_rag = True
-                logger.info(f"Auto-enabled RAG for assistant with knowledge stores: {assistant_ks_ids}")
-        
-        # Get RAG context if enabled (or auto-enabled for assistants)
-        if enable_rag:
-            rag_service = RAGService()
-            
-            if assistant_ks_ids:
-                # Use assistant's knowledge stores (allows private KB access through public GPT)
-                context = await rag_service.get_knowledge_store_context(
-                    db=db,
-                    user=user,
-                    query=content,
-                    knowledge_store_ids=assistant_ks_ids,
-                    bypass_access_check=True,  # Allow access through assistant
-                )
-                logger.debug(f"Using assistant knowledge stores for chat {chat_id}: {assistant_ks_ids}")
-            else:
-                # Regular user documents
-                context = await rag_service.get_context_for_query(
-                    db=db,
-                    user=user,
-                    query=content,
-                    document_ids=document_ids,
-                )
-            
-            if context:
-                rag_prompt = await get_system_setting(db, "rag_context_prompt")
-                system_prompt = f"{system_prompt}\n\n{rag_prompt}\n\n{context}"
-        
         # Get Procedural Memory context (learned skills)
         enable_procedural_memory = payload.get("enable_procedural_memory", settings.PROCEDURAL_MEMORY_ENABLED)
         if enable_procedural_memory:
@@ -879,6 +959,100 @@ When answering questions related to the above topics, you MUST use this authorit
                 logger.debug(f"Injected zip manifest from DB for chat {chat_id} ({len(zip_manifest)} chars)")
             else:
                 logger.debug(f"No zip context found for chat {chat_id}")
+        
+        # Inject code summary if available (provides overview of project structure)
+        if chat.code_summary:
+            try:
+                summary = chat.code_summary
+                summary_lines = ["[PROJECT_CODE_SUMMARY]"]
+                
+                # Include file signatures
+                files = summary.get("files", [])
+                if files:
+                    summary_lines.append("\nFiles with signatures:")
+                    for file_entry in files[:20]:  # Limit to 20 files
+                        # Support both "filename" and "path" field names
+                        fname = file_entry.get("filename") or file_entry.get("path", "unknown")
+                        sigs = file_entry.get("signatures", [])
+                        if sigs:
+                            summary_lines.append(f"\n  {fname}:")
+                            for sig in sigs[:10]:  # Limit signatures per file
+                                # Support both "kind" and "type" field names
+                                kind = sig.get("kind") or sig.get("type", "")
+                                name = sig.get("name", "")
+                                line = sig.get("line", 0)
+                                summary_lines.append(f"    - {kind} {name} (line {line})")
+                            if len(sigs) > 10:
+                                summary_lines.append(f"    ... and {len(sigs) - 10} more")
+                
+                # Include warnings
+                if summary.get("warnings"):
+                    summary_lines.append("\nCode warnings detected:")
+                    for warning in summary.get("warnings", [])[:10]:
+                        summary_lines.append(f"  - {warning.get('message', 'Unknown warning')}")
+                
+                summary_lines.append("\n[END_PROJECT_CODE_SUMMARY]")
+                
+                summary_context = "\n".join(summary_lines)
+                system_prompt = f"{system_prompt}\n\n{summary_context}"
+                logger.debug(f"Injected code summary for chat {chat_id} ({len(summary_context)} chars)")
+            except Exception as e:
+                logger.warning(f"Failed to inject code summary: {e}")
+        
+        # ==== PROCESS LARGE FILE ATTACHMENTS ====
+        # If attachments are too large for context, store as searchable artifacts
+        if attachments:
+            try:
+                from app.services.attachment_processor import process_large_attachments
+                from app.services.settings_service import SettingsService
+                
+                # Get model context size
+                model_context = int(await SettingsService.get(db, "model_context_size") or "128000")
+                
+                # Process attachments - large files get stored as artifacts
+                attachments, attachment_manifest, was_processed = await process_large_attachments(
+                    db=db,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    attachments=attachments,
+                    model_context_size=model_context,
+                )
+                
+                if was_processed and attachment_manifest:
+                    system_prompt = f"{system_prompt}\n\n{attachment_manifest}"
+                    logger.info(f"[ATTACH_PROC] Processed large attachments, added manifest ({len(attachment_manifest)} chars)")
+                    await db.commit()  # Commit the stored files
+                    
+            except Exception as e:
+                logger.error(f"[ATTACH_PROC] Failed to process attachments: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        # ==== VISION ROUTING ====
+        # If attachments contain images and primary model isn't multimodal,
+        # route through vision model to get descriptions
+        image_descriptions = []
+        if attachments:
+            try:
+                from app.services.vision_router import get_vision_router, format_image_descriptions_for_llm
+                
+                vision_router = await get_vision_router(db)
+                attachments, image_descriptions = await vision_router.process_attachments_for_routing(
+                    attachments=attachments,
+                    user_message=content,
+                )
+                
+                if image_descriptions:
+                    # Add descriptions to system prompt
+                    desc_text = format_image_descriptions_for_llm(image_descriptions)
+                    if desc_text:
+                        system_prompt = f"{system_prompt}\n\n[IMAGE CONTEXT]\n{desc_text}\n[/IMAGE CONTEXT]"
+                        logger.info(f"[VISION_ROUTER] Added {len(image_descriptions)} image descriptions to context")
+                        
+            except Exception as e:
+                logger.error(f"[VISION_ROUTER] Failed to process images: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
         
         # Update chat system prompt temporarily in memory for LLM call
         # We don't want to persist this change, just use it for the LLM request
@@ -999,6 +1173,17 @@ When answering questions related to the above topics, you MUST use this authorit
                         event.get("output_tokens", 0),
                         event.get("parent_id"),  # For conversation tree tracking
                     )
+                    
+                    # Index this chat if chat knowledge is enabled (background, non-blocking)
+                    try:
+                        from app.api.routes.user_settings import _indexing_executor, index_single_chat_sync
+                        # Check if user has chat knowledge enabled before spawning thread
+                        # Use getattr for safety in case attribute not loaded
+                        if getattr(user, 'all_chats_knowledge_enabled', False):
+                            _indexing_executor.submit(index_single_chat_sync, user_id, chat_id)
+                            logger.debug(f"[CHAT_KNOWLEDGE] Queued chat {chat_id} for indexing")
+                    except Exception as idx_err:
+                        logger.debug(f"[CHAT_KNOWLEDGE] Could not queue chat for indexing: {idx_err}")
                 
                 elif event_type == "stream_cancelled":
                     logger.debug(f"LLM stream cancelled for chat {chat_id}")
@@ -1215,8 +1400,11 @@ async def handle_client_message(
             attachments=attachments if attachments else None,
         )
         db.add(msg)
+        await db.flush()
         await db.commit()
-        await db.refresh(msg)
+        
+        # Fallback for created_at if server default wasn't populated
+        msg_created_at = msg.created_at or datetime.utcnow()
         
         # Broadcast to other participants
         await ws_manager.broadcast_to_chat(
@@ -1229,7 +1417,7 @@ async def handle_client_message(
                     "sender_id": user_id,
                     "content": content,
                     "attachments": attachments,
-                    "created_at": msg.created_at.isoformat(),
+                    "created_at": msg_created_at.isoformat(),
                 },
             },
             exclude_user=user_id,

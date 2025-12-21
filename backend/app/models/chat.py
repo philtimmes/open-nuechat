@@ -58,6 +58,9 @@ class Chat(Base):
     # Format: { "files": [...], "warnings": [...], "last_updated": "...", "auto_generated": true }
     code_summary = Column(JSON, nullable=True)
     
+    # Knowledge base indexing
+    is_knowledge_indexed = Column(Boolean, default=False)
+    
     # Timestamps
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())

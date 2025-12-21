@@ -152,7 +152,6 @@ async def resolve_model(
         result = await db.execute(
             select(CustomAssistant).where(
                 CustomAssistant.id == assistant_id,
-                CustomAssistant.is_active == True,
             )
         )
         assistant = result.scalar_one_or_none()

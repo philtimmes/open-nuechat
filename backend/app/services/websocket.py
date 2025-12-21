@@ -256,8 +256,20 @@ class StreamingHandler:
     
     async def request_stop(self):
         """Request to stop the current stream - closes stream immediately"""
-        logger.info(f"Stop requested - setting flag and closing stream (has_stream={self._active_stream is not None}, has_task={self._streaming_task is not None})")
+        logger.info(f"Stop requested - cancelling task and closing stream (has_stream={self._active_stream is not None}, has_task={self._streaming_task is not None})")
         self._stop_requested = True
+        
+        # Cancel the streaming task FIRST (most reliable method)
+        if self._streaming_task and not self._streaming_task.done():
+            logger.info("Cancelling streaming task...")
+            self._streaming_task.cancel()
+            try:
+                # Give it a moment to cancel, but don't block
+                await asyncio.wait_for(asyncio.shield(self._streaming_task), timeout=0.1)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception as e:
+                logger.debug(f"Task cancel completed: {type(e).__name__}")
         
         # Close the active stream to interrupt network I/O immediately
         if self._active_stream:
@@ -269,7 +281,10 @@ class StreamingHandler:
                     response = stream.response
                     if hasattr(response, 'aclose'):
                         logger.info("Closing httpx response via aclose()...")
-                        await response.aclose()
+                        try:
+                            await asyncio.wait_for(response.aclose(), timeout=0.5)
+                        except asyncio.TimeoutError:
+                            pass
                     if hasattr(response, 'close'):
                         logger.info("Closing httpx response via close()...")
                         response.close()
@@ -280,31 +295,17 @@ class StreamingHandler:
                     try:
                         result = stream.close()
                         if hasattr(result, '__await__'):
-                            await result
-                    except Exception:
-                        pass
-                
-                # Method 3: Close underlying HTTP client if accessible
-                if hasattr(stream, '_client') and hasattr(stream._client, 'close'):
-                    logger.info("Closing underlying HTTP client...")
-                    try:
-                        await stream._client.close()
-                    except Exception:
+                            await asyncio.wait_for(result, timeout=0.5)
+                    except (asyncio.TimeoutError, Exception):
                         pass
                 
                 logger.info("Stream close attempted - LLM connection should be terminated")
             except Exception as e:
                 logger.info(f"Stream close completed (may have already closed): {type(e).__name__}: {e}")
-        else:
-            logger.warning("No active stream to close")
         
-        # Cancel the streaming task immediately (most reliable method)
-        if self._streaming_task and not self._streaming_task.done():
-            self._streaming_task.cancel()
-            logger.info("Cancelled streaming task")
-        
-        # Clear the stream reference
+        # Clear references
         self._active_stream = None
+        self._streaming_task = None
     
     async def _close_stream(self):
         """Close the active stream"""

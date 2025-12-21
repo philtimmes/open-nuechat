@@ -54,6 +54,13 @@ def _get_pipeline():
     
     try:
         import torch
+        import os
+        
+        # CRITICAL: Disable accelerate's device_map which causes meta tensor issues
+        os.environ["ACCELERATE_DISABLE_RICH"] = "1"
+        os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+        os.environ["ACCELERATE_USE_CPU"] = "1"
+        
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
         
         # Disable dynamo/inductor CUDA graphs for variable-length inputs
@@ -69,11 +76,11 @@ def _get_pipeline():
         
         logger.info(f"Loading Whisper model: {model_id}")
         
-        # Load model
+        # Load model - CRITICAL: low_cpu_mem_usage=False to avoid meta tensor issues
         _model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
-            low_cpu_mem_usage=True
+            low_cpu_mem_usage=False,  # Disabled to avoid meta tensor errors
         ).to(device)
         
         # Enable static cache for faster generation

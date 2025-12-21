@@ -73,6 +73,14 @@ export default function Settings() {
   const [apiKeys, setApiKeys] = useState<APIKey[]>([]);
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [showNewKeyForm, setShowNewKeyForm] = useState(false);
+  
+  // Chat Knowledge state
+  const [chatKnowledgeEnabled, setChatKnowledgeEnabled] = useState(false);
+  const [chatKnowledgeStatus, setChatKnowledgeStatus] = useState<'idle' | 'processing' | 'completed'>('idle');
+  const [chatKnowledgeIndexed, setChatKnowledgeIndexed] = useState(0);
+  const [chatKnowledgeTotal, setChatKnowledgeTotal] = useState(0);
+  const [loadingChatKnowledge, setLoadingChatKnowledge] = useState(false);
+  
   const [newKeyData, setNewKeyData] = useState<NewAPIKey>({
     name: '',
     scopes: ['completions'],
@@ -82,6 +90,40 @@ export default function Settings() {
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [savingKey, setSavingKey] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  
+  // Export all user data
+  const handleExportData = async () => {
+    setExporting(true);
+    try {
+      const response = await api.get('/user/export-data', {
+        responseType: 'blob'
+      });
+      
+      // Get filename from Content-Disposition header or use default
+      const contentDisposition = response.headers['content-disposition'];
+      let filename = 'nuechat_export.zip';
+      if (contentDisposition) {
+        const match = contentDisposition.match(/filename="?([^";\n]+)"?/);
+        if (match) filename = match[1];
+      }
+      
+      // Create download link
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Export failed:', err);
+      alert('Failed to export data. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
   
   // Fetch models on mount
   useEffect(() => {
@@ -111,6 +153,48 @@ export default function Settings() {
       loadApiKeys();
     }
   }, [activeTab]);
+  
+  // Fetch chat knowledge status when preferences tab is active
+  useEffect(() => {
+    if (activeTab === 'preferences') {
+      loadChatKnowledgeStatus();
+    }
+  }, [activeTab]);
+  
+  // Poll for status updates when processing
+  useEffect(() => {
+    if (chatKnowledgeStatus === 'processing') {
+      const interval = setInterval(loadChatKnowledgeStatus, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [chatKnowledgeStatus]);
+  
+  const loadChatKnowledgeStatus = async () => {
+    try {
+      const res = await api.get('/user/chat-knowledge');
+      setChatKnowledgeEnabled(res.data.enabled);
+      setChatKnowledgeStatus(res.data.status);
+      setChatKnowledgeIndexed(res.data.indexed_count);
+      setChatKnowledgeTotal(res.data.total_count);
+    } catch (err) {
+      console.error('Failed to load chat knowledge status:', err);
+    }
+  };
+  
+  const handleToggleChatKnowledge = async (enabled: boolean) => {
+    setLoadingChatKnowledge(true);
+    try {
+      const res = await api.post('/user/chat-knowledge', { enabled });
+      setChatKnowledgeEnabled(res.data.enabled);
+      setChatKnowledgeStatus(res.data.status);
+      setChatKnowledgeIndexed(res.data.indexed_count);
+      setChatKnowledgeTotal(res.data.total_count);
+    } catch (err) {
+      console.error('Failed to toggle chat knowledge:', err);
+    } finally {
+      setLoadingChatKnowledge(false);
+    }
+  };
   
   const loadApiKeys = async () => {
     setLoadingKeys(true);
@@ -1185,6 +1269,52 @@ export default function Settings() {
             </section>
             
             <section className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+              <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Chat Knowledge Base</h2>
+              
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex-1 mr-4">
+                    <h3 className="text-[var(--color-text)] font-medium">All Chats Knowledge</h3>
+                    <p className="text-sm text-[var(--color-text-secondary)]">
+                      Index all your chats into a personal knowledge base for improved responses
+                    </p>
+                    {chatKnowledgeEnabled && (
+                      <div className="mt-2 text-sm">
+                        {chatKnowledgeStatus === 'processing' && (
+                          <span className="text-yellow-500 flex items-center gap-2">
+                            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                            </svg>
+                            Indexing... {chatKnowledgeIndexed}/{chatKnowledgeTotal} chats
+                          </span>
+                        )}
+                        {chatKnowledgeStatus === 'completed' && (
+                          <span className="text-green-500 flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                            </svg>
+                            {chatKnowledgeIndexed} chats indexed
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={chatKnowledgeEnabled}
+                      onChange={(e) => handleToggleChatKnowledge(e.target.checked)}
+                      disabled={loadingChatKnowledge || chatKnowledgeStatus === 'processing'}
+                      className="sr-only peer" 
+                    />
+                    <div className="w-11 h-6 bg-[var(--color-border)] peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-[var(--color-primary)] rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[var(--color-button)] peer-disabled:opacity-50"></div>
+                  </label>
+                </div>
+              </div>
+            </section>
+            
+            <section className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
               <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Data & Privacy</h2>
               
               <div className="space-y-4">
@@ -1201,8 +1331,22 @@ export default function Settings() {
                   </label>
                 </div>
                 
-                <button className="px-4 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-zinc-700/30 transition-colors">
-                  Export All Data
+                <button 
+                  onClick={handleExportData}
+                  disabled={exporting}
+                  className="px-4 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-zinc-700/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {exporting ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Exporting...
+                    </>
+                  ) : (
+                    'Export All Data'
+                  )}
                 </button>
               </div>
             </section>

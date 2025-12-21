@@ -224,6 +224,7 @@ function App() {
                 <Layout>
                   <Routes>
                     <Route path="/" element={<ChatPage />} />
+                    <Route path="/chat" element={<ChatPage />} />
                     <Route path="/chat/:chatId" element={<ChatPage />} />
                     <Route path="/settings" element={<Settings />} />
                     <Route path="/billing" element={<Billing />} />

@@ -33,6 +33,7 @@ export default function EmptyState({ onSendMessage, selectedModel, onModelChange
   }, [showModelSelector]);
   
   const handleModelSelect = (modelId: string) => {
+    console.log('[EmptyState] Model selected:', modelId, 'isAssistant:', modelId.startsWith('gpt:'));
     if (onModelChange) {
       onModelChange(modelId);
     }

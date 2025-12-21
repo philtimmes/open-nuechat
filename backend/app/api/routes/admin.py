@@ -49,6 +49,7 @@ DEFAULT_TIERS = [
 SETTING_DEFAULTS = {
     # Prompts
     "default_system_prompt": settings.DEFAULT_SYSTEM_PROMPT,
+    "all_models_prompt": settings.ALL_MODELS_PROMPT,
     "title_generation_prompt": settings.TITLE_GENERATION_PROMPT,
     "rag_context_prompt": settings.RAG_CONTEXT_PROMPT,
     
@@ -87,6 +88,7 @@ SETTING_DEFAULTS = {
     "llm_max_tokens": str(settings.LLM_MAX_TOKENS),
     "llm_temperature": str(settings.LLM_TEMPERATURE),
     "llm_stream_default": str(settings.LLM_STREAM_DEFAULT).lower(),
+    "llm_multimodal": "false",  # Whether legacy model supports vision/images
     
     # Feature flags
     "enable_registration": str(settings.ENABLE_REGISTRATION).lower(),
@@ -98,6 +100,13 @@ SETTING_DEFAULTS = {
     "api_rate_limit_embeddings": "200",
     "api_rate_limit_images": "10",
     "api_rate_limit_models": "100",
+    
+    # Storage limits
+    "max_upload_size_mb": str(settings.MAX_UPLOAD_SIZE_MB),
+    "max_knowledge_store_size_mb": "500",  # 500MB default per knowledge store
+    "max_knowledge_stores_free": "3",
+    "max_knowledge_stores_pro": "20",
+    "max_knowledge_stores_enterprise": "100",
 }
 
 
@@ -150,6 +159,7 @@ class SystemSettingsSchema(BaseModel):
     """System settings that can be modified by admins"""
     # Prompts
     default_system_prompt: str
+    all_models_prompt: str = ""  # Appended to all system prompts including Custom GPTs
     title_generation_prompt: str
     rag_context_prompt: str
     
@@ -164,6 +174,13 @@ class SystemSettingsSchema(BaseModel):
     free_tier_tokens: int = Field(ge=0)
     pro_tier_tokens: int = Field(ge=0)
     enterprise_tier_tokens: int = Field(ge=0)
+    
+    # Storage limits
+    max_upload_size_mb: int = Field(ge=1, le=10000, description="Maximum file upload size in MB")
+    max_knowledge_store_size_mb: int = Field(ge=1, le=100000, description="Maximum knowledge store size in MB")
+    max_knowledge_stores_free: int = Field(ge=0, description="Max knowledge stores for free tier")
+    max_knowledge_stores_pro: int = Field(ge=0, description="Max knowledge stores for pro tier")
+    max_knowledge_stores_enterprise: int = Field(ge=0, description="Max knowledge stores for enterprise tier")
 
 
 class OAuthSettingsSchema(BaseModel):
@@ -190,6 +207,7 @@ class LLMSettingsSchema(BaseModel):
     llm_max_tokens: int = Field(default=4096, ge=1)
     llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     llm_stream_default: bool = True
+    llm_multimodal: bool = False  # Whether legacy model supports vision/images
     # History compression settings
     history_compression_enabled: bool = True
     history_compression_threshold: int = Field(default=20, ge=5, le=100)
@@ -303,6 +321,7 @@ async def get_admin_settings(
     """Get all system settings"""
     return SystemSettingsSchema(
         default_system_prompt=await get_system_setting(db, "default_system_prompt"),
+        all_models_prompt=await get_system_setting(db, "all_models_prompt"),
         title_generation_prompt=await get_system_setting(db, "title_generation_prompt"),
         rag_context_prompt=await get_system_setting(db, "rag_context_prompt"),
         input_token_price=await get_system_setting_float(db, "input_token_price"),
@@ -311,6 +330,11 @@ async def get_admin_settings(
         free_tier_tokens=await get_system_setting_int(db, "free_tier_tokens"),
         pro_tier_tokens=await get_system_setting_int(db, "pro_tier_tokens"),
         enterprise_tier_tokens=await get_system_setting_int(db, "enterprise_tier_tokens"),
+        max_upload_size_mb=await get_system_setting_int(db, "max_upload_size_mb", settings.MAX_UPLOAD_SIZE_MB),
+        max_knowledge_store_size_mb=await get_system_setting_int(db, "max_knowledge_store_size_mb", 500),
+        max_knowledge_stores_free=await get_system_setting_int(db, "max_knowledge_stores_free", 3),
+        max_knowledge_stores_pro=await get_system_setting_int(db, "max_knowledge_stores_pro", 20),
+        max_knowledge_stores_enterprise=await get_system_setting_int(db, "max_knowledge_stores_enterprise", 100),
     )
 
 
@@ -322,6 +346,7 @@ async def update_admin_settings(
 ):
     """Update system settings"""
     await set_setting(db, "default_system_prompt", data.default_system_prompt)
+    await set_setting(db, "all_models_prompt", data.all_models_prompt)
     await set_setting(db, "title_generation_prompt", data.title_generation_prompt)
     await set_setting(db, "rag_context_prompt", data.rag_context_prompt)
     await set_setting(db, "input_token_price", str(data.input_token_price))
@@ -330,6 +355,11 @@ async def update_admin_settings(
     await set_setting(db, "free_tier_tokens", str(data.free_tier_tokens))
     await set_setting(db, "pro_tier_tokens", str(data.pro_tier_tokens))
     await set_setting(db, "enterprise_tier_tokens", str(data.enterprise_tier_tokens))
+    await set_setting(db, "max_upload_size_mb", str(data.max_upload_size_mb))
+    await set_setting(db, "max_knowledge_store_size_mb", str(data.max_knowledge_store_size_mb))
+    await set_setting(db, "max_knowledge_stores_free", str(data.max_knowledge_stores_free))
+    await set_setting(db, "max_knowledge_stores_pro", str(data.max_knowledge_stores_pro))
+    await set_setting(db, "max_knowledge_stores_enterprise", str(data.max_knowledge_stores_enterprise))
     
     await db.commit()
     
@@ -397,6 +427,7 @@ async def get_llm_settings(
         llm_max_tokens=await get_system_setting_int(db, "llm_max_tokens"),
         llm_temperature=await get_system_setting_float(db, "llm_temperature"),
         llm_stream_default=await get_system_setting_bool(db, "llm_stream_default"),
+        llm_multimodal=await get_system_setting_bool(db, "llm_multimodal"),
         # History compression
         history_compression_enabled=await get_system_setting_bool(db, "history_compression_enabled"),
         history_compression_threshold=await get_system_setting_int(db, "history_compression_threshold") or 20,
@@ -419,6 +450,7 @@ async def update_llm_settings(
     await set_setting(db, "llm_max_tokens", str(data.llm_max_tokens))
     await set_setting(db, "llm_temperature", str(data.llm_temperature))
     await set_setting(db, "llm_stream_default", str(data.llm_stream_default).lower())
+    await set_setting(db, "llm_multimodal", str(data.llm_multimodal).lower())
     # History compression
     await set_setting(db, "history_compression_enabled", str(data.history_compression_enabled).lower())
     await set_setting(db, "history_compression_threshold", str(data.history_compression_threshold))
@@ -1516,3 +1548,277 @@ async def update_debug_settings(
     await db.commit()
     
     return {"status": "ok"}
+
+
+# ============================================================
+# LLM PROVIDERS
+# ============================================================
+
+class LLMProviderCreate(BaseModel):
+    """Create/update an LLM provider"""
+    name: str
+    base_url: str
+    api_key: Optional[str] = None
+    model_id: str
+    is_multimodal: bool = False
+    supports_tools: bool = True
+    supports_streaming: bool = True
+    is_default: bool = False
+    is_vision_default: bool = False
+    is_enabled: bool = True
+    timeout: int = 300
+    max_tokens: int = 8192
+    context_size: int = 128000
+    temperature: str = "0.7"
+    vision_prompt: Optional[str] = None
+
+
+@router.get("/llm-providers")
+async def list_llm_providers(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all LLM providers."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.models.llm_provider import LLMProvider
+    
+    result = await db.execute(
+        select(LLMProvider).order_by(LLMProvider.is_default.desc(), LLMProvider.name)
+    )
+    providers = result.scalars().all()
+    
+    return {"providers": [p.to_dict() for p in providers]}
+
+
+@router.post("/llm-providers")
+async def create_llm_provider(
+    data: LLMProviderCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new LLM provider."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    import uuid
+    from app.models.llm_provider import LLMProvider
+    
+    # If setting as default, clear other defaults
+    if data.is_default:
+        await db.execute(
+            select(LLMProvider).where(LLMProvider.is_default == True)
+        )
+        result = await db.execute(select(LLMProvider).where(LLMProvider.is_default == True))
+        for p in result.scalars().all():
+            p.is_default = False
+    
+    # If setting as vision default, clear other vision defaults
+    if data.is_vision_default:
+        result = await db.execute(select(LLMProvider).where(LLMProvider.is_vision_default == True))
+        for p in result.scalars().all():
+            p.is_vision_default = False
+    
+    provider = LLMProvider(
+        id=str(uuid.uuid4()),
+        name=data.name,
+        base_url=data.base_url.rstrip('/'),
+        api_key=data.api_key,
+        model_id=data.model_id,
+        is_multimodal=data.is_multimodal,
+        supports_tools=data.supports_tools,
+        supports_streaming=data.supports_streaming,
+        is_default=data.is_default,
+        is_vision_default=data.is_vision_default,
+        is_enabled=data.is_enabled,
+        timeout=data.timeout,
+        max_tokens=data.max_tokens,
+        context_size=data.context_size,
+        temperature=data.temperature,
+        vision_prompt=data.vision_prompt,
+    )
+    
+    db.add(provider)
+    await db.commit()
+    await db.refresh(provider)
+    
+    return {"provider": provider.to_dict()}
+
+
+@router.put("/llm-providers/{provider_id}")
+async def update_llm_provider(
+    provider_id: str,
+    data: LLMProviderCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an existing LLM provider."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.models.llm_provider import LLMProvider
+    
+    result = await db.execute(select(LLMProvider).where(LLMProvider.id == provider_id))
+    provider = result.scalar_one_or_none()
+    
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    
+    # If setting as default, clear other defaults
+    if data.is_default and not provider.is_default:
+        result = await db.execute(select(LLMProvider).where(LLMProvider.is_default == True))
+        for p in result.scalars().all():
+            p.is_default = False
+    
+    # If setting as vision default, clear other vision defaults
+    if data.is_vision_default and not provider.is_vision_default:
+        result = await db.execute(select(LLMProvider).where(LLMProvider.is_vision_default == True))
+        for p in result.scalars().all():
+            p.is_vision_default = False
+    
+    provider.name = data.name
+    provider.base_url = data.base_url.rstrip('/')
+    provider.api_key = data.api_key
+    provider.model_id = data.model_id
+    provider.is_multimodal = data.is_multimodal
+    provider.supports_tools = data.supports_tools
+    provider.supports_streaming = data.supports_streaming
+    provider.is_default = data.is_default
+    provider.is_vision_default = data.is_vision_default
+    provider.is_enabled = data.is_enabled
+    provider.timeout = data.timeout
+    provider.max_tokens = data.max_tokens
+    provider.context_size = data.context_size
+    provider.temperature = data.temperature
+    provider.vision_prompt = data.vision_prompt
+    
+    await db.commit()
+    await db.refresh(provider)
+    
+    return {"provider": provider.to_dict()}
+
+
+@router.delete("/llm-providers/{provider_id}")
+async def delete_llm_provider(
+    provider_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an LLM provider."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.models.llm_provider import LLMProvider
+    
+    result = await db.execute(select(LLMProvider).where(LLMProvider.id == provider_id))
+    provider = result.scalar_one_or_none()
+    
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    
+    await db.delete(provider)
+    await db.commit()
+    
+    return {"status": "deleted"}
+
+
+@router.post("/llm-providers/{provider_id}/test")
+async def test_llm_provider(
+    provider_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Test connection to an LLM provider."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.models.llm_provider import LLMProvider
+    import httpx
+    
+    result = await db.execute(select(LLMProvider).where(LLMProvider.id == provider_id))
+    provider = result.scalar_one_or_none()
+    
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    
+    try:
+        # Try to list models
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {"Content-Type": "application/json"}
+            if provider.api_key:
+                headers["Authorization"] = f"Bearer {provider.api_key}"
+            
+            response = await client.get(
+                f"{provider.base_url}/models",
+                headers=headers,
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                models = data.get("data", [])
+                model_names = [m.get("id", "unknown") for m in models[:10]]
+                return {
+                    "status": "ok",
+                    "message": f"Connected successfully. Found {len(models)} models.",
+                    "models": model_names,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"API returned status {response.status_code}: {response.text[:200]}",
+                }
+    except httpx.TimeoutException:
+        return {
+            "status": "error",
+            "message": "Connection timed out",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+        }
+
+
+# ============ RAG Model Management ============
+
+@router.get("/rag/status")
+async def get_rag_status(
+    user: User = Depends(get_current_user),
+):
+    """Get RAG embedding model status."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.services.rag import RAGService
+    
+    status = RAGService.get_model_status()
+    return {
+        "status": "ok" if status["loaded"] else "not_loaded",
+        "details": status,
+        "message": "Model failed to load - use POST /admin/rag/reset to retry" if status["failed"] else None,
+    }
+
+
+@router.post("/rag/reset")
+async def reset_rag_model(
+    user: User = Depends(get_current_user),
+):
+    """Reset RAG model state and retry loading."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.services.rag import RAGService
+    
+    # Reset the failure flag
+    RAGService.reset_model()
+    
+    # Try to load the model
+    model = RAGService.get_model()
+    
+    status = RAGService.get_model_status()
+    return {
+        "status": "ok" if status["loaded"] else "failed",
+        "details": status,
+        "message": "Model loaded successfully" if status["loaded"] else "Model failed to load again",
+    }

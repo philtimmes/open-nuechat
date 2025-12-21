@@ -10,16 +10,53 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
   chats: [],
   currentChat: null,
   isLoadingChats: false,
+  hasMoreChats: true,
+  chatPage: 1,
+  chatSearchQuery: '',
 
-  fetchChats: async () => {
+  fetchChats: async (loadMore = false, search?: string) => {
+    const currentState = get();
+    
+    // If search changed, reset pagination
+    const searchChanged = search !== undefined && search !== currentState.chatSearchQuery;
+    const page = (loadMore && !searchChanged) ? currentState.chatPage : 1;
+    
+    // Don't fetch if already loading or no more chats (when loading more without search change)
+    if (currentState.isLoadingChats || (loadMore && !searchChanged && !currentState.hasMoreChats)) {
+      return;
+    }
+    
+    // Update search query if provided
+    if (search !== undefined) {
+      set({ chatSearchQuery: search });
+    }
+    
+    const searchQuery = search !== undefined ? search : currentState.chatSearchQuery;
+    
     set({ isLoadingChats: true, error: null });
     try {
-      const response = await api.get('/chats');
+      const params: Record<string, unknown> = { page, page_size: 50 };
+      if (searchQuery) {
+        params.search = searchQuery;
+      }
+      
+      const response = await api.get('/chats', { params });
       // Backend returns { chats: [...], total, page, page_size }
-      const chats = Array.isArray(response.data?.chats) ? response.data.chats : [];
-      set({ chats, isLoadingChats: false });
+      const newChats = Array.isArray(response.data?.chats) ? response.data.chats : [];
+      const total = response.data?.total || 0;
+      const pageSize = response.data?.page_size || 50;
+      
+      // Calculate if there are more chats to load
+      const hasMore = page * pageSize < total;
+      
+      set((state) => ({ 
+        chats: (loadMore && !searchChanged) ? [...state.chats, ...newChats] : newChats,
+        isLoadingChats: false,
+        hasMoreChats: hasMore,
+        chatPage: page + 1,
+      }));
     } catch (err) {
-      set({ error: 'Failed to fetch chats', isLoadingChats: false, chats: [] });
+      set({ error: 'Failed to fetch chats', isLoadingChats: false, chats: loadMore ? get().chats : [] });
       console.error('Failed to fetch chats:', err);
     }
   },
@@ -29,16 +66,25 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
       // Use provided model, or selected model from store, or let backend use default
       const modelToUse = model || useModelsStore.getState().selectedModel || undefined;
       
+      console.log('[createChat] Called with:', { 
+        providedModel: model, 
+        selectedModel: useModelsStore.getState().selectedModel,
+        finalModelToUse: modelToUse,
+        isAssistant: modelToUse?.startsWith('gpt:'),
+      });
+      
       // Preserve uploaded artifacts - they were uploaded before the chat was created
       const { uploadedArtifacts: preservedArtifacts, zipUploadResult: preservedZipResult, zipContext: preservedZipContext } = get();
       
       // Check if this is an assistant model (gpt: prefix)
       if (modelToUse && modelToUse.startsWith('gpt:')) {
         const assistantId = modelToUse.substring(4);
+        console.log('[createChat] Starting assistant conversation:', assistantId);
         
         // Start a conversation with the assistant
         const response = await api.post(`/assistants/${assistantId}/start`);
         const { chat_id } = response.data;
+        console.log('[createChat] Assistant chat created:', chat_id);
         
         // Fetch the created chat
         const chatResponse = await api.get(`/chats/${chat_id}`);
@@ -50,6 +96,8 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
           messages: [],
           artifacts: [],
           selectedArtifact: null,
+          showArtifacts: false,
+          generatedImages: {},
           // Preserve uploads from before chat was created
           uploadedArtifacts: preservedArtifacts,
           zipUploadResult: preservedZipResult,
@@ -73,6 +121,8 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         messages: [],
         artifacts: [],
         selectedArtifact: null,
+        showArtifacts: false,
+        generatedImages: {},
         // Preserve uploads from before chat was created
         uploadedArtifacts: preservedArtifacts,
         zipUploadResult: preservedZipResult,
@@ -99,11 +149,13 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
       isSending: false,
       artifacts: [], 
       selectedArtifact: null, 
+      showArtifacts: false,
       codeSummary: null, 
       showSummary: false,
       uploadedArtifacts: [],
       zipUploadResult: null,
       zipContext: null,
+      generatedImages: {},
     });
     if (chat) {
       get().fetchMessages(chat.id);
@@ -119,6 +171,8 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         currentChat: state.currentChat?.id === chatId ? null : state.currentChat,
         messages: state.currentChat?.id === chatId ? [] : state.messages,
         artifacts: state.currentChat?.id === chatId ? [] : state.artifacts,
+        showArtifacts: state.currentChat?.id === chatId ? false : state.showArtifacts,
+        generatedImages: state.currentChat?.id === chatId ? {} : state.generatedImages,
       }));
     } catch (err) {
       console.error('Failed to delete chat:', err);
@@ -135,11 +189,13 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         messages: [], 
         artifacts: [],
         selectedArtifact: null,
+        showArtifacts: false,
         uploadedArtifacts: [],
         zipUploadResult: null,
         zipContext: null,
         codeSummary: null,
         showSummary: false,
+        generatedImages: {},
       });
     } catch (err) {
       console.error('Failed to delete all chats:', err);

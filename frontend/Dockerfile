@@ -1,6 +1,6 @@
 # Frontend Dockerfile
-# Build stage
-FROM node:20-alpine AS builder
+# Build stage - Using Node.js 22 LTS for security
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 

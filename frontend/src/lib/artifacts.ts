@@ -266,6 +266,7 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
     tagName?: string;
     fenceDepth?: number;
     startLine?: number;
+    prefixText?: string;  // Text before artifact tag on same line
   } = {};
   
   for (let i = 0; i < lines.length; i++) {
@@ -289,14 +290,17 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
       }
       
       // Pattern 4b: <artifact=filename> or <file:filename> etc
-      const xmlAttrTagMatch = line.match(/^<(artifact|file|code)[=:]([A-Za-z_][\w\-./]*\.\w+)>\s*$/i);
+      // Can have text before the tag (e.g., "File main.cpp // comment <artifact=src/main.cpp>")
+      const xmlAttrTagMatch = line.match(/^(.*?)<(artifact|file|code)[=:]([A-Za-z_][\w\-./]*\.\w+)>\s*$/i);
       if (xmlAttrTagMatch) {
+        const prefixText = xmlAttrTagMatch[1].trim();
         activeMethod = 4;
         metadata = {
-          tagName: xmlAttrTagMatch[1].toLowerCase(),
-          filepath: xmlAttrTagMatch[2],
-          filename: xmlAttrTagMatch[2].split('/').pop() || xmlAttrTagMatch[2],
-          startLine: i
+          tagName: xmlAttrTagMatch[2].toLowerCase(),
+          filepath: xmlAttrTagMatch[3],
+          filename: xmlAttrTagMatch[3].split('/').pop() || xmlAttrTagMatch[3],
+          startLine: i,
+          prefixText: prefixText, // Store prefix to output later
         };
         buffer = [];
         continue;
@@ -426,7 +430,9 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
             filename: metadata.filepath,
             created_at: new Date().toISOString(),
           });
-          outputLines.push(`[📦 Artifact: ${metadata.filename}]`);
+          // Include prefix text (e.g., "File main.cpp // comment") before artifact placeholder
+          const prefix = metadata.prefixText ? `${metadata.prefixText} ` : '';
+          outputLines.push(`${prefix}[📦 Artifact: ${metadata.filename}]`);
         }
         
         activeMethod = 0;
@@ -593,22 +599,54 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
     }
   }
   
-  // Handle unclosed patterns - output remaining buffer as-is
+  // Handle unclosed patterns at end of content
   if (activeMethod !== 0 && buffer.length > 0) {
-    // Reconstruct the original content
+    // For Pattern 4 (XML tags), try to extract artifact if we have a complete code block
     if (activeMethod === 4) {
-      outputLines.push(`<${metadata.tagName || metadata.filepath}>`);
+      let code = buffer.join('\n').trim();
+      // Strip any trailing extra backticks (common LLM mistake)
+      code = code.replace(/\n```\s*$/g, '\n```').replace(/```\s*\n```\s*$/, '```');
+      // Check if buffer contains a complete code fence (don't require $ anchor - LLM may add trailing content)
+      const fenceMatch = code.match(/^```(\w*)\n([\s\S]*?)\n```/);
+      if (fenceMatch && fenceMatch[2].trim().length > 0) {
+        // We have a complete code block - extract as artifact
+        code = fenceMatch[2].trim();
+        const ext = metadata.filename?.split('.').pop()?.toLowerCase() || '';
+        const language = extToLang(ext);
+        const type = langToType(language);
+        
+        artifacts.push({
+          id: `artifact-${Date.now()}-${++artifactCounter}`,
+          title: metadata.filename || 'Untitled',
+          type,
+          language,
+          content: code,
+          filename: metadata.filepath,
+          created_at: new Date().toISOString(),
+        });
+        // Include prefix text before artifact placeholder
+        const prefix = metadata.prefixText ? `${metadata.prefixText} ` : '';
+        outputLines.push(`${prefix}[📦 Artifact: ${metadata.filename}]`);
+      } else {
+        // Incomplete - output as-is with prefix
+        const prefix = metadata.prefixText ? `${metadata.prefixText} ` : '';
+        outputLines.push(`${prefix}<${metadata.tagName || metadata.filepath}>`);
+        outputLines.push(...buffer);
+      }
     } else if (activeMethod === 3) {
       outputLines.push(`<artifact>`);
+      outputLines.push(...buffer);
     } else if (activeMethod === 2) {
       outputLines.push(`\`\`\`artifact:${metadata.title}:${metadata.type}`);
+      outputLines.push(...buffer);
     } else if (activeMethod === 1) {
       outputLines.push(metadata.filepath || '');
       outputLines.push(`\`\`\`${metadata.language || ''}`);
+      outputLines.push(...buffer);
     } else if (activeMethod === 5) {
       outputLines.push(`\`\`\`${metadata.language || ''}`);
+      outputLines.push(...buffer);
     }
-    outputLines.push(...buffer);
   }
   
   return { cleanContent: outputLines.join('\n'), artifacts };

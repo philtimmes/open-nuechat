@@ -224,6 +224,23 @@ async def create_knowledge_store(
     
     # Admins bypass store limits
     if not current_user.is_admin:
+        # Get dynamic limits from system settings
+        from app.models.models import SystemSetting
+        
+        async def get_limit_setting(key: str, default: int) -> int:
+            result = await db.execute(
+                select(SystemSetting).where(SystemSetting.key == key)
+            )
+            setting = result.scalar_one_or_none()
+            return int(setting.value) if setting else default
+        
+        limits = {
+            "free": await get_limit_setting("max_knowledge_stores_free", 3),
+            "pro": await get_limit_setting("max_knowledge_stores_pro", 20),
+            "enterprise": await get_limit_setting("max_knowledge_stores_enterprise", 100),
+        }
+        tier_limit = limits.get(current_user.tier.value, limits["free"])
+        
         # Check store limit per user
         result = await db.execute(
             select(func.count(KnowledgeStore.id)).where(
@@ -231,9 +248,6 @@ async def create_knowledge_store(
             )
         )
         store_count = result.scalar()
-        
-        limits = {"free": 3, "pro": 20, "enterprise": 100}
-        tier_limit = limits.get(current_user.tier.value, 3)
         
         if store_count >= tier_limit:
             raise HTTPException(
@@ -488,11 +502,24 @@ async def add_document_to_store(
     Upload a document to a knowledge store.
     Supported formats: PDF, TXT, MD, code files, and more.
     """
+    from app.models.models import SystemSetting
+    
     # Note: No rate limiting for knowledge base uploads - users need to bulk upload files
     
     store, _ = await get_store_with_access(
         store_id, current_user, db, SharePermission.EDIT
     )
+    
+    # Get dynamic settings
+    async def get_setting_int(key: str, default: int) -> int:
+        result = await db.execute(
+            select(SystemSetting).where(SystemSetting.key == key)
+        )
+        setting = result.scalar_one_or_none()
+        return int(setting.value) if setting else default
+    
+    max_upload_size_mb = await get_setting_int("max_upload_size_mb", settings.MAX_UPLOAD_SIZE_MB)
+    max_kb_size_mb = await get_setting_int("max_knowledge_store_size_mb", 500)
     
     # Security: Check for dangerous file patterns
     if is_dangerous_file(file.filename or ""):
@@ -556,13 +583,24 @@ async def add_document_to_store(
     file_content = await file.read()
     file_size = len(file_content)
     
-    # Check size limit
-    max_size = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    # Check individual file size limit
+    max_size = max_upload_size_mb * 1024 * 1024
     if file_size > max_size:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File too large. Maximum size: {settings.MAX_UPLOAD_SIZE_MB}MB"
+            detail=f"File too large. Maximum size: {max_upload_size_mb}MB"
         )
+    
+    # Check knowledge store total size limit (admins bypass this)
+    if not current_user.is_admin:
+        current_store_size = store.total_size_bytes or 0
+        max_kb_size_bytes = max_kb_size_mb * 1024 * 1024
+        if current_store_size + file_size > max_kb_size_bytes:
+            current_mb = current_store_size / (1024 * 1024)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Knowledge store size limit reached. Current: {current_mb:.1f}MB, Max: {max_kb_size_mb}MB"
+            )
     
     # Create upload directory
     upload_dir = f"uploads/knowledge_stores/{store_id}"

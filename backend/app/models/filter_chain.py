@@ -40,6 +40,7 @@ class FilterChain(Base):
     outbound_chain_id = Column(String(36), nullable=True)  # Chain to use for LLM response
     max_iterations = Column(Integer, default=10, nullable=False)  # Safety limit for loops
     debug = Column(Boolean, default=False, nullable=False)  # Log execution to console
+    skip_if_rag_hit = Column(Boolean, default=True, nullable=False)  # Skip chain if RAG found results
     
     # The chain definition (JSON)
     # Structure: {"steps": [...], "variables": [...]}
@@ -64,6 +65,7 @@ class FilterChain(Base):
             "outbound_chain_id": self.outbound_chain_id,
             "max_iterations": self.max_iterations,
             "debug": self.debug,
+            "skip_if_rag_hit": self.skip_if_rag_hit,
             "definition": self.definition,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

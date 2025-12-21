@@ -1523,10 +1523,17 @@ def format_signature_summary(manifest: ZipManifest) -> str:
     return "\n".join(lines)
 
 
-def format_llm_manifest(manifest: ZipManifest, filename: str, upload_timestamp: str) -> str:
+def format_llm_manifest(manifest: ZipManifest, filename: str, upload_timestamp: str, include_small_files: bool = True, small_file_threshold: int = 4000) -> str:
     """
     Format a manifest specifically for LLM context injection.
-    Includes clear provenance markers and instructions for file access.
+    Includes clear provenance markers, full signatures, and optionally small file contents.
+    
+    Args:
+        manifest: The processed zip manifest
+        filename: Original zip filename
+        upload_timestamp: When the file was uploaded
+        include_small_files: If True, include contents of small files directly
+        small_file_threshold: Files smaller than this (bytes) are included inline
     """
     lines = [
         f"[USER_ARCHIVE: {filename} | uploaded: {upload_timestamp}]",
@@ -1561,39 +1568,73 @@ def format_llm_manifest(manifest: ZipManifest, filename: str, upload_timestamp: 
     lines.extend(format_compact_tree(manifest.file_tree))
     lines.append("")
     
-    # Signatures section - more compact
+    # FULL Signatures section - more detailed for LLM context
     if manifest.signature_index:
-        lines.append("SIGNATURES:")
+        lines.append("=" * 60)
+        lines.append("CODE SIGNATURES (functions, classes, types defined in each file):")
+        lines.append("=" * 60)
         for filepath, sigs in sorted(manifest.signature_index.items()):
             if sigs:
-                sig_summary = []
-                for sig in sigs[:10]:  # Limit to 10 signatures per file
+                lines.append(f"\n### {filepath}")
+                for sig in sigs[:20]:  # Limit to 20 signatures per file
                     kind = sig.get('kind', '?')
                     name = sig.get('name', '?')
                     line = sig.get('line', 0)
-                    # Short kind abbreviations
-                    kind_short = {'function': 'fn', 'method': 'fn', 'class': 'cls', 
-                                  'interface': 'iface', 'type': 'type', 'struct': 'struct',
-                                  'variable': 'var', 'import': 'imp', 'export': 'exp'}.get(kind, kind[:3])
-                    sig_summary.append(f"{kind_short}:{name}@{line}")
+                    params = sig.get('params', '')
+                    return_type = sig.get('return_type', '')
+                    
+                    # Format based on kind
+                    if kind in ('function', 'method'):
+                        sig_str = f"  Line {line}: {kind} {name}({params})"
+                        if return_type:
+                            sig_str += f" -> {return_type}"
+                    elif kind == 'class':
+                        sig_str = f"  Line {line}: class {name}"
+                        if params:  # inheritance
+                            sig_str += f" : {params}"
+                    elif kind in ('interface', 'struct', 'type'):
+                        sig_str = f"  Line {line}: {kind} {name}"
+                    else:
+                        sig_str = f"  Line {line}: {kind} {name}"
+                    
+                    lines.append(sig_str)
                 
-                more = f" +{len(sigs)-10} more" if len(sigs) > 10 else ""
-                lines.append(f"  {filepath}: {', '.join(sig_summary)}{more}")
+                if len(sigs) > 20:
+                    lines.append(f"  ... and {len(sigs) - 20} more")
         lines.append("")
+    
+    # Include small files directly in the manifest
+    if include_small_files:
+        small_files = []
+        for file_info in manifest.files:
+            if file_info.content and file_info.size <= small_file_threshold:
+                small_files.append(file_info)
+        
+        if small_files:
+            lines.append("=" * 60)
+            lines.append(f"SMALL FILE CONTENTS (files under {small_file_threshold} bytes, included for quick reference):")
+            lines.append("=" * 60)
+            
+            for file_info in small_files[:15]:  # Limit to 15 small files
+                lang = file_info.language or ''
+                lines.append(f"\n### {file_info.path} ({file_info.size} bytes)")
+                lines.append(f"```{lang}")
+                lines.append(file_info.content)
+                lines.append("```")
+            
+            if len(small_files) > 15:
+                lines.append(f"\n... and {len(small_files) - 15} more small files (use request_file to view)")
+            lines.append("")
     
     # Instructions
     lines.extend([
         "─" * 60,
-        "CRITICAL INSTRUCTIONS FOR CODE EDITING:",
-        "• These are LIVE FILES from the user's project - not examples",
-        "• When modifying files, output the COMPLETE file content",
-        "• NEVER use placeholders like '// ... existing code ...' or '# rest of code unchanged'",
-        "• NEVER truncate or summarize code sections",
-        "• If a file is too long to modify completely, explain this and suggest specific changes",
-        "",
-        "TO VIEW FILE: Include <request_file path=\"path/to/file\"/> in your response",
-        "TO MODIFY FILE: Create an artifact with the FULL file content (same filename)",
-        "NOTE: File contents will be provided in a follow-up message",
+        "FILE ACCESS INSTRUCTIONS:",
+        "• Small files shown above - use their content directly",
+        "• For larger files: <request_file path=\"path/to/file\"/>",
+        "• To modify: Create an artifact with FULL file content (same filename)",
+        "• NEVER use placeholders like '// ... existing code ...'",
+        "• NEVER truncate code - always output complete files",
         "[END_ARCHIVE_MANIFEST]",
     ])
     
