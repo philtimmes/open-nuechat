@@ -142,18 +142,39 @@ class Settings(BaseSettings):
     RAG_CONTEXT_PROMPT: str = "The following information has been retrieved from the user's documents to help answer their question:"
     
     # ===========================================
-    # BILLING
+    # BILLING & PAYMENTS
     # ===========================================
     
+    # Stripe configuration
     STRIPE_API_KEY: Optional[str] = None
     STRIPE_WEBHOOK_SECRET: Optional[str] = None
+    STRIPE_PUBLISHABLE_KEY: Optional[str] = None
+    
+    # PayPal configuration
+    PAYPAL_CLIENT_ID: Optional[str] = None
+    PAYPAL_CLIENT_SECRET: Optional[str] = None
+    PAYPAL_WEBHOOK_ID: Optional[str] = None
+    PAYPAL_MODE: str = "sandbox"  # "sandbox" or "live"
+    
+    # Google Pay configuration (uses Stripe as processor)
+    GOOGLE_PAY_MERCHANT_ID: Optional[str] = None
+    GOOGLE_PAY_MERCHANT_NAME: str = "NueChat"
+    
+    # Payment settings
+    PAYMENT_CURRENCY: str = "USD"
+    PAYMENT_SUCCESS_URL: str = "/billing?status=success"
+    PAYMENT_CANCEL_URL: str = "/billing?status=cancelled"
     
     # Pricing tiers (tokens per tier)
     FREE_TIER_TOKENS: int = 100_000
     PRO_TIER_TOKENS: int = 1_000_000
     ENTERPRISE_TIER_TOKENS: int = 10_000_000
     
-    # Token pricing (per 1M tokens)
+    # Tier pricing (monthly, in USD)
+    PRO_TIER_PRICE: float = 20.00
+    ENTERPRISE_TIER_PRICE: float = 100.00
+    
+    # Token pricing (per 1M tokens for overage)
     INPUT_TOKEN_PRICE: float = 3.00
     OUTPUT_TOKEN_PRICE: float = 15.00
     

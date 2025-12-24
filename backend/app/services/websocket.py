@@ -4,6 +4,7 @@ Supports:
 - LLM streaming responses
 - Client-to-client chat
 - Real-time notifications
+- Detached task continuation (tasks continue when client disconnects)
 """
 from typing import Dict, Set, Optional, Any, List
 from datetime import datetime, timezone
@@ -17,6 +18,28 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 
+# Track detached tasks that continue after client disconnects
+_detached_tasks: Dict[str, asyncio.Task] = {}
+_detached_tasks_lock = asyncio.Lock()
+
+
+async def register_detached_task(task_id: str, task: asyncio.Task):
+    """Register a task that should continue even if client disconnects"""
+    async with _detached_tasks_lock:
+        _detached_tasks[task_id] = task
+    
+    # Clean up when task completes
+    def cleanup(t):
+        asyncio.create_task(_unregister_detached_task(task_id))
+    task.add_done_callback(cleanup)
+
+
+async def _unregister_detached_task(task_id: str):
+    """Remove completed task from registry"""
+    async with _detached_tasks_lock:
+        _detached_tasks.pop(task_id, None)
+
+
 @dataclass
 class Connection:
     """Represents a WebSocket connection"""
@@ -25,6 +48,7 @@ class Connection:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     subscriptions: Set[str] = field(default_factory=set)
+    is_disconnected: bool = field(default=False)  # Track if client has disconnected
     
     def __hash__(self):
         return hash(self.id)
@@ -73,7 +97,15 @@ class WebSocketManager:
         return connection
     
     async def disconnect(self, connection: Connection):
-        """Remove a WebSocket connection"""
+        """Remove a WebSocket connection.
+        
+        Note: This does NOT cancel any streaming tasks - they will continue
+        running and save their content to the database. The tasks will detect
+        that the connection is disconnected and skip sending to the client.
+        """
+        # Mark connection as disconnected FIRST so ongoing tasks know
+        connection.is_disconnected = True
+        
         async with self._lock:
             user_id = connection.user_id
             
@@ -134,18 +166,24 @@ class WebSocketManager:
         """Send a message to a specific connection.
         
         Returns:
-            True if sent successfully, False if failed
+            True if sent successfully, False if failed (including if client disconnected)
         """
+        # If client has disconnected, silently return False (don't log every failed send)
+        if connection.is_disconnected:
+            return False
+        
         try:
             # Check if websocket is still connected
             if connection.websocket.client_state.name != "CONNECTED":
-                logger.warning(f"WebSocket not connected for user {connection.user_id}, state: {connection.websocket.client_state.name}")
+                connection.is_disconnected = True
                 return False
             
             await connection.websocket.send_text(json.dumps(message))
             return True
         except Exception as e:
-            logger.warning(f"Failed to send to connection for user {connection.user_id}: {e}")
+            # Mark as disconnected to avoid repeated failed sends
+            connection.is_disconnected = True
+            logger.debug(f"Client disconnected during send for user {connection.user_id}: {type(e).__name__}")
             return False
     
     async def send_to_connection_with_retry(
@@ -346,11 +384,18 @@ class StreamingHandler:
         })
     
     async def send_chunk(self, text: str):
-        """Buffer a text chunk and flush if needed"""
+        """Buffer a text chunk and flush if needed.
+        
+        Continues buffering even if client disconnected - content will be saved to DB.
+        """
         if not self._is_streaming:
             return
         
         self._buffer += text
+        
+        # Skip sending to disconnected clients (but keep buffering for DB save)
+        if self.connection.is_disconnected:
+            return
         
         current_time = asyncio.get_event_loop().time()
         time_since_flush = current_time - self._last_flush_time
@@ -362,6 +407,12 @@ class StreamingHandler:
     async def _flush_buffer(self):
         """Send buffered content to client"""
         if not self._buffer:
+            return
+        
+        # Skip sending if disconnected
+        if self.connection.is_disconnected:
+            # Still clear buffer - content is being saved to DB elsewhere
+            self._buffer = ""
             return
         
         await self.manager.send_to_connection(self.connection, {

@@ -136,44 +136,64 @@ async def websocket_endpoint(
                     logger.debug(f"chat_message content head: {content[:100]}")
                     logger.debug(f"chat_message content tail: {content[-100:]}")
                 
+                # Generate task ID for tracking
+                task_id = str(uuid.uuid4())
+                
                 # Run in background task so we can still receive stop_generation
+                # This task will CONTINUE running even if client disconnects
                 async def run_chat_message():
                     try:
                         await handle_chat_message(connection, streaming_handler, user_id, payload)
                     except asyncio.CancelledError:
-                        logger.info("Chat message task cancelled by user")
+                        # Only cancelled by explicit stop_generation request, not by disconnect
+                        logger.info("Chat message task cancelled by user stop request")
                     except Exception as e:
                         logger.exception(f"Error in chat message handler: {e}")
+                        # Try to send error, but don't fail if client disconnected
                         try:
-                            await ws_manager.send_to_connection(connection, {
-                                "type": "stream_error",
-                                "payload": {"error": str(e)},
-                            })
+                            if not connection.is_disconnected:
+                                await ws_manager.send_to_connection(connection, {
+                                    "type": "stream_error",
+                                    "payload": {"error": str(e)},
+                                })
                         except Exception:
                             pass
                 
                 task = asyncio.create_task(run_chat_message())
                 streaming_handler.set_streaming_task(task)
+                
+                # Register as detached task so it continues if client disconnects
+                from app.services.websocket import register_detached_task
+                await register_detached_task(task_id, task)
             
             elif msg_type == "regenerate_message":
+                # Generate task ID for tracking
+                regen_task_id = str(uuid.uuid4())
+                
                 # Run in background task so we can still receive stop_generation
+                # This task will CONTINUE running even if client disconnects
                 async def run_regenerate():
                     try:
                         await handle_regenerate_message(connection, streaming_handler, user_id, payload)
                     except asyncio.CancelledError:
-                        logger.info("Regenerate task cancelled by user")
+                        logger.info("Regenerate task cancelled by user stop request")
                     except Exception as e:
                         logger.exception(f"Error in regenerate handler: {e}")
                         try:
-                            await ws_manager.send_to_connection(connection, {
-                                "type": "stream_error",
-                                "payload": {"error": str(e)},
-                            })
+                            if not connection.is_disconnected:
+                                await ws_manager.send_to_connection(connection, {
+                                    "type": "stream_error",
+                                    "payload": {"error": str(e)},
+                                })
                         except Exception:
                             pass
                 
                 task = asyncio.create_task(run_regenerate())
                 streaming_handler.set_streaming_task(task)
+                
+                # Register as detached task
+                from app.services.websocket import register_detached_task
+                await register_detached_task(regen_task_id, task)
             
             elif msg_type == "stop_generation":
                 chat_id = payload.get("chat_id")
@@ -199,14 +219,19 @@ async def websocket_endpoint(
                 })
     
     except WebSocketDisconnect:
-        logger.debug(f"WebSocket disconnected for user {user_id}")
+        logger.info(f"WebSocket disconnected for user {user_id} - streaming tasks will continue in background")
         log_websocket_event("disconnect", user_id)
+        # Don't cancel streaming tasks - they will continue and save to DB
+        # The StreamingHandler will detect the disconnection and skip client sends
     except Exception as e:
         logger.exception(f"WebSocket error for user {user_id}: {e}")
         log_websocket_event("error", user_id, error=str(e))
-        await ws_manager.send_to_connection(connection, 
-            create_error(str(e))
-        )
+        try:
+            await ws_manager.send_to_connection(connection, 
+                create_error(str(e))
+            )
+        except Exception:
+            pass  # Client may already be disconnected
     finally:
         await ws_manager.disconnect(connection)
 
@@ -1257,22 +1282,46 @@ The following is relevant information from your previous conversations:
                     logger.error(f"LLM error: {event['error']}")
                     await streaming_handler.send_error(event["error"])
         except asyncio.CancelledError:
-            logger.debug(f"Streaming task cancelled for chat {chat_id}")
-            await ws_manager.send_to_connection(connection, {
-                "type": "stream_stopped",
-                "payload": {
-                    "chat_id": chat_id,
-                    "message_id": streaming_handler._current_message_id,
-                    "message": "Generation stopped by user",
-                },
-            })
+            logger.info(f"Streaming task cancelled for chat {chat_id}")
+            
+            # CRITICAL: Commit any pending changes to save the message content
+            # This ensures the LLM response is saved even if client disconnected
+            try:
+                await db.commit()
+                logger.info(f"[CANCELLED] Committed partial content to database for chat {chat_id}")
+            except Exception as commit_err:
+                logger.warning(f"[CANCELLED] Failed to commit partial content: {commit_err}")
+            
+            # Try to notify client (will fail silently if disconnected)
+            try:
+                await ws_manager.send_to_connection(connection, {
+                    "type": "stream_stopped",
+                    "payload": {
+                        "chat_id": chat_id,
+                        "message_id": streaming_handler._current_message_id,
+                        "message": "Generation stopped",
+                    },
+                })
+            except Exception:
+                pass  # Client may be disconnected
+            
             streaming_handler.reset_stop()
         except Exception as e:
             logger.exception(f"Exception during LLM streaming: {e}")
-            await streaming_handler.send_error(str(e))
-            # Rollback to clear any pending transaction issues
+            
+            # Still try to commit any partial content
             try:
-                await db.rollback()
+                await db.commit()
+                logger.info(f"[ERROR] Committed partial content despite error for chat {chat_id}")
+            except Exception:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+            
+            # Try to send error (will fail silently if disconnected)
+            try:
+                await streaming_handler.send_error(str(e))
             except Exception:
                 pass
         
@@ -1328,34 +1377,46 @@ The following is relevant information from your previous conversations:
                 )
                 logger.debug(f"Generated title for chat {chat_id}: {generated_title}")
                 
-                # Notify frontend about title update
-                await ws_manager.send_to_connection(connection, {
-                    "type": "chat_updated",
-                    "payload": {
-                        "chat_id": chat_id,
-                        "title": generated_title,
-                    }
-                })
+                # Try to notify frontend about title update (may fail if disconnected)
+                try:
+                    await ws_manager.send_to_connection(connection, {
+                        "type": "chat_updated",
+                        "payload": {
+                            "chat_id": chat_id,
+                            "title": generated_title,
+                        }
+                    })
+                except Exception:
+                    pass  # Client may be disconnected
             except Exception as e:
                 logger.warning(f"Failed to generate title: {e}")
                 fallback_title = content[:50] + ("..." if len(content) > 50 else "")
                 await db.execute(
                     update(Chat).where(Chat.id == chat_id).values(title=fallback_title)
                 )
-                # Still notify with fallback title
-                await ws_manager.send_to_connection(connection, {
-                    "type": "chat_updated",
-                    "payload": {
-                        "chat_id": chat_id,
-                        "title": fallback_title,
-                    }
-                })
+                # Try to notify with fallback title (may fail if disconnected)
+                try:
+                    await ws_manager.send_to_connection(connection, {
+                        "type": "chat_updated",
+                        "payload": {
+                            "chat_id": chat_id,
+                            "title": fallback_title,
+                        }
+                    })
+                except Exception:
+                    pass
         
+        # CRITICAL: Final commit to ensure all content is saved
+        # This runs even if client has disconnected
         try:
             await db.commit()
+            logger.debug(f"[FINAL_COMMIT] Successfully committed chat {chat_id}")
         except Exception as e:
             logger.warning(f"Failed to commit at end of handle_chat_message: {e}")
-            await db.rollback()
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
 
 async def handle_regenerate_message(

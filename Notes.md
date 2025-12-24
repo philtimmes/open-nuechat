@@ -10,7 +10,95 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.65
+**Current Version:** NC-0.6.67
+
+---
+
+## Recent Changes (NC-0.6.67)
+
+### Fix: Persist LLM responses when client disconnects
+- **Problem**: Leaving a chat during generation would lose the LLM response and any artifacts
+- **Root cause**: WebSocket disconnection cancelled the streaming task before content could be saved
+
+**Solution - Detached Task Execution:**
+- Streaming tasks now continue running even after client disconnects
+- Tasks are registered in a detached task registry for tracking
+- Connection marked as `is_disconnected` instead of cancelling tasks
+- `send_to_connection()` silently returns False for disconnected clients
+
+**Changes to websocket.py (service):**
+- Added `is_disconnected` field to `Connection` dataclass
+- Added `register_detached_task()` for tracking tasks that outlive connections
+- `disconnect()` marks connection as disconnected but doesn't cancel tasks
+- `send_to_connection()` checks `is_disconnected` before attempting send
+- `StreamingHandler.send_chunk()` skips sending to disconnected clients
+
+**Changes to websocket.py (routes):**
+- `chat_message` and `regenerate_message` register as detached tasks
+- `WebSocketDisconnect` handler no longer cancels tasks
+- `CancelledError` handler now commits content before trying to send
+- Exception handlers commit partial content before rollback
+- Title notification wrapped in try/except for disconnected clients
+
+**Changes to llm.py:**
+- Cancel handling now commits the partial content immediately
+- Added logging for cancelled message saves
+
+**Result:**
+- LLM continues generating even if user navigates away
+- All content is saved to database when complete
+- Artifacts are preserved (extracted from saved message content)
+- When user returns, they see the full response
+
+---
+
+## Recent Changes (NC-0.6.66)
+
+### Feature: Complete Payment System
+Added full payment processing with Stripe, PayPal, and Google Pay support.
+
+**Backend Changes:**
+- **New Payment Models** (`billing.py`):
+  - `Subscription`: User subscription tracking with provider references
+  - `PaymentMethod`: Stored payment methods (cards, PayPal)
+  - `Transaction`: Payment transaction history
+  - `PaymentProvider`, `PaymentStatus`, `SubscriptionStatus` enums
+  
+- **New Payment Service** (`payments.py`):
+  - `StripeProvider`: Full Stripe Checkout and Subscription API integration
+  - `PayPalProvider`: PayPal Orders and Subscriptions API integration
+  - `GooglePayProvider`: Google Pay via Stripe payment gateway
+  - `PaymentService`: Unified service managing all providers
+  - Webhook handlers for payment confirmations
+  
+- **New Billing Endpoints** (`billing.py` routes):
+  - `GET /billing/subscription`: Get current subscription status
+  - `POST /billing/subscribe/{tier}`: Create checkout session (with provider param)
+  - `POST /billing/cancel-subscription`: Cancel subscription
+  - `GET /billing/payment-methods`: List stored payment methods
+  - `GET /billing/transactions`: Transaction history
+  - `GET /billing/providers`: Get available providers and config
+  - `POST /billing/webhooks/stripe`: Stripe webhook handler
+  - `POST /billing/webhooks/paypal`: PayPal webhook handler
+
+- **Config Updates** (`config.py`):
+  - `STRIPE_PUBLISHABLE_KEY`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`
+  - `PAYPAL_MODE` (sandbox/live), `PAYPAL_WEBHOOK_ID`
+  - `GOOGLE_PAY_MERCHANT_ID`, `GOOGLE_PAY_MERCHANT_NAME`
+  - `PAYMENT_CURRENCY`, `PAYMENT_SUCCESS_URL`, `PAYMENT_CANCEL_URL`
+  - `PRO_TIER_PRICE`, `ENTERPRISE_TIER_PRICE`
+
+**Frontend Changes** (`Billing.tsx`):
+- Payment provider selection (Stripe, PayPal, Google Pay icons)
+- Real subscription management (subscribe, cancel)
+- Stored payment methods display
+- Transaction history with status badges
+- Provider availability check and warning
+- Improved tier display with formatted token limits
+
+**Dependencies Added:**
+- `stripe>=7.0.0`: Stripe Python SDK
+- `aiohttp>=3.9.0`: Async HTTP for PayPal API calls
 
 ---
 
@@ -943,6 +1031,8 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.67 | 2025-12-24 | Persist LLM responses when client disconnects (detached task execution) |
+| NC-0.6.66 | 2025-12-24 | Complete payment system: Stripe, PayPal, Google Pay integration |
 | NC-0.6.65 | 2025-12-24 | Fix artifact closing tag detection when not alone on line |
 | NC-0.6.64 | 2025-12-24 | Gzip file support, log error extraction with context, error summary in LLM |
 | NC-0.6.63 | 2025-12-23 | Shared chat images & formatting, preserve user newlines (whitespace-pre-wrap) |
@@ -1042,7 +1132,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.65**
+Current: **NC-0.6.67**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

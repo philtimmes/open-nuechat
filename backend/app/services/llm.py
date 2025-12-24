@@ -845,6 +845,9 @@ class LLMService:
                             is_streaming=False,
                         )
                     )
+                    # CRITICAL: Commit to persist the partial content
+                    await db.commit()
+                    logger.info(f"[LLM_CANCELLED] Saved and committed partial content ({len(filtered_content)} chars) for message {message_id[:8]}")
                 except Exception as update_err:
                     logger.warning(f"Failed to save cancelled message (may have been deleted): {update_err}")
                 yield {

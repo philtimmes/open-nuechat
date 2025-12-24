@@ -1,7 +1,13 @@
 """
 Billing API routes
+
+Provides:
+- Usage tracking and summaries
+- Subscription management
+- Payment processing (Stripe, PayPal, Google Pay)
+- Invoice generation
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from datetime import datetime
@@ -11,10 +17,17 @@ from app.api.dependencies import get_current_user
 from app.api.schemas import UsageSummary, UsageHistory, InvoiceResponse
 from app.models.models import User, UserTier
 from app.services.billing import BillingService
+from app.services.payments import PaymentService, TIER_CONFIG
+from app.core.config import settings
 
 
 router = APIRouter(tags=["Billing"])
+payment_service = PaymentService()
 
+
+# =============================================================================
+# USAGE ENDPOINTS
+# =============================================================================
 
 @router.get("/usage", response_model=UsageSummary)
 async def get_usage(
@@ -73,6 +86,205 @@ async def check_limit(
     return result
 
 
+# =============================================================================
+# SUBSCRIPTION ENDPOINTS
+# =============================================================================
+
+@router.get("/subscription")
+async def get_subscription(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get current subscription status"""
+    
+    subscription = await payment_service.get_subscription(db, user)
+    
+    return {
+        "tier": user.tier.value,
+        "tokens_limit": user.tokens_limit,
+        "subscription": subscription,
+    }
+
+
+@router.post("/subscribe/{tier}")
+async def create_subscription(
+    tier: str,
+    provider: str = Query("stripe", regex="^(stripe|paypal|google_pay)$"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a subscription checkout session"""
+    
+    if tier not in TIER_CONFIG:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid tier: {tier}. Valid tiers: {list(TIER_CONFIG.keys())}",
+        )
+    
+    if TIER_CONFIG[tier]["price"] == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot subscribe to free tier",
+        )
+    
+    available = payment_service.get_available_providers()
+    if provider not in available and provider != "google_pay":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Payment provider '{provider}' not configured. Available: {available}",
+        )
+    
+    try:
+        result = await payment_service.create_checkout(
+            db=db,
+            user=user,
+            tier=tier,
+            provider=provider,
+        )
+        await db.commit()
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.post("/cancel-subscription")
+async def cancel_subscription(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel current subscription (will remain active until period end)"""
+    
+    success = await payment_service.cancel_subscription(db, user)
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active subscription to cancel",
+        )
+    
+    await db.commit()
+    
+    return {
+        "status": "cancelled",
+        "message": "Subscription will remain active until the end of the current billing period",
+    }
+
+
+# =============================================================================
+# PAYMENT METHOD ENDPOINTS
+# =============================================================================
+
+@router.get("/payment-methods")
+async def get_payment_methods(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get stored payment methods"""
+    
+    methods = await payment_service.get_payment_methods(db, user)
+    return {"payment_methods": methods}
+
+
+@router.get("/transactions")
+async def get_transactions(
+    limit: int = Query(10, ge=1, le=50),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get transaction history"""
+    
+    transactions = await payment_service.get_transactions(db, user, limit)
+    return {"transactions": transactions}
+
+
+# =============================================================================
+# PAYMENT PROVIDER CONFIG
+# =============================================================================
+
+@router.get("/providers")
+async def get_payment_providers():
+    """Get available payment providers and configuration"""
+    
+    providers = payment_service.get_available_providers()
+    
+    config = {
+        "available_providers": providers,
+        "currency": settings.PAYMENT_CURRENCY,
+    }
+    
+    # Add Google Pay config if Stripe is available
+    if "google_pay" in providers:
+        config["google_pay"] = payment_service.google_pay.get_config()
+    
+    # Add Stripe publishable key if available
+    if "stripe" in providers and settings.STRIPE_PUBLISHABLE_KEY:
+        config["stripe_publishable_key"] = settings.STRIPE_PUBLISHABLE_KEY
+    
+    return config
+
+
+# =============================================================================
+# TIERS & PRICING
+# =============================================================================
+
+@router.get("/tiers")
+async def get_tiers():
+    """Get available subscription tiers"""
+    
+    return {
+        "tiers": [
+            {
+                "id": "free",
+                "name": "Free",
+                "price": 0,
+                "tokens_limit": settings.FREE_TIER_TOKENS,
+                "features": [
+                    f"{settings.FREE_TIER_TOKENS:,} tokens/month",
+                    "Basic chat",
+                    "Single user",
+                ],
+                "popular": False,
+            },
+            {
+                "id": "pro",
+                "name": "Pro",
+                "price": settings.PRO_TIER_PRICE,
+                "tokens_limit": settings.PRO_TIER_TOKENS,
+                "features": [
+                    f"{settings.PRO_TIER_TOKENS:,} tokens/month",
+                    "All chat features",
+                    "RAG with 10 documents",
+                    "Tool calling",
+                    "Priority support",
+                ],
+                "popular": True,
+            },
+            {
+                "id": "enterprise",
+                "name": "Enterprise",
+                "price": settings.ENTERPRISE_TIER_PRICE,
+                "tokens_limit": settings.ENTERPRISE_TIER_TOKENS,
+                "features": [
+                    f"{settings.ENTERPRISE_TIER_TOKENS:,} tokens/month",
+                    "All Pro features",
+                    "Unlimited documents",
+                    "Custom integrations",
+                    "Dedicated support",
+                    "SSO/SAML",
+                ],
+                "popular": False,
+            }
+        ]
+    }
+
+
+# =============================================================================
+# INVOICE
+# =============================================================================
+
 @router.get("/invoice/{year}/{month}", response_model=InvoiceResponse)
 async def get_invoice(
     year: int,
@@ -94,53 +306,53 @@ async def get_invoice(
     return InvoiceResponse(**invoice)
 
 
-@router.get("/tiers")
-async def get_tiers():
-    """Get available subscription tiers"""
-    
-    return {
-        "tiers": [
-            {
-                "id": "free",
-                "name": "Free",
-                "price": 0,
-                "tokens_limit": 100_000,
-                "features": [
-                    "100K tokens/month",
-                    "Basic chat",
-                    "Single user",
-                ]
-            },
-            {
-                "id": "pro",
-                "name": "Pro",
-                "price": 20,
-                "tokens_limit": 1_000_000,
-                "features": [
-                    "1M tokens/month",
-                    "All chat features",
-                    "RAG with 10 documents",
-                    "Tool calling",
-                    "Priority support",
-                ]
-            },
-            {
-                "id": "enterprise",
-                "name": "Enterprise",
-                "price": 100,
-                "tokens_limit": 10_000_000,
-                "features": [
-                    "10M tokens/month",
-                    "All Pro features",
-                    "Unlimited documents",
-                    "Custom integrations",
-                    "Dedicated support",
-                    "SSO/SAML",
-                ]
-            }
-        ]
-    }
+# =============================================================================
+# WEBHOOKS
+# =============================================================================
 
+@router.post("/webhooks/stripe")
+async def stripe_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Handle Stripe webhooks"""
+    
+    payload = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+    
+    try:
+        result = await payment_service.handle_webhook(db, "stripe", payload, signature)
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.post("/webhooks/paypal")
+async def paypal_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Handle PayPal webhooks"""
+    
+    payload = await request.body()
+    signature = request.headers.get("paypal-transmission-sig", "")
+    
+    try:
+        result = await payment_service.handle_webhook(db, "paypal", payload, signature)
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+# =============================================================================
+# LEGACY UPGRADE ENDPOINT (for backward compatibility)
+# =============================================================================
 
 @router.post("/upgrade/{tier}")
 async def upgrade_tier(
@@ -148,7 +360,12 @@ async def upgrade_tier(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upgrade subscription tier (placeholder for Stripe integration)"""
+    """
+    Legacy upgrade endpoint.
+    
+    For free tier: directly updates user tier
+    For paid tiers: redirects to subscription flow
+    """
     
     valid_tiers = {"free", "pro", "enterprise"}
     if tier not in valid_tiers:
@@ -157,17 +374,23 @@ async def upgrade_tier(
             detail=f"Invalid tier. Must be one of: {valid_tiers}",
         )
     
-    new_tier = UserTier(tier)
+    # Free tier upgrade is instant (downgrade)
+    if tier == "free":
+        new_tier = UserTier.FREE
+        billing = BillingService()
+        await billing.upgrade_tier(db, user, new_tier)
+        await db.commit()
+        
+        return {
+            "status": "upgraded",
+            "tier": tier,
+            "tokens_limit": user.tokens_limit,
+        }
     
-    # In production, this would initiate Stripe checkout
-    # For now, just update the tier directly
-    billing = BillingService()
-    await billing.upgrade_tier(db, user, new_tier)
-    
-    await db.commit()
-    
+    # Paid tiers require payment
     return {
-        "status": "upgraded",
+        "status": "payment_required",
         "tier": tier,
-        "tokens_limit": user.tokens_limit,
+        "message": "Use /billing/subscribe/{tier} endpoint with payment provider",
+        "available_providers": payment_service.get_available_providers(),
     }

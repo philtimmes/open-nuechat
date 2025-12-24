@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.65"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.67"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1226,9 +1226,11 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.65**
+**NC-0.6.67**
 
 Changes:
+- NC-0.6.67: **Persist LLM on disconnect** - streaming tasks continue when client leaves, content saved to DB, artifacts preserved
+- NC-0.6.66: **Complete payment system** - Stripe/PayPal/Google Pay integration, subscriptions, payment methods, transaction history, webhooks
 - NC-0.6.65: **Fix artifact closing tag** - detect `</artifact>` even when not alone on line (handles inline content before/after)
 - NC-0.6.64: **Gzip & log error support** - client-side gzip decompression (with safety limits), log file error extraction with context, error summary fed to LLM
 - NC-0.6.63: **Shared chat images & formatting** - attachments in shared API, matching formatting, user newlines preserved with whitespace-pre-wrap
