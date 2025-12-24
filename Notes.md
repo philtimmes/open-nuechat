@@ -10,7 +10,21 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.64
+**Current Version:** NC-0.6.65
+
+---
+
+## Recent Changes (NC-0.6.65)
+
+### Fix: Artifact closing tag detection
+- **Problem**: `</artifact>` tags not detected if not alone on the line
+  - Tags with content before them (e.g., `code</artifact>`) were missed
+  - Tags with content after them (e.g., `</artifact> more text`) were missed
+- **Solution**: Updated Pattern 3 and Pattern 4 in `artifacts.ts`
+  - Patterns now match closing tag anywhere in line
+  - Content before closing tag is added to artifact buffer
+  - Content after closing tag is preserved in output
+- **Files changed**: `frontend/src/lib/artifacts.ts`
 
 ---
 
@@ -929,6 +943,7 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.65 | 2025-12-24 | Fix artifact closing tag detection when not alone on line |
 | NC-0.6.64 | 2025-12-24 | Gzip file support, log error extraction with context, error summary in LLM |
 | NC-0.6.63 | 2025-12-23 | Shared chat images & formatting, preserve user newlines (whitespace-pre-wrap) |
 | NC-0.6.62 | 2025-12-23 | RAG embedding model auto-retry after 60s, background startup load with delay |
@@ -1027,7 +1042,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.64**
+Current: **NC-0.6.65**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

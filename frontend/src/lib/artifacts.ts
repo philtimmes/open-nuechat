@@ -391,23 +391,42 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
     
     // Pattern 4: XML-style tags - look for closing tag
     if (activeMethod === 4) {
-      // Check for various closing tag formats
+      // Check for various closing tag formats (may not be alone on line)
       // Escape special regex chars in filepath/filename
       const escapedPath = (metadata.filepath || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const escapedName = (metadata.filename || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const escapedTag = (metadata.tagName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       
+      // Build patterns that can match anywhere in line (capture the tag for position finding)
       const closePatterns = [
-        new RegExp(`^<\\/${escapedPath}>\\s*$`),              // </path/to/filename.ext>
-        new RegExp(`^<\\/${escapedName}>\\s*$`),              // </filename.ext>
-        new RegExp(`^<\\/${escapedTag}>\\s*$`, 'i'),          // </artifact>, </file>, </code>
-        new RegExp(`^<\\/${escapedTag}[=:]${escapedPath}>\\s*$`, 'i'),  // </file:filename>
-        new RegExp(`^<\\/${escapedTag}[=:]${escapedName}>\\s*$`, 'i'),  // </file:filename> (just name)
+        new RegExp(`<\\/${escapedPath}>`, 'i'),              // </path/to/filename.ext>
+        new RegExp(`<\\/${escapedName}>`, 'i'),              // </filename.ext>
+        new RegExp(`<\\/${escapedTag}>`, 'i'),               // </artifact>, </file>, </code>
+        new RegExp(`<\\/${escapedTag}[=:]${escapedPath}>`, 'i'),  // </file:filename>
+        new RegExp(`<\\/${escapedTag}[=:]${escapedName}>`, 'i'),  // </file:filename> (just name)
       ];
       
-      const isClosing = closePatterns.some(p => p.test(line));
+      let closeMatch: RegExpMatchArray | null = null;
+      let matchedPattern: RegExp | null = null;
+      for (const p of closePatterns) {
+        const m = line.match(p);
+        if (m) {
+          closeMatch = m;
+          matchedPattern = p;
+          break;
+        }
+      }
       
-      if (isClosing) {
+      if (closeMatch && matchedPattern) {
+        const closeIndex = line.search(matchedPattern);
+        const beforeClose = line.substring(0, closeIndex);
+        const afterClose = line.substring(closeIndex + closeMatch[0].length).trim();
+        
+        // Add any content before the closing tag to buffer
+        if (beforeClose.trim()) {
+          buffer.push(beforeClose);
+        }
+        
         // Extract artifact
         let code = buffer.join('\n').trim();
         // Strip code fences if present inside
@@ -435,6 +454,11 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
           outputLines.push(`${prefix}[📦 Artifact: ${metadata.filename}]`);
         }
         
+        // Add any content after the closing tag to output
+        if (afterClose) {
+          outputLines.push(afterClose);
+        }
+        
         activeMethod = 0;
         metadata = {};
         buffer = [];
@@ -447,7 +471,18 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
     
     // Pattern 3: <artifact> tags
     if (activeMethod === 3) {
-      if (line.match(/^<\/artifact>\s*$/i)) {
+      // Check if line contains </artifact> (may not be alone on line)
+      const closeMatch = line.match(/<\/artifact>/i);
+      if (closeMatch) {
+        const closeIndex = line.search(/<\/artifact>/i);
+        const beforeClose = line.substring(0, closeIndex);
+        const afterClose = line.substring(closeIndex + '</artifact>'.length).trim();
+        
+        // Add any content before the closing tag to buffer
+        if (beforeClose.trim()) {
+          buffer.push(beforeClose);
+        }
+        
         const code = buffer.join('\n').trim();
         const artType = normalizeType(metadata.type || 'code');
         
@@ -462,6 +497,11 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
             created_at: new Date().toISOString(),
           });
           outputLines.push(`[📦 Artifact: ${metadata.title}]`);
+        }
+        
+        // Add any content after the closing tag to output
+        if (afterClose) {
+          outputLines.push(afterClose);
         }
         
         activeMethod = 0;

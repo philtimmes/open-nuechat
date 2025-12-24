@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.64"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.65"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1226,9 +1226,10 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.64**
+**NC-0.6.65**
 
 Changes:
+- NC-0.6.65: **Fix artifact closing tag** - detect `</artifact>` even when not alone on line (handles inline content before/after)
 - NC-0.6.64: **Gzip & log error support** - client-side gzip decompression (with safety limits), log file error extraction with context, error summary fed to LLM
 - NC-0.6.63: **Shared chat images & formatting** - attachments in shared API, matching formatting, user newlines preserved with whitespace-pre-wrap
 - NC-0.6.62: **RAG embedding model auto-retry** - time-based retry after 60s, background startup load, retry_in_seconds in status
