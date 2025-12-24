@@ -157,7 +157,7 @@ class Transaction(Base):
     
     # Metadata
     description = Column(String(500), nullable=True)
-    metadata = Column(Text, nullable=True)  # JSON string for extra data
+    payment_metadata = Column(Text, nullable=True)  # JSON string for extra data
     
     # Error handling
     error_code = Column(String(50), nullable=True)

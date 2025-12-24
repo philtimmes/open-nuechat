@@ -616,7 +616,7 @@ class PaymentService:
             status=PaymentStatus.PENDING,
             provider=PaymentProvider(provider if provider != "google_pay" else "stripe"),
             description=f"Subscription to {tier} plan",
-            metadata=json.dumps({"tier": tier, "session_id": result.get("session_id")}),
+            payment_metadata=json.dumps({"tier": tier, "session_id": result.get("session_id")}),
         )
         db.add(transaction)
         await db.flush()
