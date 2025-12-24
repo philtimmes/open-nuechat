@@ -59,7 +59,7 @@ interface PaymentProviders {
 }
 
 export default function Billing() {
-  const { user, refreshUser } = useAuthStore();
+  const { user, fetchUser } = useAuthStore();
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [history, setHistory] = useState<DailyUsage[]>([]);
   const [tiers, setTiers] = useState<TierConfig[]>([]);
@@ -82,7 +82,7 @@ export default function Billing() {
       // Refresh data after successful payment
       setTimeout(() => {
         fetchBillingData();
-        refreshUser();
+        fetchUser();
       }, 2000);
     }
   }, []);
@@ -146,7 +146,7 @@ export default function Billing() {
     try {
       await api.post('/billing/cancel-subscription');
       await fetchBillingData();
-      refreshUser();
+      fetchUser();
     } catch (err: any) {
       console.error('Cancel failed:', err);
       alert(err.response?.data?.detail || 'Failed to cancel subscription');
@@ -235,7 +235,7 @@ export default function Billing() {
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[var(--color-text-secondary)] text-sm">Token Usage</span>
                     <span className="text-[var(--color-text)] font-medium">
-                      {formatTokens(usage.total_tokens)} / {formatTokens(usage.tokens_limit)}
+                      {formatTokens(usage.total_tokens)} / {formatTokens(usage.tier_limit)}
                     </span>
                   </div>
                   <div className="h-4 bg-[var(--color-background)] rounded-full overflow-hidden">
