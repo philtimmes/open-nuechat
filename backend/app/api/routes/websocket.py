@@ -532,7 +532,7 @@ async def handle_chat_message(
                 assistant_parent_id = None
         
         # Create user message only if save_user_message is True
-        logger.info(f"[SAVE_USER_MSG_CHECK] save_user_message={save_user_message}, chat_id={chat_id}, content_len={len(content)}")
+        logger.info(f"[SAVE_USER_MSG_CHECK] save_user_message={save_user_message}, chat_id={chat_id}, content_len={len(content)}, parent_id_from_payload={parent_id}")
         if save_user_message:
             # Build message kwargs, using client ID if provided
             msg_kwargs = {
@@ -564,7 +564,8 @@ async def handle_chat_message(
             logger.debug(f"User message saved: {user_message.id} with parent_id={parent_id}")
             
             # Assistant message will be child of this user message
-            assistant_parent_id = user_message.id
+            assistant_parent_id = str(user_message.id)  # Ensure it's a string
+            logger.info(f"[ASSISTANT_PARENT] Set to user_message.id: {assistant_parent_id}")
             
             # Send confirmation with parent_id for frontend tree tracking
             await ws_manager.send_to_connection(connection, {
@@ -575,9 +576,37 @@ async def handle_chat_message(
                 },
             })
         else:
-            # File content continuation - don't create user message
-            logger.info(f"File content continuation mode (save_user_message=False), content_len={len(content)}, assistant_parent_id={assistant_parent_id}")
-            # Keep assistant_parent_id as-is for tree structure
+            # Tool/file content continuation - don't create user message
+            # CRITICAL: For linear conversation flow, we need to find the correct parent
+            
+            # First, try to use the parent_id from frontend if it's valid
+            if parent_id:
+                parent_check = await db.execute(
+                    select(Message.id).where(Message.id == parent_id, Message.chat_id == chat_id)
+                )
+                if parent_check.scalar_one_or_none():
+                    assistant_parent_id = str(parent_id)
+                    logger.info(f"[TOOL_CONTINUATION] Using frontend parent_id: {assistant_parent_id[:8]}")
+                else:
+                    logger.warning(f"[TOOL_CONTINUATION] Frontend parent_id {parent_id[:8] if parent_id else 'None'} invalid, finding latest")
+                    parent_id = None
+            
+            # If no valid parent_id from frontend, find the latest message
+            if not parent_id:
+                latest_msg_result = await db.execute(
+                    select(Message.id)
+                    .where(Message.chat_id == chat_id)
+                    .order_by(Message.created_at.desc())
+                    .limit(1)
+                )
+                latest_msg_id = latest_msg_result.scalar_one_or_none()
+                
+                if latest_msg_id:
+                    assistant_parent_id = str(latest_msg_id)
+                    logger.info(f"[TOOL_CONTINUATION] Using latest message as parent: {assistant_parent_id[:8]}")
+                else:
+                    logger.warning(f"[TOOL_CONTINUATION] No messages found in chat {chat_id}, parent will be None")
+                    assistant_parent_id = None
         
         # ==== SYSTEM PROMPT SETUP ====
         from app.api.routes.admin import get_system_setting
@@ -989,7 +1018,13 @@ The following is relevant information from your previous conversations:
                 if summary.get("warnings"):
                     summary_lines.append("\nCode warnings detected:")
                     for warning in summary.get("warnings", [])[:10]:
-                        summary_lines.append(f"  - {warning.get('message', 'Unknown warning')}")
+                        warning_type = warning.get('type', '')
+                        warning_msg = warning.get('message', 'Unknown warning')
+                        summary_lines.append(f"  - {warning_msg}")
+                        
+                        # Include error summary for log_error type warnings
+                        if warning_type == 'log_error' and warning.get('errorSummary'):
+                            summary_lines.append(f"\n{warning.get('errorSummary')}")
                 
                 summary_lines.append("\n[END_PROJECT_CODE_SUMMARY]")
                 
@@ -1111,9 +1146,23 @@ The following is relevant information from your previous conversations:
             logger.debug(f"Tool executed, result length: {len(str(result))}")
             return result
         
+        # ============================================================
+        # PRE-GENERATE ASSISTANT MESSAGE ID
+        # This ID is generated BEFORE streaming starts.
+        # Frontend receives it BEFORE any content.
+        # Tool continuations use this as parent_id.
+        # ============================================================
+        import uuid
+        assistant_message_id = str(uuid.uuid4())
+        
+        logger.info(f"[PRE_STREAM] Generated assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}")
+        
+        # Notify frontend of the message ID BEFORE streaming starts
+        await streaming_handler.start_stream(assistant_message_id, chat_id)
+        
         try:
             # Log content being sent to LLM
-            logger.info(f"[LLM_CALL] Sending to LLM: content_len={len(content)}, chat={chat_id}")
+            logger.info(f"[LLM_CALL] Sending to LLM: content_len={len(content)}, chat={chat_id}, assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}")
             if len(content) > 200:
                 logger.debug(f"[LLM_CALL] Content head: {content[:100]}")
                 logger.debug(f"[LLM_CALL] Content tail: {content[-100:]}")
@@ -1127,6 +1176,7 @@ The following is relevant information from your previous conversations:
                 tools=tools,
                 tool_executor=execute_tool if tools else None,
                 parent_id=assistant_parent_id,  # For conversation branching
+                message_id=assistant_message_id,  # PRE-GENERATED ID
                 cancel_check=streaming_handler.is_stop_requested,  # Allow LLM to check cancellation
                 stream_setter=streaming_handler.set_active_stream,  # Allow direct stream cancellation
                 is_file_content=not save_user_message,  # Skip injection filter for user-uploaded files
@@ -1149,10 +1199,9 @@ The following is relevant information from your previous conversations:
                 event_type = event.get("type")
                 logger.debug(f"LLM event: {event_type}")
                 
-                if event_type == "message_start":
-                    await streaming_handler.start_stream(event["message_id"], chat_id)
+                # NOTE: message_start is handled BEFORE this loop with pre-generated ID
                 
-                elif event_type == "text_delta":
+                if event_type == "text_delta":
                     await streaming_handler.send_chunk(event["text"])
                 
                 elif event_type == "message_end":

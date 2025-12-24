@@ -45,6 +45,9 @@ interface LLMSettings {
   llm_temperature: number;
   llm_stream_default: boolean;
   llm_multimodal: boolean;  // Whether legacy model supports vision
+  // Thinking tokens (for models that output reasoning)
+  think_begin_token: string;
+  think_end_token: string;
   // History compression
   history_compression_enabled: boolean;
   history_compression_threshold: number;
@@ -1517,8 +1520,8 @@ export default function Admin() {
   }
   
   return (
-    <div className="min-h-screen bg-[var(--color-background)] p-6">
-      <div className="max-w-6xl mx-auto">
+    <div className="h-full overflow-y-auto bg-[var(--color-background)] p-6">
+      <div className="max-w-6xl mx-auto pb-8">
         <h1 className="text-2xl font-bold text-[var(--color-text)] mb-6">Admin Panel</h1>
         
         {/* Status Messages */}
@@ -2240,6 +2243,49 @@ export default function Admin() {
                       <label htmlFor="llm-multimodal" className="text-sm text-[var(--color-text)]">
                         Model supports vision/images (multimodal)
                       </label>
+                    </div>
+                    
+                    {/* Thinking Tokens Settings */}
+                    <div className="border-t border-[var(--color-border)] pt-4 mt-4">
+                      <h4 className="text-sm font-medium text-[var(--color-text)] mb-3 flex items-center gap-2">
+                        🧠 Thinking Tokens
+                        <span className="text-xs font-normal text-[var(--color-text-secondary)]">
+                          (hide reasoning behind collapsible panel)
+                        </span>
+                      </h4>
+                      
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs text-[var(--color-text-secondary)] mb-1">
+                            Think Begin Token
+                          </label>
+                          <input
+                            type="text"
+                            value={llmSettings.think_begin_token}
+                            onChange={(e) => setLLMSettings({ ...llmSettings, think_begin_token: e.target.value })}
+                            placeholder="<think>"
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] font-mono text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">e.g. &lt;think&gt;, &lt;reasoning&gt;, [thinking]</p>
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs text-[var(--color-text-secondary)] mb-1">
+                            Think End Token
+                          </label>
+                          <input
+                            type="text"
+                            value={llmSettings.think_end_token}
+                            onChange={(e) => setLLMSettings({ ...llmSettings, think_end_token: e.target.value })}
+                            placeholder="</think>"
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] font-mono text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">e.g. &lt;/think&gt;, &lt;/reasoning&gt;, [/thinking]</p>
+                        </div>
+                      </div>
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-2">
+                        Content between these tokens will be hidden in a collapsible "Thinking..." panel
+                      </p>
                     </div>
                     
                     {/* History Compression Settings */}

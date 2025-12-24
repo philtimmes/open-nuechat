@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.51"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.64"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1226,9 +1226,22 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.51**
+**NC-0.6.64**
 
 Changes:
+- NC-0.6.64: **Gzip & log error support** - client-side gzip decompression (with safety limits), log file error extraction with context, error summary fed to LLM
+- NC-0.6.63: **Shared chat images & formatting** - attachments in shared API, matching formatting, user newlines preserved with whitespace-pre-wrap
+- NC-0.6.62: **RAG embedding model auto-retry** - time-based retry after 60s, background startup load, retry_in_seconds in status
+- NC-0.6.61: **Fix image display & markdown** - setCurrentChat skips clear when same chat (race fix), removed prose classes for explicit styling
+- NC-0.6.60: **Immediate image display & markdown formatting** - images show after upload without refresh, added h1-h6/strong/em/hr handlers
+- NC-0.6.59: **Fix image base64 truncation** - images were only sending first 50 chars to LLM, now sends full data
+- NC-0.6.58: **Fix stream cross-chat contamination** - track streaming chat ID, validate before appending content, clear refs on chat change
+- NC-0.6.57: **Thinking tokens support** - Admin LLM tab has think begin/end tokens, content hidden in collapsible panel, Admin scrolling fix
+- NC-0.6.56: **Pre-generate assistant message IDs BEFORE streaming** - ID generated upfront, sent to frontend before content, used as parent_id for tool continuations
+- NC-0.6.55: **Improved tool continuation parent_id tracking** - validate frontend parent_id, fallback to latest message, comprehensive logging
+- NC-0.6.54: **Add kb_search tool** - LLM can search knowledge bases with `<kb_search query="...">` tag
+- NC-0.6.53: **Fix tool loops creating branches** - backend now uses latest message as parent for tool continuations, ensuring linear flow
+- NC-0.6.52: **Fix artifacts carrying over to New Chat** - added `preserveArtifacts` parameter to `createChat()`
 - NC-0.6.51: **Chat Knowledge assistant context filtering** - filter chat history search by current assistant to prevent knowledge leakage between different GPTs
 - NC-0.6.50: **RAG model loading fix** (meta tensor errors), RAG admin endpoints, artifact streaming detection, tool result notifications with saved file context
 - NC-0.6.49: **Stop button fix** (background tasks), chat deletion removes knowledge index, streaming timeout (httpx.Timeout), All Models Prompt

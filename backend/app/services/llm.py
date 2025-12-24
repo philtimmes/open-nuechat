@@ -490,6 +490,7 @@ class LLMService:
         tools: Optional[List[Dict]] = None,
         tool_executor: Optional[Callable] = None,
         parent_id: Optional[str] = None,  # For conversation branching - parent of the assistant message
+        message_id: Optional[str] = None,  # Pre-generated message ID (REQUIRED for proper parent tracking)
         cancel_check: Optional[Callable[[], bool]] = None,  # Returns True if generation should be cancelled
         stream_setter: Optional[Callable[[Any], None]] = None,  # Callback to set active stream for cancellation
         is_file_content: bool = False,  # True when content is user-uploaded file (skip injection filters)
@@ -506,12 +507,21 @@ class LLMService:
         Args:
             parent_id: For new messages, this is the user_message.id.
                        For regeneration, this is the original user message ID.
+            message_id: PRE-GENERATED message ID for the assistant response.
+                       This MUST be generated BEFORE calling stream_message to ensure
+                       proper parent_id tracking in tool continuations.
             cancel_check: Optional callback that returns True if generation should stop.
             stream_setter: Optional callback to pass the stream object for external cancellation.
         """
         import logging
         from app.models.models import CustomAssistant
         logger = logging.getLogger(__name__)
+        
+        # Generate message_id if not provided (legacy support, but logs warning)
+        if not message_id:
+            import uuid
+            message_id = str(uuid.uuid4())
+            logger.warning(f"[LLM_STREAM] message_id not pre-generated! Generated {message_id[:8]}. This may cause parent_id issues.")
         
         # Track timing for structured logging
         stream_start_time = time.time()
@@ -585,8 +595,10 @@ class LLMService:
         # Build messages from chat history (using tree structure)
         messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id)
         
-        # Create placeholder assistant message
+        # Create placeholder assistant message with PRE-GENERATED ID
+        logger.info(f"[LLM_STREAM] Creating assistant message: id={message_id}, parent_id={parent_id}")
         assistant_message = Message(
+            id=message_id,  # USE PRE-GENERATED ID
             chat_id=chat.id,
             role=MessageRole.ASSISTANT,
             content="",
@@ -600,11 +612,10 @@ class LLMService:
         # Note: refresh() removed due to SQLAlchemy async/greenlet issues in rapid tool loops
         await db.flush()
         await db.commit()
+        logger.info(f"[LLM_STREAM] Assistant message committed: id={assistant_message.id}, parent_id={assistant_message.parent_id}")
         
-        yield {
-            "type": "message_start",
-            "message_id": str(assistant_message.id),
-        }
+        # NOTE: message_start is sent by websocket.py BEFORE calling stream_message
+        # with the pre-generated message_id. No need to yield it here.
         
         # Create stream context for filters
         stream_context = FilterContext(
@@ -1316,10 +1327,14 @@ When you receive search results or external data in the conversation, follow the
             logger.debug(f"[BUILD_CONTENT] Processing attachment type={att_type}, filename={attachment.get('filename')}")
             
             if att_type == "image":
+                # Include full base64 image data for the LLM
+                base64_data = attachment.get('data', '')
+                mime_type = attachment.get('mime_type', 'image/jpeg')
+                logger.info(f"[BUILD_CONTENT] Adding image: {attachment.get('filename')}, mime={mime_type}, base64_len={len(base64_data)}")
                 images.append({
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:{attachment.get('mime_type', 'image/jpeg')};base64,{attachment.get('data', '')[:50]}...",
+                        "url": f"data:{mime_type};base64,{base64_data}",
                     }
                 })
             elif att_type == "file":

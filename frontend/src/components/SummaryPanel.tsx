@@ -12,6 +12,7 @@ interface SummaryPanelProps {
 
 export default function SummaryPanel({ summary, zipUploadResult, onClose, onClearWarnings, onFileClick }: SummaryPanelProps) {
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+  const [expandedWarnings, setExpandedWarnings] = useState<Set<number>>(new Set());
   const [activeTab, setActiveTab] = useState<'uploads' | 'files' | 'warnings'>(zipUploadResult ? 'uploads' : 'files');
   
   const toggleFile = (path: string) => {
@@ -22,6 +23,16 @@ export default function SummaryPanel({ summary, zipUploadResult, onClose, onClea
       newExpanded.add(path);
     }
     setExpandedFiles(newExpanded);
+  };
+  
+  const toggleWarning = (idx: number) => {
+    const newExpanded = new Set(expandedWarnings);
+    if (newExpanded.has(idx)) {
+      newExpanded.delete(idx);
+    } else {
+      newExpanded.add(idx);
+    }
+    setExpandedWarnings(newExpanded);
   };
   
   const getActionColor = (action: FileChange['action']) => {
@@ -39,6 +50,7 @@ export default function SummaryPanel({ summary, zipUploadResult, onClose, onClea
       case 'mismatch': return 'text-red-400 bg-red-500/10 border-red-500/30';
       case 'orphan': return 'text-orange-400 bg-orange-500/10 border-orange-500/30';
       case 'library_not_found': return 'text-purple-400 bg-purple-500/10 border-purple-500/30';
+      case 'log_error': return 'text-red-400 bg-red-500/10 border-red-500/30';
       default: return 'text-[var(--color-text-secondary)] bg-[var(--color-surface)] border-[var(--color-border)]';
     }
   };
@@ -49,6 +61,7 @@ export default function SummaryPanel({ summary, zipUploadResult, onClose, onClea
       case 'mismatch': return '❌';
       case 'orphan': return '🔍';
       case 'library_not_found': return '📦';
+      case 'log_error': return '🔴';
       default: return '❓';
     }
   };
@@ -227,32 +240,54 @@ export default function SummaryPanel({ summary, zipUploadResult, onClose, onClea
                 {summary.warnings.map((warning, idx) => (
                   <div
                     key={idx}
-                    className={`rounded-lg border p-3 ${getWarningColor(warning.type)}`}
+                    className={`rounded-lg border ${getWarningColor(warning.type)}`}
                   >
-                    <div className="flex items-start gap-2">
-                      <span className="text-base flex-shrink-0">{getWarningIcon(warning.type)}</span>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium">{warning.message}</p>
-                        {warning.file && (
-                          <p className="text-xs mt-1 opacity-80">
-                            File: {warning.file}
-                          </p>
-                        )}
-                        {warning.signature && (
-                          <p className="text-xs mt-1 font-mono opacity-80 truncate">
-                            {warning.signature}
-                          </p>
-                        )}
-                        {warning.suggestion && (
-                          <p className="text-xs mt-2 italic opacity-90 flex items-start gap-1">
-                            <svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                            </svg>
-                            {warning.suggestion}
-                          </p>
-                        )}
+                    <button
+                      onClick={() => warning.type === 'log_error' && warning.errorSummary ? toggleWarning(idx) : undefined}
+                      className={`w-full p-3 text-left ${warning.type === 'log_error' && warning.errorSummary ? 'cursor-pointer hover:opacity-80' : ''}`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <span className="text-base flex-shrink-0">{getWarningIcon(warning.type)}</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium">{warning.message}</p>
+                          {warning.file && (
+                            <p className="text-xs mt-1 opacity-80">
+                              File: {warning.file}
+                            </p>
+                          )}
+                          {warning.signature && (
+                            <p className="text-xs mt-1 font-mono opacity-80 truncate">
+                              {warning.signature}
+                            </p>
+                          )}
+                          {warning.suggestion && (
+                            <p className="text-xs mt-2 italic opacity-90 flex items-start gap-1">
+                              <svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                              </svg>
+                              {warning.suggestion}
+                            </p>
+                          )}
+                          {warning.type === 'log_error' && warning.errorSummary && (
+                            <p className="text-xs mt-1 opacity-80 flex items-center gap-1">
+                              <svg className={`w-3 h-3 transition-transform ${expandedWarnings.has(idx) ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                              Click to {expandedWarnings.has(idx) ? 'hide' : 'show'} error details
+                            </p>
+                          )}
+                        </div>
                       </div>
-                    </div>
+                    </button>
+                    
+                    {/* Expandable error summary for log errors */}
+                    {warning.type === 'log_error' && warning.errorSummary && expandedWarnings.has(idx) && (
+                      <div className="px-3 pb-3 pt-1 border-t border-current/20">
+                        <pre className="text-xs font-mono whitespace-pre-wrap overflow-x-auto max-h-64 overflow-y-auto bg-black/20 rounded p-2">
+                          {warning.errorSummary}
+                        </pre>
+                      </div>
+                    )}
                   </div>
                 ))}
               </>

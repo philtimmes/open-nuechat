@@ -626,6 +626,7 @@ export default function ChatPage() {
     generatedImages,
     setShowSummary,
     updateCodeSummary,
+    addWarning,
     fetchCodeSummary,
     setCurrentChat,
     fetchChats,
@@ -1064,7 +1065,8 @@ export default function ChatPage() {
         modelForNewChat,
         isAssistant: modelForNewChat?.startsWith('gpt:'),
       });
-      const newChat = await createChat(modelForNewChat);
+      // preserveArtifacts=true: User may have uploaded files before sending first message
+      const newChat = await createChat(modelForNewChat, undefined, true);
       targetChatId = newChat.id;
       // Update URL without navigation
       window.history.pushState({}, '', `/chat/${newChat.id}`);
@@ -1083,6 +1085,24 @@ export default function ChatPage() {
     console.log('[handleFilesUploaded] Adding artifacts:', artifacts.length);
     addUploadedArtifacts(artifacts);
   }, [addUploadedArtifacts]);
+  
+  // Handle log file errors - add to code summary warnings
+  const handleLogErrors = useCallback((errors: Array<{ filename: string; errorSummary: string; errorCount: number }>) => {
+    console.log('[handleLogErrors] Processing log errors:', errors.length);
+    for (const err of errors) {
+      addWarning({
+        type: 'log_error',
+        message: `Found ${err.errorCount} errors in ${err.filename}`,
+        file: err.filename,
+        errorSummary: err.errorSummary,
+        errorCount: err.errorCount,
+      });
+    }
+    // Show summary panel if we found errors
+    if (errors.length > 0) {
+      setShowSummary(true);
+    }
+  }, [addWarning, setShowSummary]);
   
   // Persist uploaded files to backend when we have a chat
   // This ensures files survive page refresh
@@ -1516,6 +1536,7 @@ export default function ChatPage() {
             onSend={handleSendMessage}
             onZipUpload={handleZipUpload}
             onFilesUploaded={handleFilesUploaded}
+            onLogErrors={handleLogErrors}
             onVoiceModeToggle={sttEnabled ? toggleVoiceMode : undefined}
             disabled={!isConnected}
             isUploadingZip={isUploadingZip}
@@ -1877,6 +1898,7 @@ export default function ChatPage() {
             onStop={handleStop}
             onZipUpload={handleZipUpload}
             onFilesUploaded={handleFilesUploaded}
+            onLogErrors={handleLogErrors}
             onVoiceModeToggle={sttEnabled ? toggleVoiceMode : undefined}
             disabled={!isConnected}
             isStreaming={isSending}

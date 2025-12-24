@@ -10,7 +10,232 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.51
+**Current Version:** NC-0.6.64
+
+---
+
+## Recent Changes (NC-0.6.64)
+
+### Feature: Gzip file support & log error extraction
+- **Gzip decompression**: Uploaded .gz files are automatically decompressed client-side
+  - Uses browser's native DecompressionStream API
+  - Safety limits: 10MB compressed max, 50MB decompressed max, 100x ratio limit (zip bomb protection)
+  - Inner filename extracted (e.g., syslog.gz → syslog)
+- **Log error extraction**: Files with "log" in name/extension get error analysis
+  - Detects: error, failed, exception, traceback, critical, fatal, panic, warning, HTTP 4xx/5xx, errno
+  - Extracts error lines with preceding and following non-error context lines
+  - Shows up to 50 errors in summary
+- **Error summary in LLM context**: Log errors automatically fed to LLM
+  - Displayed in Summary Panel with expandable details
+  - Included in system prompt for AI analysis
+- **New warning type**: `log_error` added to SignatureWarning
+- **Files changed**:
+  - `fileProcessor.ts`: Gzip decompression, log error extraction, updated return types
+  - `ChatInput.tsx`: Added onLogErrors callback prop
+  - `ChatPage.tsx`: handleLogErrors to add warnings to summary panel
+  - `SummaryPanel.tsx`: Expandable log error details display
+  - `types/index.ts`: log_error type, errorSummary/errorCount fields
+  - `websocket.py`: Include errorSummary in LLM context for log_error warnings
+
+---
+
+## Recent Changes (NC-0.6.63)
+
+### Feature: Shared chat images & formatting
+- **Images in shared chats**: Attachments now included in shared chat API response
+  - Backend: `path_messages` and `all_messages` now include `attachments` field
+  - Frontend: SharedChat renders image attachments with proper styling
+- **Shared chat formatting matches original**: 
+  - Updated SharedChat ReactMarkdown components to match MessageBubble
+  - Added all heading handlers (h1-h6), strong, em, hr, li, etc.
+- **User newlines preserved**:
+  - User messages now render with `whitespace-pre-wrap` instead of markdown
+  - Preserves line breaks exactly as typed
+  - Applied to both MessageBubble and SharedChat
+- **Files changed**:
+  - `main.py`: Added attachments to shared chat message data
+  - `SharedChat.tsx`: Added attachments interface, image rendering, formatting components, user message handling
+  - `MessageBubble.tsx`: User messages use whitespace-pre-wrap
+
+---
+
+## Recent Changes (NC-0.6.62)
+
+### Fix: RAG embedding model auto-retry
+- **Problem**: Once embedding model failed to load, it never retried
+- **Root cause**: `_model_load_failed` flag was permanent, preventing all retries
+- **Solution**: 
+  - Added time-based retry: after 60 seconds, model loading is retried automatically
+  - Added `_model_load_last_attempt` timestamp tracking
+  - Background task on startup attempts model load after 5 second delay
+  - `get_model_status()` now shows `retry_in_seconds` when failed
+- **Files changed**:
+  - `rag.py`: Time-based retry mechanism for model loading
+  - `main.py`: Background delayed model load task on startup
+
+---
+
+## Recent Changes (NC-0.6.61)
+
+### Fix: Images display immediately & markdown formatting works
+- **Image display fix**: 
+  - Root cause: `setCurrentChat` was clearing messages when URL changed after `createChat`
+  - Fix: Skip clearing if switching to the same chat (prevents race condition)
+- **Markdown formatting fix**:
+  - Root cause: Tailwind v4 doesn't include typography plugin by default
+  - Fix: Removed prose classes, using explicit component styling instead
+  - Added `li` component for list items
+- **Files changed**:
+  - `chatSlice.ts`: setCurrentChat now skips clear when same chat
+  - `MessageBubble.tsx`: Removed prose classes, using direct styling
+
+---
+
+## Recent Changes (NC-0.6.60)
+
+### Feature: Immediate image display & improved markdown formatting
+- **Images display immediately**: Uploaded images now appear in chat instantly without refresh
+  - User messages now include attachments data for display
+  - Maps ProcessedAttachment (filename) to Attachment (name) format
+- **Markdown formatting improvements**: 
+  - Added explicit heading components (h1-h6) with proper sizing
+  - Added strong/em/hr handlers for consistent text formatting
+  - Headings scale: h1 (2xl) → h6 (sm)
+- **Files changed**:
+  - `WebSocketContext.tsx`: Convert attachments for display in user messages
+  - `MessageBubble.tsx`: Added heading, strong, em, hr components to ReactMarkdown
+
+---
+
+## Recent Changes (NC-0.6.59)
+
+### Fix: Image base64 data was being truncated
+- **Problem**: Images sent to LLM were only sending first 50 characters of base64 data + "..."
+- **Root cause**: Debug-style truncation in `_build_multimodal_content()` was used in actual payload
+- **Solution**: Pass full base64 data to LLM API
+- **Files changed**:
+  - `llm.py`: Fixed `_build_multimodal_content()` to use complete base64 data
+
+---
+
+## Recent Changes (NC-0.6.58)
+
+### Fix: Stream Cross-Chat Contamination
+- **Problem**: Streams from 2 different chat IDs were getting placed in the last created chat
+- **Root cause**: When switching chats during streaming, the global streaming state wasn't properly isolated
+- **Solution**:
+  - Added `currentStreamingChatIdRef` to track which chat owns the current stream
+  - Buffer flush callback now checks if streaming chat matches current chat before appending
+  - Clear streaming refs when chat changes via useEffect
+  - Enhanced validation in stream_end and stream_stopped handlers
+  - Clear refs in all stream termination paths (end, error, stopped)
+- **Files changed**:
+  - `WebSocketContext.tsx`: Added streaming chat ID tracking and validation
+
+---
+
+## Recent Changes (NC-0.6.57)
+
+### Feature: Thinking Tokens Support
+- **Admin Panel → LLM tab**: Added "Think Begin Token" and "Think End Token" fields
+- **Usage**: Configure tokens like `<think>` / `</think>` to hide model reasoning
+- **Rendering**: Content between thinking tokens is hidden behind a collapsible "🧠 Thinking..." panel
+- **User Experience**: Click "Thinking..." to expand and see the model's reasoning
+- **Streaming**: Shows animated "Thinking..." indicator during streaming
+- **Admin Scrolling**: Fixed Admin panel scrolling by adding `overflow-y-auto` to container
+- **Files changed**:
+  - `admin.py`: Added `think_begin_token` and `think_end_token` to LLMSettingsSchema
+  - `utils.py`: Added `/thinking-tokens` endpoint for frontend
+  - `Admin.tsx`: Added Thinking Tokens UI section, fixed scrolling
+  - `MessageBubble.tsx`: Added `ThinkingBlockPanel` component and extraction logic
+
+---
+
+## Recent Changes (NC-0.6.56)
+
+### Fix: Pre-generate assistant message IDs BEFORE streaming
+- **Problem**: Tool continuations created branches because message IDs were generated too late
+- **Root cause**: Message ID was generated inside `llm.stream_message()` AFTER database operations started
+- **Solution**: 
+  - Generate `assistant_message_id` in `websocket.py` BEFORE calling `stream_message()`
+  - Send `stream_start` to frontend IMMEDIATELY with that ID
+  - Pass pre-generated ID to `llm.stream_message()` as `message_id` parameter
+  - Frontend receives ID BEFORE any content, tracks it for tool continuations
+  - Tool results use the tracked message ID as `parent_id`
+- **Flow now**:
+  1. Backend generates UUID for assistant message
+  2. Backend sends `stream_start` with that ID to frontend
+  3. Frontend stores ID in `currentStreamingMessageIdRef`
+  4. Backend creates Message record with that ID
+  5. LLM streams content
+  6. If tool tag detected, frontend uses stored ID as `parent_id`
+  7. Next message chains correctly
+- **Files changed**:
+  - `websocket.py`: Pre-generate ID, call `start_stream()` before `stream_message()`
+  - `llm.py`: Accept `message_id` parameter, use it when creating Message
+
+---
+
+## Recent Changes (NC-0.6.55)
+
+### Fix: Improved parent_id tracking for tool continuations
+- **Problem**: Tool loops were still creating branches (21/21 version selector) - messages had no parent_id
+- **Root cause**: Multiple issues:
+  1. Tool continuation logic needed to validate frontend parent_id before using
+  2. Needed fallback to latest message when frontend parent_id invalid
+  3. Insufficient logging made debugging difficult
+- **Solution**: 
+  - For tool continuations: First validate frontend's parent_id, then fall back to latest message
+  - Added comprehensive logging throughout parent_id flow
+  - Explicitly convert user_message.id to string for safety
+  - Log assistant_parent_id before LLM call and after message creation
+- **Files changed**:
+  - `websocket.py`: Improved tool continuation parent_id logic with validation
+  - `llm.py`: Added logging for parent_id in stream_message
+
+---
+
+## Recent Changes (NC-0.6.54)
+
+### Feature: kb_search tool for LLM knowledge base access
+- **Usage**: `<kb_search query="SEARCH TERM">`
+- **Description**: Allows LLM to search user's accessible knowledge bases during conversation
+- **Searches**: All owned, shared, and public knowledge stores
+- **Returns**: Top 5 results with document name, knowledge store, score, and content
+- **Files added/changed**:
+  - `knowledge_stores.py`: Added `/search` POST endpoint with `KBSearchRequest`/`KBSearchResponse`
+  - `WebSocketContext.tsx`: Added `STREAM_KB_SEARCH_PATTERN` and handler
+
+---
+
+## Recent Changes (NC-0.6.53)
+
+### Fix: Tool loops creating branches instead of linear conversation
+- **Problem**: When tool calls looped (e.g., request_file, find_line), each continuation was creating a new branch instead of extending linearly, showing "21/21" in version selector
+- **Root cause**: Tool continuations (`save_user_message=false`) used frontend-provided `parent_id`, which could be stale due to timing issues - all continuations ended up with the same parent
+- **Solution**: 
+  - Backend now automatically finds the LATEST message in the chat for tool continuations
+  - Uses that message as parent regardless of what frontend sends
+  - Guarantees linear conversation flow for all tool loops
+- **Files changed**:
+  - `websocket.py`: Query for latest message when `save_user_message=false`
+  - `WebSocketContext.tsx`: Added streaming message ID tracking (secondary fix)
+
+---
+
+## Recent Changes (NC-0.6.52)
+
+### Fix: Artifacts carrying over to New Chat
+- **Problem**: When clicking "New Chat" from a chat with artifacts, the artifacts would carry over to the new chat
+- **Root cause**: `createChat()` was always preserving `uploadedArtifacts`, `zipUploadResult`, and `zipContext` from the previous state
+- **Solution**: 
+  - Added `preserveArtifacts` parameter to `createChat()` (default: `false`)
+  - "New Chat" button and keyboard shortcuts now clear artifacts (default behavior)
+  - First message in empty state still preserves artifacts (passes `true`) for users who upload files before chatting
+- **Files changed**:
+  - `chatSlice.ts`: Added `preserveArtifacts` parameter with conditional preservation
+  - `types.ts`: Updated `createChat` type signature
+  - `ChatPage.tsx`: Pass `preserveArtifacts=true` when creating chat on first message
 
 ---
 
@@ -704,6 +929,19 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.64 | 2025-12-24 | Gzip file support, log error extraction with context, error summary in LLM |
+| NC-0.6.63 | 2025-12-23 | Shared chat images & formatting, preserve user newlines (whitespace-pre-wrap) |
+| NC-0.6.62 | 2025-12-23 | RAG embedding model auto-retry after 60s, background startup load with delay |
+| NC-0.6.61 | 2025-12-23 | Fix image display after upload (setCurrentChat race), fix markdown (remove prose classes) |
+| NC-0.6.60 | 2025-12-22 | Immediate image display after upload, improved markdown heading/formatting |
+| NC-0.6.59 | 2025-12-22 | Fix image base64 truncation - images were only sending first 50 chars to LLM |
+| NC-0.6.58 | 2025-12-22 | Fix stream cross-chat contamination - track streaming chat ID, validate before appending |
+| NC-0.6.57 | 2025-12-21 | Thinking tokens support - hide model reasoning in collapsible panel, Admin panel scrolling fix |
+| NC-0.6.56 | 2025-12-21 | Pre-generate assistant message IDs BEFORE streaming - fixes tool continuation branching |
+| NC-0.6.55 | 2025-12-21 | Improved tool continuation parent_id tracking with validation and comprehensive logging |
+| NC-0.6.54 | 2025-12-21 | Add kb_search tool - LLM can search knowledge bases with `<kb_search query="...">` |
+| NC-0.6.53 | 2025-12-21 | Fix tool loops creating branches - backend now uses latest message as parent for continuations |
+| NC-0.6.52 | 2025-12-20 | Fix artifacts carrying over to New Chat - added preserveArtifacts parameter |
 | NC-0.6.51 | 2025-12-20 | Chat Knowledge assistant context filtering - prevents knowledge leakage between different GPTs |
 | NC-0.6.50 | 2025-12-19 | RAG model loading fix (meta tensor errors), RAG admin endpoints, artifact streaming detection, tool result notifications |
 | NC-0.6.49 | 2025-12-18 | Stop button fix, chat deletion removes knowledge index, streaming timeout, All Models Prompt |
@@ -789,7 +1027,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.51**
+Current: **NC-0.6.64**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

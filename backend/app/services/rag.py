@@ -373,6 +373,8 @@ class RAGService:
     _model = None
     _model_loaded = False
     _model_load_failed = False  # Track if model loading permanently failed
+    _model_load_last_attempt = 0  # Timestamp of last load attempt
+    _model_retry_delay = 60  # Retry after 60 seconds on failure
     _index_manager = None
     
     @classmethod
@@ -382,22 +384,38 @@ class RAGService:
         cls._model = None
         cls._model_loaded = False
         cls._model_load_failed = False
+        cls._model_load_last_attempt = 0
     
     @classmethod
     def get_model_status(cls) -> dict:
         """Get current model status for debugging"""
+        import time
+        retry_in = 0
+        if cls._model_load_failed:
+            elapsed = time.time() - cls._model_load_last_attempt
+            retry_in = max(0, cls._model_retry_delay - elapsed)
         return {
             "loaded": cls._model_loaded,
             "failed": cls._model_load_failed,
             "model_exists": cls._model is not None,
+            "retry_in_seconds": round(retry_in, 1) if cls._model_load_failed else None,
         }
     
     @classmethod
     def get_model(cls):
         """Lazy load the embedding model with GPU support"""
-        # If model loading already failed, don't retry (avoid repeated slow failures)
+        import time
+        
+        # If model loading already failed, check if we should retry
         if cls._model_load_failed:
-            return None
+            elapsed = time.time() - cls._model_load_last_attempt
+            if elapsed < cls._model_retry_delay:
+                # Too soon to retry
+                return None
+            else:
+                # Enough time has passed, reset and retry
+                logger.info(f"[RAG] Retrying model load after {elapsed:.0f}s...")
+                cls._model_load_failed = False
         
         if not cls._model_loaded:
             try:
@@ -470,6 +488,7 @@ class RAGService:
                 if model is None:
                     logger.error("All loading strategies failed")
                     cls._model_load_failed = True
+                    cls._model_load_last_attempt = time.time()
                     cls._model = None
                     return None
                 
@@ -497,6 +516,8 @@ class RAGService:
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 cls._model = None
+                cls._model_load_failed = True
+                cls._model_load_last_attempt = time.time()
         return cls._model
     
     @classmethod

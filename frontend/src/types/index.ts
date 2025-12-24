@@ -408,11 +408,13 @@ export interface FileChange {
 }
 
 export interface SignatureWarning {
-  type: 'missing' | 'mismatch' | 'orphan' | 'library_not_found';
+  type: 'missing' | 'mismatch' | 'orphan' | 'library_not_found' | 'log_error';
   message: string;
   file?: string;
   signature?: string;
   suggestion?: string;
+  errorSummary?: string;  // For log_error type: detailed error context
+  errorCount?: number;    // For log_error type: number of errors found
 }
 
 export interface CodeSummary {

@@ -61,7 +61,7 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
     }
   },
 
-  createChat: async (model?: string, systemPrompt?: string) => {
+  createChat: async (model?: string, systemPrompt?: string, preserveArtifacts = false) => {
     try {
       // Use provided model, or selected model from store, or let backend use default
       const modelToUse = model || useModelsStore.getState().selectedModel || undefined;
@@ -71,10 +71,14 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         selectedModel: useModelsStore.getState().selectedModel,
         finalModelToUse: modelToUse,
         isAssistant: modelToUse?.startsWith('gpt:'),
+        preserveArtifacts,
       });
       
-      // Preserve uploaded artifacts - they were uploaded before the chat was created
-      const { uploadedArtifacts: preservedArtifacts, zipUploadResult: preservedZipResult, zipContext: preservedZipContext } = get();
+      // Only preserve uploaded artifacts if explicitly requested (e.g., user uploaded files before chat existed)
+      // Do NOT preserve when clicking "New Chat" from an existing chat
+      const preservedArtifacts = preserveArtifacts ? get().uploadedArtifacts : [];
+      const preservedZipResult = preserveArtifacts ? get().zipUploadResult : null;
+      const preservedZipContext = preserveArtifacts ? get().zipContext : null;
       
       // Check if this is an assistant model (gpt: prefix)
       if (modelToUse && modelToUse.startsWith('gpt:')) {
@@ -98,7 +102,6 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
           selectedArtifact: null,
           showArtifacts: false,
           generatedImages: {},
-          // Preserve uploads from before chat was created
           uploadedArtifacts: preservedArtifacts,
           zipUploadResult: preservedZipResult,
           zipContext: preservedZipContext,
@@ -123,7 +126,6 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         selectedArtifact: null,
         showArtifacts: false,
         generatedImages: {},
-        // Preserve uploads from before chat was created
         uploadedArtifacts: preservedArtifacts,
         zipUploadResult: preservedZipResult,
         zipContext: preservedZipContext,
@@ -139,6 +141,20 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
   },
 
   setCurrentChat: (chat) => {
+    const { currentChat: existingChat, isSending } = get();
+    
+    // If switching to the same chat, don't clear state (prevents losing messages during streaming)
+    if (chat && existingChat && chat.id === existingChat.id) {
+      // Just update the chat metadata if needed, but don't clear messages
+      set({ currentChat: chat });
+      return;
+    }
+    
+    // If currently sending, don't clear state (prevents losing user message with attachments)
+    if (isSending && chat && existingChat && chat.id === existingChat.id) {
+      return;
+    }
+    
     // Clear ALL state when switching chats to prevent cross-chat contamination
     set({ 
       currentChat: chat, 

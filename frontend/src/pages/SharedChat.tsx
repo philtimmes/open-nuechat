@@ -7,6 +7,14 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
+interface SharedAttachment {
+  type: 'image' | 'file';
+  name?: string;
+  url?: string;
+  data?: string;
+  mime_type?: string;
+}
+
 interface SharedMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -16,6 +24,7 @@ interface SharedMessage {
   input_tokens?: number;
   output_tokens?: number;
   sibling_count?: number;
+  attachments?: SharedAttachment[];
 }
 
 interface SharedChatData {
@@ -226,7 +235,13 @@ export default function SharedChat() {
                     )}
                   </div>
                   
-                  <div className="text-[var(--color-text)] prose prose-invert max-w-none">
+                  {message.role === 'user' ? (
+                    // User messages: preserve whitespace/newlines exactly as typed
+                    <div className="max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
+                      {message.content}
+                    </div>
+                  ) : (
+                  <div className="max-w-none text-[var(--color-text)] leading-relaxed">
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={{
@@ -258,42 +273,125 @@ export default function SharedChat() {
                           );
                         },
                         p({ children }) {
-                          return <p className="mb-3 last:mb-0">{children}</p>;
+                          return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>;
                         },
                         ul({ children }) {
-                          return <ul className="list-disc pl-4 mb-3 space-y-1">{children}</ul>;
+                          return <ul className="list-disc list-outside ml-4 mb-2 space-y-0.5">{children}</ul>;
                         },
                         ol({ children }) {
-                          return <ol className="list-decimal pl-4 mb-3 space-y-1">{children}</ol>;
+                          return <ol className="list-decimal list-outside ml-4 mb-2 space-y-0.5">{children}</ol>;
+                        },
+                        li({ children }) {
+                          return <li className="text-[var(--color-text)] pl-1">{children}</li>;
                         },
                         table({ children }) {
                           return (
-                            <div className="overflow-x-auto my-3">
-                              <table className="min-w-full border-collapse border border-[var(--color-border)]">
+                            <div className="overflow-x-auto my-4 rounded-lg border border-[var(--color-border)]">
+                              <table className="min-w-full divide-y divide-[var(--color-border)]">
                                 {children}
                               </table>
                             </div>
                           );
                         },
+                        thead({ children }) {
+                          return <thead className="bg-[var(--color-surface)]">{children}</thead>;
+                        },
+                        tbody({ children }) {
+                          return <tbody className="divide-y divide-[var(--color-border)] bg-[var(--color-background)]">{children}</tbody>;
+                        },
+                        tr({ children }) {
+                          return <tr className="hover:bg-[var(--color-surface)]/50 transition-colors">{children}</tr>;
+                        },
                         th({ children }) {
                           return (
-                            <th className="border border-[var(--color-border)] px-3 py-2 bg-[var(--color-surface)] text-left font-medium">
+                            <th className="px-3 py-2 text-left text-xs font-semibold text-[var(--color-text)] uppercase tracking-wider whitespace-nowrap">
                               {children}
                             </th>
                           );
                         },
                         td({ children }) {
                           return (
-                            <td className="border border-[var(--color-border)] px-3 py-2">
+                            <td className="px-3 py-2 text-sm text-[var(--color-text-secondary)] whitespace-normal">
                               {children}
                             </td>
                           );
+                        },
+                        a({ href, children }) {
+                          return (
+                            <a
+                              href={href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[var(--color-accent)] hover:underline"
+                            >
+                              {children}
+                            </a>
+                          );
+                        },
+                        blockquote({ children }) {
+                          return (
+                            <blockquote className="border-l-2 border-[var(--color-border)] pl-4 italic text-[var(--color-text-secondary)]">
+                              {children}
+                            </blockquote>
+                          );
+                        },
+                        h1({ children }) {
+                          return <h1 className="text-2xl font-bold mt-6 mb-3 text-[var(--color-text)]">{children}</h1>;
+                        },
+                        h2({ children }) {
+                          return <h2 className="text-xl font-bold mt-5 mb-2 text-[var(--color-text)]">{children}</h2>;
+                        },
+                        h3({ children }) {
+                          return <h3 className="text-lg font-semibold mt-4 mb-2 text-[var(--color-text)]">{children}</h3>;
+                        },
+                        h4({ children }) {
+                          return <h4 className="text-base font-semibold mt-3 mb-1 text-[var(--color-text)]">{children}</h4>;
+                        },
+                        h5({ children }) {
+                          return <h5 className="text-sm font-semibold mt-2 mb-1 text-[var(--color-text)]">{children}</h5>;
+                        },
+                        h6({ children }) {
+                          return <h6 className="text-sm font-medium mt-2 mb-1 text-[var(--color-text-secondary)]">{children}</h6>;
+                        },
+                        strong({ children }) {
+                          return <strong className="font-bold text-[var(--color-text)]">{children}</strong>;
+                        },
+                        em({ children }) {
+                          return <em className="italic">{children}</em>;
+                        },
+                        hr() {
+                          return <hr className="my-4 border-t border-[var(--color-border)]" />;
                         },
                       }}
                     >
                       {message.content}
                     </ReactMarkdown>
                   </div>
+                  )}
+                  
+                  {/* Image Attachments */}
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {message.attachments.map((att, idx) => (
+                        <div key={idx}>
+                          {att.type === 'image' ? (
+                            <img
+                              src={att.url || (att.data ? `data:${att.mime_type || 'image/jpeg'};base64,${att.data}` : '')}
+                              alt={att.name || 'Attached image'}
+                              className="max-w-sm max-h-64 rounded border border-[var(--color-border)]"
+                            />
+                          ) : (
+                            <div className="flex items-center gap-2 px-3 py-1.5 rounded bg-[var(--color-surface)] border border-[var(--color-border)] text-sm">
+                              <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                              <span className="truncate max-w-[200px] text-[var(--color-text)]">{att.name || 'File'}</span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

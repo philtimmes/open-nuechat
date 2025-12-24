@@ -67,6 +67,7 @@ const STREAM_FIND_LINE_PATTERN = /<find_line\s+path=["']([^"']+)["']\s+contains=
 const STREAM_FIND_PATTERN_WITH_PATH = /<find\s+path=["']([^"']+)["']\s+search=["']([^"']+)["']\s*\/?>/i;
 const STREAM_FIND_PATTERN_NO_PATH = /<find\s+search=["']([^"']+)["']\s*\/?>/i;
 const STREAM_REQUEST_FILE_PATTERN = /<request_file\s+path=["']([^"']+)["']\s*\/?>/i;
+const STREAM_KB_SEARCH_PATTERN = /<kb_search\s+query=["']([^"']+)["']\s*\/?>/i;
 
 // Multi-line tool tag - match on closing </search_replace>
 const STREAM_SEARCH_REPLACE_PATTERN = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*?)<\/search_replace>/i;
@@ -707,8 +708,37 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   // Structure: { chatId: { filename: writeCount } }
   const artifactWriteCountRef = useRef<Record<string, Record<string, number>>>({});
   
+  // Track the current streaming message ID for tool result continuations
+  const currentStreamingMessageIdRef = useRef<string | null>(null);
+  
+  // Track which chat the current stream belongs to - prevents cross-chat contamination
+  const currentStreamingChatIdRef = useRef<string | null>(null);
+  
+  // Clear streaming refs when chat changes to prevent cross-chat contamination
+  useEffect(() => {
+    // If user switched to a different chat while streaming, clear the refs
+    if (currentChat?.id && currentStreamingChatIdRef.current && 
+        currentStreamingChatIdRef.current !== currentChat.id) {
+      console.log('[CHAT_CHANGE] Clearing streaming refs - switched from', 
+        currentStreamingChatIdRef.current, 'to', currentChat.id);
+      currentStreamingChatIdRef.current = null;
+      currentStreamingMessageIdRef.current = null;
+      streamingBufferRef.current?.clear();
+    }
+  }, [currentChat?.id]);
+  
   if (!streamingBufferRef.current) {
     streamingBufferRef.current = new StreamingBuffer((content) => {
+      // Only append content if we're still streaming for the same chat
+      const streamingChatId = currentStreamingChatIdRef.current;
+      const { currentChat } = useChatStore.getState();
+      
+      // If user switched to a different chat, ignore this content
+      if (streamingChatId && currentChat?.id && streamingChatId !== currentChat.id) {
+        console.log('[BUFFER_FLUSH] Ignoring content for different chat:', streamingChatId, 'vs', currentChat.id);
+        return;
+      }
+      
       const store = useChatStore.getState();
       store.appendStreamingContent(content);
       
@@ -1005,10 +1035,16 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           break;
         }
         
-        console.log('[stream_start] Stream starting for chat:', payload.chat_id);
+        console.log('[stream_start] Stream starting for chat:', payload.chat_id, 'message_id:', payload.message_id);
         // Log current state
         const { messages, artifacts } = useChatStore.getState();
         console.log(`[stream_start] State before clear: ${messages.length} messages, ${artifacts.length} artifacts`);
+        
+        // Track which chat this stream belongs to - prevents cross-chat contamination
+        currentStreamingChatIdRef.current = payload.chat_id || null;
+        
+        // Track the current streaming message ID for tool continuations
+        currentStreamingMessageIdRef.current = payload.message_id || null;
         
         streamingBufferRef.current?.clear();
         setStreamingContent('');
@@ -1062,6 +1098,12 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         
         const chunk = message.payload as StreamChunk & { parent_id?: string };
         console.warn('Stream ended:', chunk);
+        
+        // Clear the streaming chat ID ref - stream is over
+        const streamingChatId = currentStreamingChatIdRef.current;
+        currentStreamingChatIdRef.current = null;
+        currentStreamingMessageIdRef.current = null;
+        
         // Add final message
         if (chunk.message_id) {
           const { streamingContent, currentChat, generatedImages } = useChatStore.getState();
@@ -1076,10 +1118,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             console.warn('[STREAM_END] Content tail:', streamingContent.slice(-1000));
           }
           
-          // Only add message if it belongs to the current chat
-          // This prevents cross-chat contamination when switching chats during streaming
-          if (chunk.chat_id && currentChat?.id && chunk.chat_id !== currentChat.id) {
-            console.warn('Ignoring stream_end for different chat:', chunk.chat_id, 'current:', currentChat.id);
+          // CRITICAL: Validate stream belongs to current chat
+          // Use BOTH chunk.chat_id AND our tracked streamingChatId for robustness
+          const expectedChatId = chunk.chat_id || streamingChatId;
+          if (expectedChatId && currentChat?.id && expectedChatId !== currentChat.id) {
+            console.warn('[STREAM_END] Ignoring stream for different chat:', expectedChatId, 'current:', currentChat.id);
             clearStreaming();
             setIsSending(false);
             break;
@@ -1393,6 +1436,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         const chunk = message.payload as StreamChunk;
         console.error('Stream error:', chunk.error);
         streamingBufferRef.current?.clear();
+        currentStreamingChatIdRef.current = null;
+        currentStreamingMessageIdRef.current = null;
         clearStreaming();
         setIsSending(false);
         break;
@@ -1405,13 +1450,29 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         // Generation was stopped by user
         const chunk = message.payload as StreamChunk & { parent_id?: string };
         console.log('Stream stopped by user');
-        // Add partial message if content exists
+        
+        // Clear the streaming chat ID ref
+        const streamingChatId = currentStreamingChatIdRef.current;
+        currentStreamingChatIdRef.current = null;
+        currentStreamingMessageIdRef.current = null;
+        
+        // Add partial message if content exists AND it's for the current chat
         if (chunk.message_id) {
-          const { streamingContent } = useChatStore.getState();
+          const { streamingContent, currentChat } = useChatStore.getState();
+          
+          // Validate stream belongs to current chat
+          const expectedChatId = chunk.chat_id || streamingChatId;
+          if (expectedChatId && currentChat?.id && expectedChatId !== currentChat.id) {
+            console.warn('[STREAM_STOPPED] Ignoring stream for different chat:', expectedChatId, 'current:', currentChat.id);
+            clearStreaming();
+            setIsSending(false);
+            break;
+          }
+          
           if (streamingContent) {
             const assistantMessage: Message = {
               id: chunk.message_id,
-              chat_id: chunk.chat_id || '',
+              chat_id: chunk.chat_id || currentChat?.id || '',
               role: 'assistant',
               content: streamingContent + '\n\n*[Generation stopped]*',
               parent_id: chunk.parent_id,
@@ -1604,12 +1665,18 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         
         // Ensure we always send something, even if results are empty
         const finalResults = results.trim() || `[${toolName.toUpperCase()}: No results returned]`;
-        console.log(`[TOOL_RESULT] Sending ${toolName} results (${finalResults.length} chars), savedArtifacts: ${savedArtifactsDuringStreamRef.current.length}`);
+        
+        // Use current streaming message ID as parent for linear conversation flow
+        // This prevents tool continuations from creating branches
+        const parentId = currentStreamingMessageIdRef.current;
+        console.log(`[TOOL_RESULT] Sending ${toolName} results (${finalResults.length} chars), parent_id: ${parentId}, savedArtifacts: ${savedArtifactsDuringStreamRef.current.length}`);
+        
         wsRef.current!.send(JSON.stringify({
           type: 'chat_message',
           payload: {
             chat_id: currentChat.id,
             content: `[SYSTEM TOOL RESULT - ${toolName}]\nThe following results were generated by the system, not typed by the user.\n\n${finalResults}${artifactNotification}\n\n[END TOOL RESULT]`,
+            parent_id: parentId,  // Link to current streaming message for linear conversation
             zip_context: zipContext,
             save_user_message: false,
           },
@@ -1790,6 +1857,52 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           return;
         }
       }
+      
+      // Check for kb_search tag - search knowledge bases
+      const kbSearchMatch = streamingContent.match(STREAM_KB_SEARCH_PATTERN);
+      if (kbSearchMatch) {
+        console.log('[TOOL_INTERRUPT] MATCHED kb_search, query:', kbSearchMatch[1]);
+        const tagKey = getTagKey('kb_search', kbSearchMatch[0]);
+        if (!processedToolTagsRef.current.has(tagKey)) {
+          processedToolTagsRef.current.add(tagKey);
+          
+          // Check for tool loop
+          if (isToolLoop(tagKey)) {
+            console.warn('[TOOL_INTERRUPT] Loop detected for kb_search, stopping');
+            wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
+            streamingBufferRef.current?.pause();
+            sendToolResult('kb_search', '[LOOP DETECTED] You have searched for this same query multiple times. Please use the results you have or try a different query.');
+            return;
+          }
+          recordToolCall(tagKey);
+          
+          console.log('[TOOL_INTERRUPT] Detected kb_search tag, executing API call');
+          
+          // Stop generation and pause buffer
+          wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
+          streamingBufferRef.current?.pause();
+          
+          // Make API call to search knowledge bases
+          const searchQuery = kbSearchMatch[1];
+          api.post('/knowledge-stores/search', { query: searchQuery, top_k: 5 })
+            .then((response) => {
+              const { results, stores_searched } = response.data;
+              if (results.length === 0) {
+                sendToolResult('kb_search', `[KB_SEARCH: No results found for "${searchQuery}" across ${stores_searched} knowledge bases]`);
+              } else {
+                const formattedResults = results.map((r: { document_name: string; knowledge_store_name: string; score: number; content: string }, i: number) => 
+                  `[Result ${i + 1}] From "${r.document_name}" (${r.knowledge_store_name}, score: ${r.score.toFixed(2)})\n${r.content}`
+                ).join('\n\n---\n\n');
+                sendToolResult('kb_search', `[KB_SEARCH RESULTS for "${searchQuery}"]\nSearched ${stores_searched} knowledge bases, found ${results.length} results:\n\n${formattedResults}`);
+              }
+            })
+            .catch((err) => {
+              console.error('[TOOL_INTERRUPT] kb_search API error:', err);
+              sendToolResult('kb_search', `[KB_SEARCH ERROR: Failed to search knowledge bases - ${err.message || 'Unknown error'}]`);
+            });
+          return;
+        }
+      }
     };
     
     // Clear processed tags when streaming ends or on unmount
@@ -1928,6 +2041,27 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       // Reset file write counter for this chat on new user message (new task)
       artifactWriteCountRef.current[chatId] = {};
       
+      // Convert attachments to display format for the user message
+      const displayAttachments = attachments?.map((att: any) => ({
+        type: att.type as 'image' | 'file',
+        name: att.filename || 'attachment',
+        data: att.data,
+        mime_type: att.mime_type,
+        url: att.type === 'image' && att.data ? `data:${att.mime_type};base64,${att.data}` : undefined,
+      }));
+      
+      console.log('[sendChatMessage] Attachments:', {
+        rawCount: attachments?.length || 0,
+        displayCount: displayAttachments?.length || 0,
+        first: displayAttachments?.[0] ? { 
+          type: displayAttachments[0].type, 
+          name: displayAttachments[0].name, 
+          hasData: !!displayAttachments[0].data,
+          dataLen: displayAttachments[0].data?.length || 0,
+          hasUrl: !!displayAttachments[0].url,
+        } : null,
+      });
+      
       // Generate a proper UUID for the user message (used by both frontend and backend)
       const messageId = crypto.randomUUID();
       const userMessage: Message = {
@@ -1935,6 +2069,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         chat_id: chatId,
         role: 'user',
         content,
+        attachments: displayAttachments,
         parent_id: parentId,
         created_at: new Date().toISOString(),
       };

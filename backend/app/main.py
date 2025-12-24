@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.51"
+SCHEMA_VERSION = "NC-0.6.64"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -393,6 +393,17 @@ async def lifespan(app: FastAPI):
     # Initialize RAG service (loads embedding model)
     try:
         rag_service = RAGService()
+        # Trigger model load in background with delay
+        import asyncio
+        async def delayed_model_load():
+            await asyncio.sleep(5)  # Wait 5 seconds for other services
+            logger.info("[RAG] Attempting delayed model load...")
+            model = RAGService.get_model()
+            if model:
+                logger.info(f"[RAG] Model loaded successfully: {model.device}")
+            else:
+                logger.warning("[RAG] Model failed to load, will retry automatically in 60s")
+        asyncio.create_task(delayed_model_load())
         logger.info(f"RAG service initialized with model: {settings.EMBEDDING_MODEL}")
     except Exception as e:
         logger.warning(f"RAG service initialization deferred: {e}")
@@ -911,6 +922,7 @@ async def get_shared_chat(share_id: str):
                 "input_tokens": selected.input_tokens,
                 "output_tokens": selected.output_tokens,
                 "sibling_count": len(children),
+                "attachments": selected.attachments,  # Include image/file attachments
             })
             
             current_parent = selected.id
@@ -924,6 +936,7 @@ async def get_shared_chat(share_id: str):
             "created_at": msg.created_at.isoformat(),
             "input_tokens": msg.input_tokens,
             "output_tokens": msg.output_tokens,
+            "attachments": msg.attachments,  # Include image/file attachments
         } for msg in sorted_messages]
         
         # Log final result

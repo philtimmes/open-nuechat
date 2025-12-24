@@ -208,6 +208,9 @@ class LLMSettingsSchema(BaseModel):
     llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     llm_stream_default: bool = True
     llm_multimodal: bool = False  # Whether legacy model supports vision/images
+    # Thinking tokens (for models that output reasoning)
+    think_begin_token: str = ""
+    think_end_token: str = ""
     # History compression settings
     history_compression_enabled: bool = True
     history_compression_threshold: int = Field(default=20, ge=5, le=100)
@@ -428,6 +431,9 @@ async def get_llm_settings(
         llm_temperature=await get_system_setting_float(db, "llm_temperature"),
         llm_stream_default=await get_system_setting_bool(db, "llm_stream_default"),
         llm_multimodal=await get_system_setting_bool(db, "llm_multimodal"),
+        # Thinking tokens
+        think_begin_token=await get_system_setting(db, "think_begin_token") or "",
+        think_end_token=await get_system_setting(db, "think_end_token") or "",
         # History compression
         history_compression_enabled=await get_system_setting_bool(db, "history_compression_enabled"),
         history_compression_threshold=await get_system_setting_int(db, "history_compression_threshold") or 20,
@@ -451,6 +457,9 @@ async def update_llm_settings(
     await set_setting(db, "llm_temperature", str(data.llm_temperature))
     await set_setting(db, "llm_stream_default", str(data.llm_stream_default).lower())
     await set_setting(db, "llm_multimodal", str(data.llm_multimodal).lower())
+    # Thinking tokens
+    await set_setting(db, "think_begin_token", data.think_begin_token)
+    await set_setting(db, "think_end_token", data.think_end_token)
     # History compression
     await set_setting(db, "history_compression_enabled", str(data.history_compression_enabled).lower())
     await set_setting(db, "history_compression_threshold", str(data.history_compression_threshold))

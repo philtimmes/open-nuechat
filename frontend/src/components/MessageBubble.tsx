@@ -1,10 +1,11 @@
-import React, { useState, memo } from 'react';
+import React, { useState, memo, useEffect } from 'react';
 import type { Message, Artifact, GeneratedImage } from '../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import GeneratedImageCard from './GeneratedImageCard';
+import api from '../lib/api';
 
 // Tool citation data
 interface ToolCitation {
@@ -14,6 +15,121 @@ interface ToolCitation {
   result_summary?: string;
   result_url?: string;
   success: boolean;
+}
+
+// Thinking tokens cache
+let thinkingTokensCache: { begin: string; end: string } | null = null;
+let thinkingTokensLoading = false;
+const thinkingTokensListeners: Set<() => void> = new Set();
+
+async function loadThinkingTokens() {
+  if (thinkingTokensCache || thinkingTokensLoading) return;
+  thinkingTokensLoading = true;
+  try {
+    const res = await api.get('/utils/thinking-tokens');
+    thinkingTokensCache = {
+      begin: res.data.think_begin_token || '',
+      end: res.data.think_end_token || '',
+    };
+    thinkingTokensListeners.forEach(fn => fn());
+  } catch (e) {
+    console.warn('Failed to load thinking tokens:', e);
+    thinkingTokensCache = { begin: '', end: '' };
+  }
+  thinkingTokensLoading = false;
+}
+
+function useThinkingTokens() {
+  const [tokens, setTokens] = useState(thinkingTokensCache);
+  
+  useEffect(() => {
+    if (thinkingTokensCache) {
+      setTokens(thinkingTokensCache);
+      return;
+    }
+    
+    const listener = () => setTokens(thinkingTokensCache);
+    thinkingTokensListeners.add(listener);
+    loadThinkingTokens();
+    
+    return () => { thinkingTokensListeners.delete(listener); };
+  }, []);
+  
+  return tokens;
+}
+
+// Extract thinking blocks from content
+interface ThinkingBlock {
+  thinking: string;
+  afterContent: string;
+}
+
+function extractThinkingBlocks(content: string, beginToken: string, endToken: string): { blocks: ThinkingBlock[]; finalContent: string } {
+  if (!beginToken || !endToken) {
+    return { blocks: [], finalContent: content };
+  }
+  
+  const blocks: ThinkingBlock[] = [];
+  let remaining = content;
+  let result = '';
+  
+  while (remaining) {
+    const beginIdx = remaining.indexOf(beginToken);
+    if (beginIdx === -1) {
+      result += remaining;
+      break;
+    }
+    
+    // Add content before the thinking block
+    result += remaining.slice(0, beginIdx);
+    
+    const afterBegin = remaining.slice(beginIdx + beginToken.length);
+    const endIdx = afterBegin.indexOf(endToken);
+    
+    if (endIdx === -1) {
+      // No end token found - treat the rest as thinking (incomplete)
+      blocks.push({ thinking: afterBegin, afterContent: '' });
+      break;
+    }
+    
+    const thinking = afterBegin.slice(0, endIdx);
+    remaining = afterBegin.slice(endIdx + endToken.length);
+    
+    blocks.push({ thinking, afterContent: '' });
+  }
+  
+  return { blocks, finalContent: result };
+}
+
+// Collapsible thinking block component
+function ThinkingBlockPanel({ thinking, isStreaming }: { thinking: string; isStreaming?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  
+  return (
+    <div className="mb-3">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors"
+      >
+        <span className={`transform transition-transform ${expanded ? 'rotate-90' : ''}`}>
+          ▶
+        </span>
+        <span className="flex items-center gap-1.5">
+          🧠 {isStreaming ? 'Thinking...' : 'Thinking'}
+          {isStreaming && (
+            <span className="inline-block w-1.5 h-3 bg-[var(--color-primary)] animate-pulse" />
+          )}
+        </span>
+      </button>
+      {expanded && (
+        <div className="mt-2 pl-5 border-l-2 border-[var(--color-border)]">
+          <div className="text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap opacity-75 italic">
+            {thinking}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -228,6 +344,11 @@ function arePropsEqual(prevProps: MessageProps, nextProps: MessageProps): boolea
   if (prevProps.message.content !== nextProps.message.content) return false;
   if (prevProps.message.current_branch !== nextProps.message.current_branch) return false;
   
+  // Check attachments changes
+  const prevAttachments = prevProps.message.attachments?.length ?? 0;
+  const nextAttachments = nextProps.message.attachments?.length ?? 0;
+  if (prevAttachments !== nextAttachments) return false;
+  
   // Check metadata changes (especially for image generation)
   const prevMeta = prevProps.message.metadata;
   const nextMeta = nextProps.message.metadata;
@@ -427,8 +548,17 @@ function MessageBubbleInner({
     ? message.content.replace(/\[📦 Artifact: [^\]]+\]/g, '') 
     : message.content;
   
+  // Get thinking tokens for extracting thinking blocks
+  const thinkingTokens = useThinkingTokens();
+  
+  // Extract thinking blocks from content
+  const { blocks: thinkingBlocks, finalContent: contentAfterThinking } = 
+    thinkingTokens && thinkingTokens.begin && thinkingTokens.end
+      ? extractThinkingBlocks(contentWithoutArtifacts, thinkingTokens.begin, thinkingTokens.end)
+      : { blocks: [], finalContent: contentWithoutArtifacts };
+  
   // Preprocess content: fix nested code fences and extract filenames
-  const processedContent = preprocessContent(contentWithoutArtifacts);
+  const processedContent = preprocessContent(contentAfterThinking);
   
   return (
     <div className={`group py-4 md:py-4 ${isUser && !isFileContent ? 'bg-[var(--color-surface)]/30' : ''} ${isFileContent ? 'bg-blue-500/5 border-l-2 border-blue-500/50' : ''}`}>
@@ -547,16 +677,35 @@ function MessageBubbleInner({
             </div>
           </div>
         ) : processedContent ? (
-          isStreaming ? (
-            // During streaming: plain text for performance (skip expensive markdown parsing)
-            <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)] whitespace-pre-wrap">
-              {processedContent}
-              <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
-            </div>
-          ) : (
-            // After streaming complete: full markdown rendering
-            <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)]">
-              <ReactMarkdown
+          <>
+            {/* Render thinking blocks */}
+            {thinkingBlocks.length > 0 && (
+              <div className="mb-3">
+                {thinkingBlocks.map((block, idx) => (
+                  <ThinkingBlockPanel 
+                    key={idx} 
+                    thinking={block.thinking} 
+                    isStreaming={isStreaming && idx === thinkingBlocks.length - 1}
+                  />
+                ))}
+              </div>
+            )}
+            
+            {isStreaming ? (
+              // During streaming: plain text for performance (skip expensive markdown parsing)
+              <div className="max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
+                {processedContent}
+                <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
+              </div>
+            ) : isUser ? (
+              // User messages: preserve whitespace/newlines exactly as typed
+              <div className="max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
+                {processedContent}
+              </div>
+            ) : (
+              // After streaming complete: full markdown rendering
+              <div className="max-w-none text-[var(--color-text)] leading-relaxed">
+                <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
                   code({ node, inline, className, children, ...props }: any) {
@@ -677,6 +826,9 @@ function MessageBubbleInner({
                   ol({ children }) {
                     return <ol className="list-decimal list-outside ml-4 mb-2 space-y-0.5">{children}</ol>;
                   },
+                  li({ children }) {
+                    return <li className="text-[var(--color-text)] pl-1">{children}</li>;
+                  },
                   a({ href, children }) {
                     return (
                       <a
@@ -696,12 +848,42 @@ function MessageBubbleInner({
                       </blockquote>
                     );
                   },
+                  // Headings with proper sizes
+                  h1({ children }) {
+                    return <h1 className="text-2xl font-bold mt-6 mb-3 text-[var(--color-text)]">{children}</h1>;
+                  },
+                  h2({ children }) {
+                    return <h2 className="text-xl font-bold mt-5 mb-2 text-[var(--color-text)]">{children}</h2>;
+                  },
+                  h3({ children }) {
+                    return <h3 className="text-lg font-semibold mt-4 mb-2 text-[var(--color-text)]">{children}</h3>;
+                  },
+                  h4({ children }) {
+                    return <h4 className="text-base font-semibold mt-3 mb-1 text-[var(--color-text)]">{children}</h4>;
+                  },
+                  h5({ children }) {
+                    return <h5 className="text-sm font-semibold mt-2 mb-1 text-[var(--color-text)]">{children}</h5>;
+                  },
+                  h6({ children }) {
+                    return <h6 className="text-sm font-medium mt-2 mb-1 text-[var(--color-text-secondary)]">{children}</h6>;
+                  },
+                  // Text formatting
+                  strong({ children }) {
+                    return <strong className="font-bold text-[var(--color-text)]">{children}</strong>;
+                  },
+                  em({ children }) {
+                    return <em className="italic">{children}</em>;
+                  },
+                  hr() {
+                    return <hr className="my-4 border-t border-[var(--color-border)]" />;
+                  },
                 }}
               >
                 {processedContent}
               </ReactMarkdown>
             </div>
-          )
+            )}
+          </>
         ) : isStreaming ? (
           <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse" />
         ) : null}
