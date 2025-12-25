@@ -249,17 +249,49 @@ async def get_chat_counts(
             "counts": counts,
             "total": sum(counts.values())
         }
+
+
+@router.post("", response_model=ChatResponse)
 async def create_chat(
     chat_data: ChatCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new chat"""
+    from app.models.models import CustomAssistant
+    
+    model_to_use = chat_data.model or settings.LLM_MODEL
+    
+    # Validate custom assistant if using gpt: prefix
+    if model_to_use and model_to_use.startswith("gpt:"):
+        assistant_id = model_to_use[4:]
+        result = await db.execute(
+            select(CustomAssistant).where(CustomAssistant.assistant_id == assistant_id)
+        )
+        assistant = result.scalar_one_or_none()
+        if not assistant:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Custom assistant '{assistant_id}' not found"
+            )
+        # Use the assistant's actual model
+        model_to_use = assistant.model
+    elif model_to_use:
+        # For regular models, just log a warning if validation fails - don't block chat creation
+        try:
+            llm_service = LLMService()
+            available_models = await llm_service.list_models()
+            model_ids = [m.get("id") for m in available_models if "id" in m]
+            
+            if model_ids and model_to_use not in model_ids:
+                logger.warning(f"Model '{model_to_use}' not in available models list. Available: {model_ids[:5]}...")
+        except Exception as e:
+            logger.warning(f"Could not validate model: {e}")
     
     chat = Chat(
         owner_id=user.id,
         title=chat_data.title or "New Chat",
-        model=chat_data.model or settings.LLM_MODEL,
+        model=model_to_use,
         system_prompt=chat_data.system_prompt,
         is_shared=chat_data.is_shared,
     )
@@ -347,9 +379,23 @@ async def update_chat(
                     # Switching to a different assistant
                     existing.assistant_id = assistant_id
             else:
-                # Assistant not found, store the raw model value
-                chat.model = new_model
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Custom assistant '{assistant_id}' not found"
+                )
         else:
+            # Log warning if model doesn't exist, but allow the change
+            # (The actual API will fail later if the model is truly invalid)
+            try:
+                llm_service = LLMService()
+                available_models = await llm_service.list_models()
+                model_ids = [m.get("id") for m in available_models if "id" in m]
+                
+                if model_ids and new_model not in model_ids:
+                    logger.warning(f"Model '{new_model}' not in available models list: {model_ids[:5]}...")
+            except Exception as e:
+                logger.warning(f"Could not validate model: {e}")
+            
             # Switching to a regular model - clear assistant association
             chat.model = new_model
             chat.assistant_id = None

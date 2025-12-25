@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.88"
+SCHEMA_VERSION = "NC-0.6.89"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -778,7 +778,46 @@ async def list_models(request: Request):
     }
 
 
-@app.get("/api/info")
+@app.get("/api/models/validate/{model_id:path}")
+async def validate_model(model_id: str, request: Request):
+    """Check if a model ID is valid and available"""
+    from app.services.llm import LLMService
+    from app.db.database import async_session_maker
+    from app.models.models import CustomAssistant
+    from sqlalchemy import select
+    
+    # Handle custom assistant models
+    if model_id.startswith("gpt:"):
+        assistant_id = model_id[4:]
+        async with async_session_maker() as db:
+            result = await db.execute(
+                select(CustomAssistant).where(CustomAssistant.id == assistant_id)
+            )
+            assistant = result.scalar_one_or_none()
+            if assistant:
+                return {"valid": True, "model_id": model_id, "type": "assistant", "name": assistant.name}
+            return {"valid": False, "model_id": model_id, "error": f"Assistant '{assistant_id}' not found"}
+    
+    # Check regular models
+    async with async_session_maker() as db:
+        llm_service = await LLMService.from_database(db)
+        models = await llm_service.list_models()
+        
+        # Check for errors in model list
+        if models and len(models) == 1 and "error" in models[0]:
+            return {"valid": False, "model_id": model_id, "error": f"Could not fetch model list: {models[0]['error']}"}
+        
+        model_ids = [m.get("id") for m in models if "id" in m]
+        
+        if model_id in model_ids:
+            return {"valid": True, "model_id": model_id, "type": "model"}
+        
+        return {
+            "valid": False, 
+            "model_id": model_id, 
+            "error": f"Model not found",
+            "available": model_ids[:10] if model_ids else []
+        }
 async def api_info():
     """API information"""
     return {

@@ -10,7 +10,32 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.88
+**Current Version:** NC-0.6.89
+
+---
+
+## Recent Changes (NC-0.6.89)
+
+### Bug Fixes & Model Validation
+
+**1. Fixed: New chat creation broken**
+- Missing `@router.post("", response_model=ChatResponse)` decorator was accidentally removed when adding `/counts` endpoint
+- Added decorator back
+
+**2. Model Validation (Lenient)**
+- `create_chat` and `update_chat`: Log warnings if model doesn't exist, but don't block
+- Custom assistants (`gpt:` prefix): Strict validation - returns 400 if assistant not found
+- New endpoint: `GET /api/models/validate/{model_id}` - Frontend can check if model is valid
+
+**3. Sidebar: Today expanded by default**
+- Date sorts (Modified/Created): "Today" section expanded, others collapsed  
+- Source sort: "Local" expanded by default
+- Improves UX by showing most relevant chats immediately
+
+**Files Changed:**
+- `backend/app/api/routes/chats.py`: Fixed create_chat decorator, lenient model validation
+- `backend/app/main.py`: Added `/api/models/validate/{model_id}` endpoint
+- `frontend/src/components/Sidebar.tsx`: Default expanded sections
 
 ---
 
@@ -1514,6 +1539,7 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.89 | 2025-12-25 | Fix new chat broken, add model validation, Today expanded by default |
 | NC-0.6.88 | 2025-12-25 | Fix chats disappearing on refresh - auto-load all, larger page size |
 | NC-0.6.87 | 2025-12-25 | All sidebar sections expanded by default, nested button fix, double-confirm delete |
 | NC-0.6.86 | 2025-12-25 | Fix sidebar date grouping to use calendar days not hours |
@@ -1523,7 +1549,6 @@ The editor uses React Flow and supports all step types with intuitive configurat
 | NC-0.6.82 | 2025-12-25 | Import preserves existing chats, original dates, accordion auto-expand fix |
 | NC-0.6.81 | 2025-12-25 | Import prefixes (ChatGPT:/Grok:), sidebar sort/accordions, collapsible tool calls |
 | NC-0.6.80 | 2025-12-25 | Fix ChatGPT import - skip hidden system messages, capture model |
-| NC-0.6.79 | 2025-12-25 | Fix chat compression never triggering - use admin threshold setting |
 | NC-0.6.76 | 2025-12-25 | Billing APIs admin tab for Stripe/PayPal/Google Pay configuration |
 | NC-0.6.75 | 2025-12-24 | Context window overflow protection - chunk large tool results into hidden agent files |
 | NC-0.6.74 | 2025-12-24 | Auto-close incomplete tool tags when LLM stops mid-output |
@@ -1634,7 +1659,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.88**
+Current: **NC-0.6.89**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

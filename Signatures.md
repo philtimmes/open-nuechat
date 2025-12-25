@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.88"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.89"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1229,10 +1229,10 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 **NC-0.6.68**
 
 Changes:
+- NC-0.6.89: **Fix new chat + model validation** - restored missing @router.post decorator, lenient model validation (warn only), validation endpoint /api/models/validate/{model_id}, Today expanded by default
 - NC-0.6.88: **Auto-load all chats** - increased page_size (500 frontend, 1000 backend max), auto-loads remaining chats after initial fetch, shows loading indicator
 - NC-0.6.87: **All sections expanded** - accordion uses Set<string> for multiple expanded sections, all expand by default, fixed nested button HTML, double-confirm for section delete
 - NC-0.6.86: **Calendar day grouping** - sidebar groups use calendar days (midnight-to-midnight) not hour-based diff, preventing overlap
-- NC-0.6.85: **Sidebar & settings** - overflow fix (min-h-0), Source sort option, accordion Export/Delete hover buttons, Delete All Chats in Settings
 - NC-0.6.75: **Context overflow protection** - chunk large tool results (>32k chars) into hidden `{AgentNNNN}.md` files, searchable by LLM
 - NC-0.6.74: **Auto-close incomplete tool tags** - salvage search_replace/replace_block even without closing tag
 - NC-0.6.73: **KaTeX math rendering** - LaTeX notation support ($...$, $$...$$) via remark-math + rehype-katex
