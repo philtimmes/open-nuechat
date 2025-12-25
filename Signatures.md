@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.77"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.79"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1229,6 +1229,8 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 **NC-0.6.68**
 
 Changes:
+- NC-0.6.79: **Fix compression never triggering** - agent_memory now uses admin `history_compression_target_tokens` (default 8000) instead of 50% of context
+- NC-0.6.78: **Dynamic max_tokens cap** - prevent context overflow by calculating `effective_max_tokens = min(max_tokens, context_size - input_tokens - 1000)`
 - NC-0.6.77: **File tree view & breadcrumb fix** - tree/flat toggle in artifacts, fixed breadcrumb nav closing panel, agent file naming aligned to `{AgentNNNN}.md`
 - NC-0.6.76: **Billing APIs admin tab** - configure Stripe/PayPal/Google Pay settings from Admin panel with test connection buttons
 - NC-0.6.75: **Context overflow protection** - chunk large tool results (>32k chars) into hidden `{AgentNNNN}.md` files, searchable by LLM

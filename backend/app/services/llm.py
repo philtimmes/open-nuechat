@@ -237,11 +237,22 @@ class LLMService:
         """
         effective_model = await self._get_effective_model(model)
         
+        # Dynamic max_tokens cap to prevent context overflow
+        from app.services.agent_memory import estimate_message_tokens
+        estimated_input = estimate_message_tokens(messages)
+        model_context_size = 524288  # Conservative default
+        requested_max = max_tokens or self.max_tokens
+        available = model_context_size - estimated_input - 1000
+        effective_max_tokens = max(1000, min(requested_max, available))
+        
+        if effective_max_tokens < requested_max:
+            logger.info(f"[LLM_REQUEST] stream_complete capped max_tokens: {requested_max} -> {effective_max_tokens}")
+        
         kwargs = {
             "model": effective_model,
             "messages": messages,
             "temperature": temperature if temperature is not None else self.temperature,
-            "max_tokens": max_tokens or self.max_tokens,
+            "max_tokens": effective_max_tokens,
             "stream": True,
         }
         
@@ -396,11 +407,31 @@ class LLMService:
         # Build messages from chat history (using tree structure)
         messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id)
         
+        # Dynamic max_tokens calculation to prevent context overflow
+        from app.services.agent_memory import estimate_message_tokens
+        from app.services.settings_service import SettingsService
+        estimated_input_tokens = estimate_message_tokens(messages)
+        
+        # Get model context size
+        model_context_size = 524288  # Default 512k
+        try:
+            context_setting = await SettingsService.get(db, "model_context_size")
+            if context_setting:
+                model_context_size = int(context_setting)
+        except:
+            pass
+        
+        available_for_output = model_context_size - estimated_input_tokens - 1000
+        effective_max_tokens = max(1000, min(self.max_tokens, available_for_output))
+        
+        if effective_max_tokens < self.max_tokens:
+            logger.info(f"[LLM_REQUEST] Capped max_tokens: {self.max_tokens} -> {effective_max_tokens}")
+        
         # Prepare API call parameters
         api_params = {
             "model": effective_model,
             "messages": messages,
-            "max_tokens": self.max_tokens,
+            "max_tokens": effective_max_tokens,
             "temperature": self.temperature,
         }
         
@@ -714,10 +745,33 @@ class LLMService:
                 })
             
             # Stream the final response
+            
+            # Dynamic max_tokens calculation to prevent context overflow
+            # Estimate input tokens and cap max_tokens to fit within context window
+            from app.services.agent_memory import estimate_message_tokens
+            estimated_input_tokens = estimate_message_tokens(messages)
+            
+            # Get model context size (default 128k, but large models can be 512k+)
+            # Use a conservative default if not set
+            model_context_size = 524288  # 512k tokens for large models
+            try:
+                context_setting = await SettingsService.get(db, "model_context_size")
+                if context_setting:
+                    model_context_size = int(context_setting)
+            except:
+                pass
+            
+            # Calculate available tokens for output (leave 1k buffer for safety)
+            available_for_output = model_context_size - estimated_input_tokens - 1000
+            effective_max_tokens = max(1000, min(self.max_tokens, available_for_output))
+            
+            if effective_max_tokens < self.max_tokens:
+                logger.info(f"[LLM_REQUEST] Capped max_tokens: {self.max_tokens} -> {effective_max_tokens} (input={estimated_input_tokens}, context={model_context_size})")
+            
             api_params = {
                 "model": effective_model,
                 "messages": messages,
-                "max_tokens": self.max_tokens,
+                "max_tokens": effective_max_tokens,
                 "temperature": self.temperature,
                 "stream": True,
             }
@@ -1250,6 +1304,8 @@ CRITICAL - When working with artifacts (files you create/edit):
                 # Most modern models (Claude, GPT-4, etc.) have 128k+ context
                 model_context = int(await SettingsService.get(db, "model_context_size") or "128000")
                 keep_recent = int(await SettingsService.get(db, "history_compression_keep_recent") or "10")
+                # Get compression threshold from admin settings
+                threshold_tokens = int(await SettingsService.get(db, "history_compression_target_tokens") or "8000")
                 
                 compressed, was_compressed = await compress_chat_history(
                     db=db,
@@ -1260,6 +1316,7 @@ CRITICAL - When working with artifacts (files you create/edit):
                     api_key=self.api_key,
                     model_context_size=model_context,
                     keep_recent=keep_recent,
+                    threshold_tokens=threshold_tokens,
                 )
                 
                 if was_compressed:

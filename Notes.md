@@ -10,7 +10,55 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.77
+**Current Version:** NC-0.6.79
+
+---
+
+## Recent Changes (NC-0.6.79)
+
+### Bugfix: Chat Compression Never Triggered
+
+**Problem:** Chat compression was never activating despite being enabled.
+
+**Root Cause:** Two separate compression systems with conflicting thresholds:
+- Agent Memory: triggered at 50% of model context (64k tokens for 128k model)
+- History Compression: triggered at 8000 tokens (but agent_memory ran first)
+
+**Fix:**
+1. Changed `DEFAULT_TOKEN_THRESHOLD` from 50% of context → fixed 8000 tokens
+2. Agent memory now uses `history_compression_target_tokens` admin setting
+3. Added logging: `[AGENT_MEMORY] Check: N tokens, threshold=8000, should_compress=true/false`
+
+**Settings (Admin → LLM tab):**
+- `history_compression_enabled`: Enable/disable (default: true)
+- `history_compression_target_tokens`: Token threshold (default: 8000)
+- `history_compression_keep_recent`: Recent messages to keep (default: 10)
+
+**When Compression Happens:**
+1. Chat history exceeds `threshold_tokens` (default 8000)
+2. Old messages are summarized into `{AgentNNNN}.md` files
+3. Recent messages (keep_recent × 2) are preserved verbatim
+4. Summary + context injected back into conversation
+
+**Files Changed:**
+- `backend/app/services/agent_memory.py`: Configurable threshold, added logging
+- `backend/app/services/llm.py`: Pass threshold from admin settings
+
+---
+
+## Recent Changes (NC-0.6.78)
+
+### Bugfix: Dynamic max_tokens Calculation
+- **Problem**: `max_tokens: 262144` exceeded available context space, causing 400 error
+- **Root cause**: Static max_tokens didn't account for input token size
+- **Fix**: Dynamically calculate `effective_max_tokens = min(max_tokens, context_size - input_tokens - 1000)`
+- Applied to:
+  - `stream_message()` - main chat streaming
+  - `send_message()` - non-streaming completions
+  - `stream_complete()` - OpenAI-compatible API
+
+**Files Changed:**
+- `backend/app/services/llm.py`: Added dynamic max_tokens capping in 3 locations
 
 ---
 
@@ -1229,6 +1277,8 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.79 | 2025-12-25 | Fix chat compression never triggering - use admin threshold setting |
+| NC-0.6.78 | 2025-12-25 | Dynamic max_tokens cap to prevent context overflow errors |
 | NC-0.6.77 | 2025-12-25 | File tree view in artifacts, breadcrumb nav fix, agent file naming fix |
 | NC-0.6.76 | 2025-12-25 | Billing APIs admin tab for Stripe/PayPal/Google Pay configuration |
 | NC-0.6.75 | 2025-12-24 | Context window overflow protection - chunk large tool results into hidden agent files |
@@ -1340,7 +1390,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.77**
+Current: **NC-0.6.79**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 
