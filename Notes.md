@@ -10,7 +10,178 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.79
+**Current Version:** NC-0.6.85
+
+---
+
+## Recent Changes (NC-0.6.85)
+
+### UI/UX Improvements & Data Management
+
+**1. Fixed streaming content overflow**
+- Added `min-h-0` to main chat container to prevent LLM output from escaping below chat input bar
+- Content now properly stays within scrollable message area
+
+**2. Sidebar accordion section actions**
+- Hover over section headers (Today, This Week, etc.) to reveal Export and Delete buttons
+- Export: Downloads all chats in section as JSON
+- Delete: Removes all chats in section (with confirmation)
+
+**3. New Sort option: Source**
+- Groups chats by origin: Local, ChatGPT, Grok
+- Based on title prefix (ChatGPT:/Grok: from imports)
+- Shows each source as expandable accordion section
+
+**4. Delete All Chats in Settings**
+- Added to Settings → Account → Danger Zone
+- Requires double confirmation (confirm dialog + type "DELETE ALL")
+- Uses existing backend endpoint DELETE /api/chats
+
+**Files Changed:**
+- `frontend/src/pages/ChatPage.tsx`: Added min-h-0 fix
+- `frontend/src/components/Sidebar.tsx`: Source sort, section hover buttons
+- `frontend/src/pages/Settings.tsx`: Delete all chats button
+
+---
+
+## Recent Changes (NC-0.6.84)
+
+### Real-Time Thinking Block Hiding During Streaming
+
+**Problem:** Thinking blocks were only hidden after message completed and page refreshed. Users could see raw `<think>...</think>` content during streaming.
+
+**Solution:** StreamingMessage component now filters thinking content in real-time:
+
+1. **Immediate detection**: As soon as begin token (e.g., `<think>`) appears, content is hidden
+2. **"🧠 Thinking..." indicator**: Shows animated indicator while inside thinking block
+3. **Invisible thinking**: All content between begin/end tokens never shown to user
+4. **Seamless transition**: When end token appears, visible content resumes immediately
+
+**How it looks during streaming:**
+```
+Assistant
+
+🧠 Thinking... ▌
+
+[visible response appears here after thinking ends]
+```
+
+**Files Changed:**
+- `frontend/src/pages/ChatPage.tsx`: Added `filterThinkingFromStream()`, thinking token hook, real-time filtering in StreamingMessage
+
+---
+
+## Recent Changes (NC-0.6.83)
+
+### Fix: Admin Thinking Tags Now Work
+
+**Problem:** Thinking tags configured in Admin → LLM panel had no effect - thinking blocks were never hidden in accordions.
+
+**Root Cause:** Thinking tokens were cached forever on first load. If tokens weren't configured at app start (or if load failed), they'd stay empty permanently.
+
+**Solution:**
+- Thinking tokens now use 30-second cache TTL
+- Tokens refresh automatically within 30 seconds of admin saving settings
+- Added debug logging: `[ThinkingTokens] Loaded: {begin, end}`
+- Added debug logging: `[ThinkingBlocks] Found N thinking block(s)`
+
+**How to Configure:**
+1. Go to Admin → LLM tab → Thinking Tokens section
+2. Set "Think Begin Token" (e.g., `<think>` or `<thinking>`)
+3. Set "Think End Token" (e.g., `</think>` or `</thinking>`)
+4. Save settings
+5. Wait up to 30 seconds, or refresh page
+6. Content between these tokens will now appear in collapsible "🧠 Thinking" panels
+
+**Files Changed:**
+- `frontend/src/components/MessageBubble.tsx`: Fixed thinking token caching, added debug logs
+
+---
+
+## Recent Changes (NC-0.6.82)
+
+### Fix: Chat Import Preserves Existing Chats
+
+**Problem:** Importing chats replaced existing chats in the sidebar (only showing page 1).
+
+**Solution:**
+- Backend now returns full chat objects in import response (`imported_chats` array)
+- Frontend adds imported chats to existing list using new `addImportedChats()` function
+- Imported chats merge without replacing - scroll to see all chats
+
+### Fix: Import Dates Match Original
+
+**Problem:** Imported chats showed "Today" instead of their original dates.
+
+**Solution:**
+- `created_at` = original chat creation date from export
+- `updated_at` = latest message date (or original date if no messages)
+- Imported chats now appear in correct date sections (Older, Last 30 Days, etc.)
+
+### Fix: Accordion Auto-Expands Correct Section
+
+**Problem:** Changing sort made sections disappear (expandedSection pointed to non-existent group).
+
+**Solution:**
+- useEffect auto-expands first available group when dateGroups changes
+- If current section doesn't exist in new groups, switches to first group
+- Initial expandedSection is null, auto-set by useEffect
+
+**Files Changed:**
+- `backend/app/api/routes/chats.py`: Return imported_chats in response, preserve original dates
+- `frontend/src/stores/chat/chatSlice.ts`: Add `addImportedChats()` function
+- `frontend/src/stores/chat/types.ts`: Add type for addImportedChats
+- `frontend/src/components/Sidebar.tsx`: Use addImportedChats, fix accordion state
+
+---
+
+## Recent Changes (NC-0.6.81)
+
+### Import Title Prefixes
+- ChatGPT imports now prefixed with "ChatGPT: " in title
+- Grok imports now prefixed with "Grok: " in title
+
+### Chat History Sorting & Accordions
+- **Sort dropdown**: Sort by Date Modified, Date Created, or Alphabetical
+- **Date-based grouping** (for date sorts):
+  - Today
+  - This Week  
+  - Last 30 Days
+  - Older
+- **Accordion sections**: Click to expand/collapse, one section open at a time
+- **Alphabetical mode**: Flat list without grouping
+
+### Message Display Accordions
+- **Tool calls**: Collapsed by default, click to expand and see full result
+- **Thinking**: Already collapsed, remains unchanged
+
+**Files Changed:**
+- `backend/app/api/routes/chats.py`: Add ChatGPT:/Grok: title prefixes
+- `frontend/src/components/Sidebar.tsx`: Sort dropdown, accordion groups
+- `frontend/src/components/MessageBubble.tsx`: Collapsible tool results
+
+---
+
+## Recent Changes (NC-0.6.80)
+
+### Fix: ChatGPT Import Parser
+
+**Problem:** ChatGPT exports contain hidden system messages that were being imported, and empty messages.
+
+**ChatGPT Export Structure:**
+```
+client-created-root → system(hidden) → system(hidden) → USER → system(hidden) → ASSISTANT
+```
+
+**Fixes:**
+1. Skip messages with `is_visually_hidden_from_conversation: true`
+2. Skip system role messages entirely
+3. Skip empty `parts: [""]` content
+4. Capture model from `metadata.model_slug` (e.g., "gpt-5-2")
+5. Better error handling for timestamp parsing
+
+**Files Changed:**
+- `backend/app/api/routes/chats.py`: Improved `parse_chatgpt_export()`
 
 ---
 
@@ -1277,6 +1448,12 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.85 | 2025-12-25 | Overflow fix, sidebar section buttons, Source sort, Delete all chats |
+| NC-0.6.84 | 2025-12-25 | Real-time thinking block hiding during streaming |
+| NC-0.6.83 | 2025-12-25 | Fix admin thinking tags - 30s cache TTL, tokens now actually work |
+| NC-0.6.82 | 2025-12-25 | Import preserves existing chats, original dates, accordion auto-expand fix |
+| NC-0.6.81 | 2025-12-25 | Import prefixes (ChatGPT:/Grok:), sidebar sort/accordions, collapsible tool calls |
+| NC-0.6.80 | 2025-12-25 | Fix ChatGPT import - skip hidden system messages, capture model |
 | NC-0.6.79 | 2025-12-25 | Fix chat compression never triggering - use admin threshold setting |
 | NC-0.6.78 | 2025-12-25 | Dynamic max_tokens cap to prevent context overflow errors |
 | NC-0.6.77 | 2025-12-25 | File tree view in artifacts, breadcrumb nav fix, agent file naming fix |
@@ -1390,7 +1567,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.79**
+Current: **NC-0.6.85**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

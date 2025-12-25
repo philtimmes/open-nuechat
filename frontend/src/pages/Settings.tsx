@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../stores/authStore';
+import { useChatStore } from '../stores/chatStore';
 import { useThemeStore } from '../stores/themeStore';
 import { useModelsStore } from '../stores/modelsStore';
 import { useVoiceStore } from '../stores/voiceStore';
@@ -52,6 +53,7 @@ const API_SCOPES = [
 
 export default function Settings() {
   const { user } = useAuthStore();
+  const { chats, deleteChat, fetchChats } = useChatStore();
   const { themes, currentTheme, applyTheme, applyThemeToAccount, isLoading } = useThemeStore();
   const { models, subscribedAssistants, defaultModel, selectedModel, setSelectedModel, fetchModels, getDisplayName } = useModelsStore();
   const { 
@@ -91,6 +93,7 @@ export default function Settings() {
   const [savingKey, setSavingKey] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [deletingAllChats, setDeletingAllChats] = useState(false);
   
   // Export all user data
   const handleExportData = async () => {
@@ -122,6 +125,36 @@ export default function Settings() {
       alert('Failed to export data. Please try again.');
     } finally {
       setExporting(false);
+    }
+  };
+  
+  // Delete all chats
+  const handleDeleteAllChats = async () => {
+    if (!confirm('Are you sure you want to delete ALL your chats? This action cannot be undone.')) {
+      return;
+    }
+    
+    // Double confirmation
+    const confirmText = prompt('Type "DELETE ALL" to confirm:');
+    if (confirmText !== 'DELETE ALL') {
+      alert('Deletion cancelled. Text did not match.');
+      return;
+    }
+    
+    setDeletingAllChats(true);
+    try {
+      // Delete all chats via API (endpoint is DELETE /api/chats)
+      await api.delete('/chats');
+      
+      // Refresh chat list
+      await fetchChats(false);
+      
+      alert('All chats have been deleted.');
+    } catch (err: any) {
+      console.error('Failed to delete all chats:', err);
+      alert(err.response?.data?.detail || 'Failed to delete chats. Please try again.');
+    } finally {
+      setDeletingAllChats(false);
     }
   };
   
@@ -549,13 +582,33 @@ export default function Settings() {
             
             {/* Danger zone */}
             <section className="bg-red-500/5 rounded-xl p-6 border border-red-500/20">
-              <h2 className="text-lg font-semibold text-[var(--color-error)] mb-2">Danger Zone</h2>
-              <p className="text-sm text-[var(--color-text-secondary)] mb-4">
-                Once you delete your account, there is no going back. Please be certain.
-              </p>
-              <button className="px-4 py-2 rounded-lg border border-[var(--color-error)] text-[var(--color-error)] hover:bg-red-500/10 transition-colors">
-                Delete Account
-              </button>
+              <h2 className="text-lg font-semibold text-[var(--color-error)] mb-4">Danger Zone</h2>
+              
+              {/* Delete all chats */}
+              <div className="mb-6 pb-6 border-b border-red-500/20">
+                <h3 className="text-sm font-medium text-[var(--color-text)] mb-1">Delete All Chats</h3>
+                <p className="text-sm text-[var(--color-text-secondary)] mb-3">
+                  Permanently delete all your chat conversations. This cannot be undone.
+                </p>
+                <button 
+                  onClick={handleDeleteAllChats}
+                  disabled={deletingAllChats}
+                  className="px-4 py-2 rounded-lg border border-orange-500 text-orange-500 hover:bg-orange-500/10 transition-colors disabled:opacity-50"
+                >
+                  {deletingAllChats ? 'Deleting...' : 'Delete All Chats'}
+                </button>
+              </div>
+              
+              {/* Delete account */}
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text)] mb-1">Delete Account</h3>
+                <p className="text-sm text-[var(--color-text-secondary)] mb-3">
+                  Once you delete your account, there is no going back. Please be certain.
+                </p>
+                <button className="px-4 py-2 rounded-lg border border-[var(--color-error)] text-[var(--color-error)] hover:bg-red-500/10 transition-colors">
+                  Delete Account
+                </button>
+              </div>
             </section>
           </div>
         )}

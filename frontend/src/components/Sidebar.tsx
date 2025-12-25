@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Link, useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore } from '../stores/authStore';
@@ -6,6 +6,8 @@ import { useModelsStore } from '../stores/modelsStore';
 import { formatRelativeTime } from '../lib/formatters';
 import api from '../lib/api';
 import type { Chat } from '../types';
+
+type SortOption = 'modified' | 'created' | 'alphabetical' | 'source';
 
 interface SidebarProps {
   isOpen: boolean;
@@ -23,8 +25,12 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   const [editTitle, setEditTitle] = useState('');
   const [isImporting, setIsImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ success: number; failed: number } | null>(null);
+  const [sortBy, setSortBy] = useState<SortOption>('modified');
+  const [showSortDropdown, setShowSortDropdown] = useState(false);
+  const [expandedSection, setExpandedSection] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const sortDropdownRef = useRef<HTMLDivElement>(null);
   
   const { user } = useAuthStore();
   const {
@@ -37,6 +43,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     updateChatTitle,
     setCurrentChat,
     fetchChats,
+    addImportedChats,
   } = useChatStore();
   
   const { getDisplayName } = useModelsStore();
@@ -151,8 +158,10 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
       const result = await response.json();
       setImportResult({ success: result.total_imported, failed: result.total_failed });
       
-      // Refresh chat list
-      await fetchChats();
+      // Add imported chats to store without replacing existing ones
+      if (result.imported_chats && result.imported_chats.length > 0) {
+        addImportedChats(result.imported_chats);
+      }
       
       // Navigate to the first imported chat if any
       if (result.results?.length > 0 && result.results[0].chat_id) {
@@ -203,26 +212,179 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     setEditTitle('');
   };
   
-  const formatDate = (dateStr: string) => {
-    // Use the centralized formatter, but group by day for sidebar
+  // Close sort dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (sortDropdownRef.current && !sortDropdownRef.current.contains(e.target as Node)) {
+        setShowSortDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+  
+  // Get date category for grouping
+  const getDateCategory = (dateStr: string): string => {
     const date = new Date(dateStr);
     const now = new Date();
     const diff = now.getTime() - date.getTime();
     const days = Math.floor(diff / (1000 * 60 * 60 * 24));
     
     if (days === 0) return 'Today';
-    if (days === 1) return 'Yesterday';
-    if (days < 7) return formatRelativeTime(dateStr);
-    return date.toLocaleDateString();
+    if (days < 7) return 'This Week';
+    if (days < 30) return 'Last 30 Days';
+    return 'Older';
   };
   
-  // Group chats by date
-  const groupedChats = safeChats.reduce((groups, chat) => {
-    const date = formatDate(chat.updated_at);
-    if (!groups[date]) groups[date] = [];
-    groups[date].push(chat);
-    return groups;
-  }, {} as Record<string, Chat[]>);
+  // Get source from chat title prefix
+  const getSource = (title: string): string => {
+    if (title.startsWith('ChatGPT: ')) return 'ChatGPT';
+    if (title.startsWith('Grok: ')) return 'Grok';
+    return 'Local';
+  };
+  
+  // Sort and group chats based on selected sort option
+  const { sortedChats, groupedChats, dateGroups } = useMemo(() => {
+    let sorted = [...safeChats];
+    
+    // Sort chats
+    switch (sortBy) {
+      case 'created':
+        sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        break;
+      case 'modified':
+        sorted.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+        break;
+      case 'alphabetical':
+        sorted.sort((a, b) => a.title.localeCompare(b.title));
+        break;
+      case 'source':
+        // Sort by source, then by date
+        sorted.sort((a, b) => {
+          const sourceA = getSource(a.title);
+          const sourceB = getSource(b.title);
+          if (sourceA !== sourceB) {
+            // Order: Local, ChatGPT, Grok
+            const order = ['Local', 'ChatGPT', 'Grok'];
+            return order.indexOf(sourceA) - order.indexOf(sourceB);
+          }
+          return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+        });
+        break;
+    }
+    
+    // Group by date category (only for date-based sorts) or source
+    if (sortBy === 'alphabetical') {
+      return { sortedChats: sorted, groupedChats: {}, dateGroups: [] };
+    }
+    
+    if (sortBy === 'source') {
+      const groups: Record<string, Chat[]> = {};
+      const groupOrder = ['Local', 'ChatGPT', 'Grok'];
+      
+      sorted.forEach(chat => {
+        const source = getSource(chat.title);
+        if (!groups[source]) groups[source] = [];
+        groups[source].push(chat);
+      });
+      
+      const activeGroups = groupOrder.filter(g => groups[g] && groups[g].length > 0);
+      return { sortedChats: sorted, groupedChats: groups, dateGroups: activeGroups };
+    }
+    
+    const dateField = sortBy === 'created' ? 'created_at' : 'updated_at';
+    const groups: Record<string, Chat[]> = {};
+    const groupOrder = ['Today', 'This Week', 'Last 30 Days', 'Older'];
+    
+    sorted.forEach(chat => {
+      const category = getDateCategory(chat[dateField]);
+      if (!groups[category]) groups[category] = [];
+      groups[category].push(chat);
+    });
+    
+    // Only include groups that have chats
+    const activeGroups = groupOrder.filter(g => groups[g] && groups[g].length > 0);
+    
+    return { sortedChats: sorted, groupedChats: groups, dateGroups: activeGroups };
+  }, [safeChats, sortBy]);
+  
+  // Auto-expand first group when dateGroups changes (e.g., after sort change)
+  useEffect(() => {
+    if ((sortBy === 'modified' || sortBy === 'created' || sortBy === 'source') && dateGroups.length > 0) {
+      // If current expanded section doesn't exist in groups, expand first group
+      if (!expandedSection || !dateGroups.includes(expandedSection)) {
+        setExpandedSection(dateGroups[0]);
+      }
+    }
+  }, [dateGroups, sortBy]);
+  
+  // Toggle accordion section
+  const toggleSection = (section: string) => {
+    setExpandedSection(expandedSection === section ? null : section);
+  };
+  
+  // Export chats in a section
+  const handleExportSection = async (e: React.MouseEvent, group: string) => {
+    e.stopPropagation();
+    const chatsToExport = groupedChats[group] || [];
+    if (chatsToExport.length === 0) return;
+    
+    try {
+      // Export as JSON
+      const exportData = {
+        exported_at: new Date().toISOString(),
+        group: group,
+        chat_count: chatsToExport.length,
+        chats: chatsToExport
+      };
+      
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nuechat-${group.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to export section:', err);
+      alert('Failed to export chats');
+    }
+  };
+  
+  // Delete all chats in a section
+  const handleDeleteSection = async (e: React.MouseEvent, group: string) => {
+    e.stopPropagation();
+    const chatsToDelete = groupedChats[group] || [];
+    if (chatsToDelete.length === 0) return;
+    
+    if (!confirm(`Are you sure you want to delete all ${chatsToDelete.length} chats in "${group}"? This cannot be undone.`)) {
+      return;
+    }
+    
+    try {
+      // Delete each chat
+      for (const chat of chatsToDelete) {
+        await deleteChat(chat.id);
+      }
+      
+      // If currently viewing a deleted chat, navigate home
+      if (chatId && chatsToDelete.some(c => c.id === chatId)) {
+        navigate('/');
+      }
+    } catch (err) {
+      console.error('Failed to delete section:', err);
+      alert('Failed to delete some chats');
+    }
+  };
+  
+  const sortOptions: { value: SortOption; label: string }[] = [
+    { value: 'modified', label: 'Date Modified' },
+    { value: 'created', label: 'Date Created' },
+    { value: 'alphabetical', label: 'Alphabetical' },
+    { value: 'source', label: 'Source' },
+  ];
 
   const isActive = (path: string) => location.pathname === path;
   
@@ -307,7 +469,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
           </div>
         )}
         
-        {/* Search */}
+        {/* Search and Sort */}
         <div className="mt-3 flex items-center gap-2">
           <input
             type="text"
@@ -319,6 +481,47 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
           <svg className="w-5 h-5 md:w-4 md:h-4 text-[var(--color-text-secondary)] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
+        </div>
+        
+        {/* Sort dropdown */}
+        <div className="mt-2 relative" ref={sortDropdownRef}>
+          <button
+            onClick={() => setShowSortDropdown(!showSortDropdown)}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm hover:bg-[var(--color-surface)] transition-colors"
+          >
+            <span className="text-[var(--color-text-secondary)]">Sort by:</span>
+            <span className="flex items-center gap-1">
+              {sortOptions.find(o => o.value === sortBy)?.label}
+              <svg className={`w-4 h-4 transition-transform ${showSortDropdown ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </span>
+          </button>
+          
+          {showSortDropdown && (
+            <div className="absolute top-full left-0 right-0 mt-1 py-1 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg shadow-lg z-10">
+              {sortOptions.map(option => (
+                <button
+                  key={option.value}
+                  onClick={() => {
+                    setSortBy(option.value);
+                    setShowSortDropdown(false);
+                    // Let useEffect auto-expand appropriate section
+                  }}
+                  className={`w-full px-3 py-2 text-left text-sm hover:bg-[var(--color-background)] transition-colors ${
+                    sortBy === option.value ? 'text-[var(--color-primary)]' : 'text-[var(--color-text)]'
+                  }`}
+                >
+                  {option.label}
+                  {sortBy === option.value && (
+                    <svg className="inline-block w-4 h-4 ml-2" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
       
@@ -342,24 +545,19 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
               </p>
             )}
           </div>
-        ) : (
-          Object.entries(groupedChats).map(([date, dateChats]) => (
-            <div key={date} className="mb-4">
-              <div className="px-4 py-1">
-                <span className="text-sm md:text-xs font-medium text-[var(--color-text-secondary)]">
-                  {date}
-                </span>
-              </div>
-              {dateChats.map((chat) => (
-                <div
-                  key={chat.id}
-                  onClick={() => handleSelectChat(chat)}
-                  className={`group ml-2 mr-3 px-3 py-3 md:py-2.5 rounded-lg cursor-pointer transition-colors ${
-                    chatId === chat.id
-                      ? 'bg-[var(--color-button)]/80 border border-[var(--color-border)]'
-                      : 'hover:bg-zinc-700/30 active:bg-zinc-700/50'
-                  }`}
-                >
+        ) : sortBy === 'alphabetical' ? (
+          // Alphabetical: flat list, no accordions
+          <div className="space-y-1">
+            {sortedChats.map((chat) => (
+              <div
+                key={chat.id}
+                onClick={() => handleSelectChat(chat)}
+                className={`group ml-2 mr-3 px-3 py-3 md:py-2.5 rounded-lg cursor-pointer transition-colors ${
+                  chatId === chat.id
+                    ? 'bg-[var(--color-button)]/80 border border-[var(--color-border)]'
+                    : 'hover:bg-zinc-700/30 active:bg-zinc-700/50'
+                }`}
+              >
                   <div className="flex items-start justify-between gap-2">
                     {editingId === chat.id ? (
                       <input
@@ -415,8 +613,133 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
                   </div>
                 </div>
               ))}
-            </div>
-          ))
+          </div>
+        ) : (
+          // Date-based and source sorts: accordion groups
+          <div className="space-y-1">
+            {dateGroups.map((group) => (
+              <div key={group} className="border-b border-[var(--color-border)]/50 last:border-b-0">
+                {/* Accordion header with hover actions */}
+                <div className="group/header relative">
+                  <button
+                    onClick={() => toggleSection(group)}
+                    className="w-full flex items-center justify-between px-4 py-3 hover:bg-[var(--color-background)]/50 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      <svg
+                        className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${
+                          expandedSection === group ? 'rotate-90' : ''
+                        }`}
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                      <span className="text-sm font-medium text-[var(--color-text)]">{group}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {/* Section action buttons - appear on hover */}
+                      <div className="flex items-center gap-1 opacity-0 group-hover/header:opacity-100 transition-opacity">
+                        <button
+                          onClick={(e) => handleExportSection(e, group)}
+                          className="p-1 rounded hover:bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                          title={`Export all chats in ${group}`}
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={(e) => handleDeleteSection(e, group)}
+                          className="p-1 rounded hover:bg-red-500/10 text-[var(--color-text-secondary)] hover:text-[var(--color-error)]"
+                          title={`Delete all chats in ${group}`}
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
+                      <span className="text-xs text-[var(--color-text-secondary)]">
+                        {groupedChats[group]?.length || 0}
+                      </span>
+                    </div>
+                  </button>
+                </div>
+                
+                {/* Accordion content */}
+                {expandedSection === group && (
+                  <div className="pb-2">
+                    {groupedChats[group]?.map((chat) => (
+                      <div
+                        key={chat.id}
+                        onClick={() => handleSelectChat(chat)}
+                        className={`group ml-2 mr-3 px-3 py-3 md:py-2.5 rounded-lg cursor-pointer transition-colors ${
+                          chatId === chat.id
+                            ? 'bg-[var(--color-button)]/80 border border-[var(--color-border)]'
+                            : 'hover:bg-zinc-700/30 active:bg-zinc-700/50'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          {editingId === chat.id ? (
+                            <input
+                              type="text"
+                              value={editTitle}
+                              onChange={(e) => setEditTitle(e.target.value)}
+                              onBlur={() => saveTitle(chat.id)}
+                              onKeyDown={(e) => e.key === 'Enter' && saveTitle(chat.id)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="flex-1 px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-base md:text-sm text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                              autoFocus
+                            />
+                          ) : (
+                            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                              {chat.is_knowledge_indexed && (
+                                <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" title="Indexed in knowledge base" />
+                              )}
+                              <span className="text-base md:text-sm text-[var(--color-text)] truncate">
+                                {chat.title}
+                              </span>
+                            </div>
+                          )}
+                          
+                          {/* Actions - always visible on mobile */}
+                          <div className={`flex items-center gap-1 ${isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
+                            <button
+                              onClick={(e) => startEditing(e, chat)}
+                              className="p-2 md:p-1 rounded hover:bg-zinc-700/50 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                            >
+                              <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => handleDeleteChat(e, chat.id)}
+                              className="p-2 md:p-1 rounded hover:bg-red-500/10 text-[var(--color-text-secondary)] hover:text-[var(--color-error)]"
+                            >
+                              <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                        
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-sm md:text-xs text-zinc-500/60">
+                            {chat.model ? getDisplayName(chat.model) : 'Default'}
+                          </span>
+                          <span className="text-sm md:text-xs text-zinc-500/40">•</span>
+                          <span className="text-sm md:text-xs text-zinc-500/60">
+                            {((chat.total_input_tokens ?? 0) + (chat.total_output_tokens ?? 0)).toLocaleString()} tokens
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         )}
         
         {/* Loading more indicator */}

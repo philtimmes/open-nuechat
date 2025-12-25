@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.79"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.85"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1229,10 +1229,10 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 **NC-0.6.68**
 
 Changes:
-- NC-0.6.79: **Fix compression never triggering** - agent_memory now uses admin `history_compression_target_tokens` (default 8000) instead of 50% of context
-- NC-0.6.78: **Dynamic max_tokens cap** - prevent context overflow by calculating `effective_max_tokens = min(max_tokens, context_size - input_tokens - 1000)`
-- NC-0.6.77: **File tree view & breadcrumb fix** - tree/flat toggle in artifacts, fixed breadcrumb nav closing panel, agent file naming aligned to `{AgentNNNN}.md`
-- NC-0.6.76: **Billing APIs admin tab** - configure Stripe/PayPal/Google Pay settings from Admin panel with test connection buttons
+- NC-0.6.85: **Sidebar & settings** - overflow fix (min-h-0), Source sort option, accordion Export/Delete hover buttons, Delete All Chats in Settings
+- NC-0.6.84: **Real-time thinking hiding** - thinking blocks hidden during streaming as soon as begin token detected, shows "🧠 Thinking..." indicator
+- NC-0.6.83: **Fix admin thinking tags** - tokens now use 30s cache TTL instead of forever, admin changes take effect within 30s
+- NC-0.6.82: **Import fixes** - preserves existing chats (addImportedChats), uses original dates, accordion auto-expands first available group
 - NC-0.6.75: **Context overflow protection** - chunk large tool results (>32k chars) into hidden `{AgentNNNN}.md` files, searchable by LLM
 - NC-0.6.74: **Auto-close incomplete tool tags** - salvage search_replace/replace_block even without closing tag
 - NC-0.6.73: **KaTeX math rendering** - LaTeX notation support ($...$, $$...$$) via remark-math + rehype-katex

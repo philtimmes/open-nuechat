@@ -16,6 +16,7 @@ export interface ChatSlice {
   chatPage: number;
   chatSearchQuery: string;
   
+  addImportedChats: (importedChats: Chat[]) => void;
   fetchChats: (loadMore?: boolean, search?: string) => Promise<void>;
   createChat: (model?: string, systemPrompt?: string, preserveArtifacts?: boolean) => Promise<Chat>;
   setCurrentChat: (chat: Chat | null) => void;

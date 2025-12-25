@@ -14,6 +14,22 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
   chatPage: 1,
   chatSearchQuery: '',
 
+  // Add imported chats to the list without replacing existing ones
+  addImportedChats: (importedChats: Chat[]) => {
+    set((state) => {
+      // Merge imported chats with existing ones, avoiding duplicates
+      const existingIds = new Set(state.chats.map(c => c.id));
+      const newChats = importedChats.filter(c => !existingIds.has(c.id));
+      
+      // Combine and sort by updated_at desc
+      const allChats = [...newChats, ...state.chats].sort(
+        (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      );
+      
+      return { chats: allChats };
+    });
+  },
+
   fetchChats: async (loadMore = false, search?: string) => {
     const currentState = get();
     

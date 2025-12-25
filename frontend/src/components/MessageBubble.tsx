@@ -20,42 +20,60 @@ interface ToolCitation {
   success: boolean;
 }
 
-// Thinking tokens cache
-let thinkingTokensCache: { begin: string; end: string } | null = null;
-let thinkingTokensLoading = false;
-const thinkingTokensListeners: Set<() => void> = new Set();
+// Thinking tokens - fetch fresh on each component mount (with short cache)
+interface ThinkingTokensState {
+  begin: string;
+  end: string;
+  loadedAt: number;
+}
 
-async function loadThinkingTokens() {
-  if (thinkingTokensCache || thinkingTokensLoading) return;
-  thinkingTokensLoading = true;
+let thinkingTokensCache: ThinkingTokensState | null = null;
+const CACHE_TTL = 30000; // 30 second cache - allows admin changes to take effect quickly
+
+async function fetchThinkingTokens(): Promise<{ begin: string; end: string }> {
   try {
     const res = await api.get('/utils/thinking-tokens');
-    thinkingTokensCache = {
+    const tokens = {
       begin: res.data.think_begin_token || '',
       end: res.data.think_end_token || '',
     };
-    thinkingTokensListeners.forEach(fn => fn());
+    // Debug logging
+    if (tokens.begin || tokens.end) {
+      console.debug('[ThinkingTokens] Loaded:', { begin: tokens.begin, end: tokens.end });
+    }
+    return tokens;
   } catch (e) {
     console.warn('Failed to load thinking tokens:', e);
-    thinkingTokensCache = { begin: '', end: '' };
+    return { begin: '', end: '' };
   }
-  thinkingTokensLoading = false;
 }
 
 function useThinkingTokens() {
-  const [tokens, setTokens] = useState(thinkingTokensCache);
+  const [tokens, setTokens] = useState<{ begin: string; end: string } | null>(null);
   
   useEffect(() => {
-    if (thinkingTokensCache) {
-      setTokens(thinkingTokensCache);
-      return;
+    let cancelled = false;
+    
+    async function load() {
+      // Check if cache is still valid
+      const now = Date.now();
+      if (thinkingTokensCache && (now - thinkingTokensCache.loadedAt) < CACHE_TTL) {
+        setTokens({ begin: thinkingTokensCache.begin, end: thinkingTokensCache.end });
+        return;
+      }
+      
+      // Fetch fresh tokens
+      const freshTokens = await fetchThinkingTokens();
+      
+      if (!cancelled) {
+        thinkingTokensCache = { ...freshTokens, loadedAt: now };
+        setTokens(freshTokens);
+      }
     }
     
-    const listener = () => setTokens(thinkingTokensCache);
-    thinkingTokensListeners.add(listener);
-    loadThinkingTokens();
+    load();
     
-    return () => { thinkingTokensListeners.delete(listener); };
+    return () => { cancelled = true; };
   }, []);
   
   return tokens;
@@ -101,7 +119,55 @@ function extractThinkingBlocks(content: string, beginToken: string, endToken: st
     blocks.push({ thinking, afterContent: '' });
   }
   
+  // Debug logging when thinking is found
+  if (blocks.length > 0) {
+    console.debug(`[ThinkingBlocks] Found ${blocks.length} thinking block(s)`);
+  }
+  
   return { blocks, finalContent: result };
+}
+
+// Collapsible tool result component
+function ToolResultPanel({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  
+  // Parse tool result content to get summary
+  let toolSummary = 'Tool Result';
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed.tool_name) {
+      toolSummary = `${parsed.tool_name}`;
+      if (parsed.operation) toolSummary += `: ${parsed.operation}`;
+    }
+  } catch {
+    // Not JSON, use first 50 chars as summary
+    toolSummary = content.slice(0, 50) + (content.length > 50 ? '...' : '');
+  }
+  
+  return (
+    <div className="py-2 pl-4 mx-4 max-w-3xl">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors w-full text-left"
+      >
+        <span className={`transform transition-transform ${expanded ? 'rotate-90' : ''}`}>
+          ▶
+        </span>
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+        <span className="truncate">{toolSummary}</span>
+      </button>
+      {expanded && (
+        <div className="mt-2 pl-5 border-l-2 border-[var(--color-border)]">
+          <pre className="text-xs text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono max-h-64 overflow-y-auto">
+            {content}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Collapsible thinking block component
@@ -529,20 +595,7 @@ function MessageBubbleInner({
   }
   
   if (isTool) {
-    return (
-      <div className="py-2 pl-6 border-l-2 border-[var(--color-border)] mx-4 max-w-3xl">
-        <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] mb-1">
-          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-          Tool Result
-        </div>
-        <pre className="text-xs text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono">
-          {message.content}
-        </pre>
-      </div>
-    );
+    return <ToolResultPanel content={message.content} />;
   }
   
   // Check if content has artifact references

@@ -1455,15 +1455,42 @@ class ImportResult(BaseModel):
     message_count: int
     source: str
     error: Optional[str] = None
+    # Full chat object for frontend to add to store
+    chat: Optional[dict] = None
 
 class ImportResponse(BaseModel):
     total_imported: int
     total_failed: int
     results: List[ImportResult]
+    # All successfully imported chats for direct store update
+    imported_chats: List[dict] = []
 
 
 def parse_chatgpt_export(data: dict) -> List[ImportedChat]:
-    """Parse ChatGPT export format (conversations.json)"""
+    """Parse ChatGPT export format (conversations.json)
+    
+    ChatGPT export structure:
+    {
+        "title": "...",
+        "create_time": 1234567890.123,
+        "mapping": {
+            "node-id": {
+                "message": {
+                    "author": {"role": "user"|"assistant"|"system"},
+                    "content": {"content_type": "text", "parts": ["..."]},
+                    "create_time": 1234567890.123,
+                    "metadata": {
+                        "is_visually_hidden_from_conversation": true,
+                        "model_slug": "gpt-4"
+                    }
+                },
+                "parent": "parent-node-id",
+                "children": ["child-node-id"]
+            }
+        },
+        "current_node": "latest-node-id"
+    }
+    """
     chats = []
     
     # ChatGPT exports as a list of conversations
@@ -1473,12 +1500,14 @@ def parse_chatgpt_export(data: dict) -> List[ImportedChat]:
         title = conv.get("title", "Imported Chat")
         messages = []
         created_at = None
+        model = None
         
         # ChatGPT format has a mapping of message IDs to message objects
         mapping = conv.get("mapping", {})
         
         # Find the root and traverse the tree
         def extract_messages(node_id: str):
+            nonlocal model
             if not node_id or node_id not in mapping:
                 return
             
@@ -1487,13 +1516,39 @@ def parse_chatgpt_export(data: dict) -> List[ImportedChat]:
             
             if message:
                 author_role = message.get("author", {}).get("role", "")
-                content_parts = message.get("content", {}).get("parts", [])
+                content_obj = message.get("content", {})
+                content_parts = content_obj.get("parts", [])
+                metadata = message.get("metadata", {})
+                
+                # Skip hidden system messages (ChatGPT internal)
+                if metadata.get("is_visually_hidden_from_conversation"):
+                    # Still follow children
+                    for child_id in node.get("children", []):
+                        extract_messages(child_id)
+                    return
+                
+                # Skip system role messages entirely
+                if author_role == "system":
+                    for child_id in node.get("children", []):
+                        extract_messages(child_id)
+                    return
+                
+                # Capture model from assistant messages
+                if author_role == "assistant" and not model:
+                    model = metadata.get("model_slug")
                 
                 if author_role in ["user", "assistant"] and content_parts:
-                    content = "\n".join(str(p) for p in content_parts if isinstance(p, str))
+                    # Extract text content, skip non-string parts (images, etc)
+                    content = "\n".join(str(p) for p in content_parts if isinstance(p, str) and p.strip())
+                    
                     if content.strip():
                         create_time = message.get("create_time")
-                        msg_time = datetime.fromtimestamp(create_time, tz=timezone.utc) if create_time else None
+                        msg_time = None
+                        if create_time:
+                            try:
+                                msg_time = datetime.fromtimestamp(create_time, tz=timezone.utc)
+                            except:
+                                pass
                         
                         messages.append(ImportedMessage(
                             role=author_role,
@@ -1505,22 +1560,28 @@ def parse_chatgpt_export(data: dict) -> List[ImportedChat]:
             for child_id in node.get("children", []):
                 extract_messages(child_id)
         
-        # Find root nodes (nodes with no parent)
+        # Find root nodes (nodes with no parent or parent is null)
         for node_id, node in mapping.items():
             if node.get("parent") is None:
                 extract_messages(node_id)
-                break
+                break  # Only follow one tree path
         
         # Get conversation create time
         create_time = conv.get("create_time")
         if create_time:
-            created_at = datetime.fromtimestamp(create_time, tz=timezone.utc)
+            try:
+                created_at = datetime.fromtimestamp(create_time, tz=timezone.utc)
+            except:
+                pass
         
         if messages:
+            # Add ChatGPT: prefix to title
+            prefixed_title = f"ChatGPT: {title}" if not title.startswith("ChatGPT:") else title
             chats.append(ImportedChat(
-                title=title,
+                title=prefixed_title,
                 messages=messages,
-                created_at=created_at
+                created_at=created_at,
+                model=model  # Captured from assistant messages
             ))
     
     return chats
@@ -1640,8 +1701,10 @@ def parse_grok_export(data: dict) -> List[ImportedChat]:
                 ))
         
         if messages:
+            # Add Grok: prefix to title
+            prefixed_title = f"Grok: {title}" if not title.startswith("Grok:") else title
             chats.append(ImportedChat(
-                title=title,
+                title=prefixed_title,
                 messages=messages,
                 created_at=conv_time
             ))
@@ -1894,13 +1957,25 @@ async def import_chats(
         try:
             # Create the chat
             chat_id = str(uuid.uuid4())
+            # Use original chat date for both created_at and updated_at
+            # This preserves the original timeline when viewing chat history
+            original_date = parsed_chat.created_at or datetime.now(timezone.utc)
+            
+            # Get latest message date for updated_at (if available)
+            latest_msg_date = original_date
+            if parsed_chat.messages:
+                for msg in parsed_chat.messages:
+                    if msg.created_at and msg.created_at > latest_msg_date:
+                        latest_msg_date = msg.created_at
+            
             chat = Chat(
                 id=chat_id,
                 owner_id=user.id,
                 title=parsed_chat.title[:200],  # Truncate long titles
                 model=parsed_chat.model or settings.LLM_MODEL,
                 system_prompt=parsed_chat.system_prompt,
-                created_at=parsed_chat.created_at or datetime.now(timezone.utc),
+                created_at=original_date,
+                updated_at=latest_msg_date,  # Use latest message date or original date
             )
             db.add(chat)
             await db.flush()
@@ -1924,12 +1999,24 @@ async def import_chats(
             
             await db.commit()
             
+            # Create chat dict for frontend
+            chat_dict = {
+                "id": chat_id,
+                "title": parsed_chat.title[:200],
+                "model": parsed_chat.model or settings.LLM_MODEL,
+                "created_at": original_date.isoformat(),
+                "updated_at": latest_msg_date.isoformat(),
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+            }
+            
             results.append(ImportResult(
                 success=True,
                 chat_id=chat_id,
                 title=parsed_chat.title,
                 message_count=len(parsed_chat.messages),
-                source=source
+                source=source,
+                chat=chat_dict
             ))
             total_imported += 1
             
@@ -1947,8 +2034,12 @@ async def import_chats(
     
     logger.info(f"[IMPORT] User {user.id} imported {total_imported} chats from {source}, {total_failed} failed")
     
+    # Collect all successfully imported chats
+    imported_chats = [r.chat for r in results if r.success and r.chat]
+    
     return ImportResponse(
         total_imported=total_imported,
         total_failed=total_failed,
-        results=results
+        results=results,
+        imported_chats=imported_chats
     )

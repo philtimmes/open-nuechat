@@ -526,42 +526,152 @@ interface StreamingMessageProps {
   assistantName?: string;
 }
 
+// Thinking tokens for streaming - shared cache with MessageBubble
+interface ThinkingTokensState {
+  begin: string;
+  end: string;
+  loadedAt: number;
+}
+
+let streamingThinkingCache: ThinkingTokensState | null = null;
+const STREAMING_CACHE_TTL = 30000;
+
+function useStreamingThinkingTokens() {
+  const [tokens, setTokens] = useState<{ begin: string; end: string } | null>(null);
+  
+  useEffect(() => {
+    let cancelled = false;
+    
+    async function load() {
+      const now = Date.now();
+      if (streamingThinkingCache && (now - streamingThinkingCache.loadedAt) < STREAMING_CACHE_TTL) {
+        setTokens({ begin: streamingThinkingCache.begin, end: streamingThinkingCache.end });
+        return;
+      }
+      
+      try {
+        const res = await api.get('/utils/thinking-tokens');
+        const freshTokens = {
+          begin: res.data.think_begin_token || '',
+          end: res.data.think_end_token || '',
+        };
+        if (!cancelled) {
+          streamingThinkingCache = { ...freshTokens, loadedAt: now };
+          setTokens(freshTokens);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          streamingThinkingCache = { begin: '', end: '', loadedAt: now };
+          setTokens({ begin: '', end: '' });
+        }
+      }
+    }
+    
+    load();
+    return () => { cancelled = true; };
+  }, []);
+  
+  return tokens;
+}
+
+// Filter thinking content from streaming text
+function filterThinkingFromStream(
+  content: string, 
+  beginToken: string, 
+  endToken: string
+): { visibleContent: string; isThinking: boolean; thinkingContent: string } {
+  if (!beginToken || !endToken || !content) {
+    return { visibleContent: content, isThinking: false, thinkingContent: '' };
+  }
+  
+  let visibleContent = '';
+  let thinkingContent = '';
+  let isThinking = false;
+  let remaining = content;
+  
+  while (remaining) {
+    const beginIdx = remaining.indexOf(beginToken);
+    
+    if (beginIdx === -1) {
+      // No more thinking blocks
+      if (isThinking) {
+        // Still inside an unclosed thinking block
+        thinkingContent += remaining;
+      } else {
+        visibleContent += remaining;
+      }
+      break;
+    }
+    
+    // Add content before the thinking block
+    visibleContent += remaining.slice(0, beginIdx);
+    
+    const afterBegin = remaining.slice(beginIdx + beginToken.length);
+    const endIdx = afterBegin.indexOf(endToken);
+    
+    if (endIdx === -1) {
+      // Thinking block started but not closed yet - we're currently thinking
+      isThinking = true;
+      thinkingContent = afterBegin;
+      break;
+    }
+    
+    // Complete thinking block - capture it and continue
+    thinkingContent = afterBegin.slice(0, endIdx);
+    remaining = afterBegin.slice(endIdx + endToken.length);
+    isThinking = false;
+  }
+  
+  return { visibleContent, isThinking, thinkingContent };
+}
+
 function StreamingMessageComponent({
   chatId,
   content,
   toolCall,
   assistantName,
 }: StreamingMessageProps) {
+  // Get thinking tokens for real-time filtering
+  const thinkingTokens = useStreamingThinkingTokens();
+  
   // Track when to re-render markdown
   const lastRenderRef = useRef({ content: '', lineCount: 0 });
   const [renderedContent, setRenderedContent] = useState('');
   
+  // Filter out thinking content in real-time
+  const { visibleContent, isThinking, thinkingContent } = useMemo(() => {
+    if (!thinkingTokens?.begin || !thinkingTokens?.end) {
+      return { visibleContent: content, isThinking: false, thinkingContent: '' };
+    }
+    return filterThinkingFromStream(content, thinkingTokens.begin, thinkingTokens.end);
+  }, [content, thinkingTokens]);
+  
   useEffect(() => {
-    if (!content) {
+    if (!visibleContent) {
       setRenderedContent('');
       lastRenderRef.current = { content: '', lineCount: 0 };
       return;
     }
     
-    const currentLines = content.split('\n').length;
+    const currentLines = visibleContent.split('\n').length;
     const lastLines = lastRenderRef.current.lineCount;
     const lastContent = lastRenderRef.current.content;
     
     // Check if we should re-render markdown
-    const newContent = content.slice(lastContent.length);
+    const newContent = visibleContent.slice(lastContent.length);
     const closedCodeFence = newContent.includes('```') && 
-      (content.match(/```/g)?.length || 0) % 2 === 0; // Even number = all fences closed
+      (visibleContent.match(/```/g)?.length || 0) % 2 === 0; // Even number = all fences closed
     const addedEnoughLines = currentLines - lastLines >= 10;
     
-    if (closedCodeFence || addedEnoughLines || content.length < 100) {
-      setRenderedContent(content);
-      lastRenderRef.current = { content, lineCount: currentLines };
+    if (closedCodeFence || addedEnoughLines || visibleContent.length < 100) {
+      setRenderedContent(visibleContent);
+      lastRenderRef.current = { content: visibleContent, lineCount: currentLines };
     }
-  }, [content]);
+  }, [visibleContent]);
   
   // Use rendered content for markdown, but show full content length
-  const displayContent = renderedContent || content;
-  const hasUnrenderedContent = content.length > renderedContent.length;
+  const displayContent = renderedContent || visibleContent;
+  const hasUnrenderedContent = visibleContent.length > renderedContent.length;
   
   return (
     <div className="py-4">
@@ -571,6 +681,17 @@ function StreamingMessageComponent({
             {assistantName || 'Assistant'}
           </span>
         </div>
+        
+        {/* Thinking indicator - shown when inside thinking block */}
+        {isThinking && (
+          <div className="mb-3 flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+            <span className="transform transition-transform rotate-90">▶</span>
+            <span className="flex items-center gap-1.5">
+              🧠 Thinking...
+              <span className="inline-block w-1.5 h-3 bg-[var(--color-primary)] animate-pulse" />
+            </span>
+          </div>
+        )}
         
         {/* Tool call indicator */}
         {toolCall && (
@@ -591,11 +712,13 @@ function StreamingMessageComponent({
             <MessageMarkdown content={displayContent} />
             {/* Show unrendered tail as plain text */}
             {hasUnrenderedContent && (
-              <span className="whitespace-pre-wrap">{content.slice(renderedContent.length)}</span>
+              <span className="whitespace-pre-wrap">{visibleContent.slice(renderedContent.length)}</span>
             )}
-            <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
+            {!isThinking && (
+              <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
+            )}
           </div>
-        ) : (
+        ) : isThinking ? null : (
           <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse" />
         )}
       </div>
@@ -1590,7 +1713,7 @@ export default function ChatPage() {
       
       <div className="flex h-full">
       {/* Main chat area */}
-      <div className="flex flex-col flex-1 min-w-0">
+      <div className="flex flex-col flex-1 min-w-0 min-h-0">
         {/* Header with actions */}
         <div className="flex items-center justify-between px-3 md:px-4 py-2 border-b border-[var(--color-border)]">
           <div className="flex items-center gap-3 min-w-0">
