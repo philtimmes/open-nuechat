@@ -33,7 +33,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   const [importResult, setImportResult] = useState<{ success: number; failed: number } | null>(null);
   const [sortBy, setSortBy] = useState<SortOption>('modified');
   const [showSortDropdown, setShowSortDropdown] = useState(false);
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['Today']));
   const [groupCounts, setGroupCounts] = useState<GroupCounts | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -594,7 +594,14 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
                   onClick={() => {
                     setSortBy(option.value);
                     setShowSortDropdown(false);
-                    // Let useEffect auto-expand appropriate section
+                    // Set default expanded section based on sort type
+                    if (option.value === 'source') {
+                      setExpandedSections(new Set(['Local']));
+                    } else if (option.value !== 'alphabetical') {
+                      setExpandedSections(new Set(['Today']));
+                    } else {
+                      setExpandedSections(new Set());
+                    }
                   }}
                   className={`w-full px-3 py-2 text-left text-sm hover:bg-[var(--color-background)] transition-colors ${
                     sortBy === option.value ? 'text-[var(--color-primary)]' : 'text-[var(--color-text)]'
