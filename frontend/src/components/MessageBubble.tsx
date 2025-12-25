@@ -2,10 +2,13 @@ import React, { useState, memo, useEffect } from 'react';
 import type { Message, Artifact, GeneratedImage } from '../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import GeneratedImageCard from './GeneratedImageCard';
 import api from '../lib/api';
+import 'katex/dist/katex.min.css';
 
 // Tool citation data
 interface ToolCitation {
@@ -706,7 +709,8 @@ function MessageBubbleInner({
               // After streaming complete: full markdown rendering
               <div className="max-w-none text-[var(--color-text)] leading-relaxed">
                 <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeKatex]}
                 components={{
                   code({ node, inline, className, children, ...props }: any) {
                     const match = /language-(\w+)/.exec(className || '');

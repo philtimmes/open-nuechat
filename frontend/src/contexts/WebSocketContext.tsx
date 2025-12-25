@@ -72,6 +72,19 @@ const STREAM_KB_SEARCH_PATTERN = /<kb_search\s+query=["']([^"']+)["']\s*\/?>/i;
 // Multi-line tool tag - match on closing </search_replace>
 const STREAM_SEARCH_REPLACE_PATTERN = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*?)<\/search_replace>/i;
 
+// Multi-line tool tag - match on closing </replace_block> (legacy format)
+const STREAM_REPLACE_BLOCK_PATTERN = /<replace_block\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*REPLACE\s*\n([\s\S]*?)<\/replace_block>/i;
+
+// ============ INCOMPLETE TOOL TAG PATTERNS ============
+// These match tool tags that were started but never closed (LLM stopped mid-output)
+// Used at stream_end to salvage operations even without closing tags
+
+// Incomplete search_replace - has SEARCH and Replace sections but no closing tag
+const INCOMPLETE_SEARCH_REPLACE_PATTERN = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*)$/i;
+
+// Incomplete replace_block - has SEARCH and REPLACE sections but no closing tag
+const INCOMPLETE_REPLACE_BLOCK_PATTERN = /<replace_block\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*REPLACE\s*\n([\s\S]*)$/i;
+
 // Artifact detection patterns for streaming notification
 // Pattern: <artifact title="..." type="...">...</artifact>
 const STREAM_ARTIFACT_XML_PATTERN = /<artifact\s+[^>]*title=["']([^"']+)["'][^>]*>([\s\S]*?)<\/artifact>/gi;
@@ -116,6 +129,92 @@ interface SearchReplaceOp {
   path: string;
   search: string;
   replace: string;
+}
+
+// ============ CONTEXT WINDOW CHUNKING ============
+// When tool results exceed 1/4 of context window, split into hidden agent files
+// This prevents overflowing the LLM context while keeping data searchable
+
+// ~32k chars ≈ 8k tokens, which is 1/4 of a 32k context window
+// Adjust based on your typical model context size
+const CONTEXT_CHUNK_THRESHOLD = 32000;
+const CONTEXT_CHUNK_SIZE = 24000; // Size of each chunk (leave room for metadata)
+
+// Agent file naming - matches backend convention: {AgentNNNN}.md
+const AGENT_FILE_PREFIX = "{Agent";
+const AGENT_FILE_SUFFIX = "}.md";
+
+// Counter for unique agent file names within a session
+let agentFileCounter = 0;
+
+/**
+ * Chunks large tool results into hidden agent files.
+ * Returns the artifacts to add and a summary message for the LLM.
+ */
+function chunkLargeToolResult(
+  toolName: string,
+  results: string,
+): { summary: string; chunkedFiles: string[]; newArtifacts: Artifact[] } {
+  const chunkedFiles: string[] = [];
+  const newArtifacts: Artifact[] = [];
+  
+  // Split into chunks, trying to break at newlines
+  const chunks: string[] = [];
+  let remaining = results;
+  
+  while (remaining.length > 0) {
+    if (remaining.length <= CONTEXT_CHUNK_SIZE) {
+      chunks.push(remaining);
+      break;
+    }
+    
+    // Try to find a good break point (double newline, then single newline)
+    let breakPoint = remaining.lastIndexOf('\n\n', CONTEXT_CHUNK_SIZE);
+    if (breakPoint < CONTEXT_CHUNK_SIZE / 2) {
+      breakPoint = remaining.lastIndexOf('\n', CONTEXT_CHUNK_SIZE);
+    }
+    if (breakPoint < CONTEXT_CHUNK_SIZE / 2) {
+      breakPoint = CONTEXT_CHUNK_SIZE;
+    }
+    
+    chunks.push(remaining.substring(0, breakPoint));
+    remaining = remaining.substring(breakPoint).trimStart();
+  }
+  
+  // Create hidden artifacts for each chunk
+  const timestamp = new Date().toISOString();
+  for (let i = 0; i < chunks.length; i++) {
+    const fileNum = String(++agentFileCounter).padStart(4, '0');
+    const filename = `${AGENT_FILE_PREFIX}${fileNum}${AGENT_FILE_SUFFIX}`;
+    
+    const artifact: Artifact = {
+      id: `agent-${Date.now()}-${fileNum}`,
+      type: 'markdown',
+      title: `Agent Context ${fileNum}`,
+      language: 'markdown',
+      content: `# Agent Context File ${fileNum}\n## Source: ${toolName} (Part ${i + 1} of ${chunks.length})\n\n${chunks[i]}`,
+      filename,
+      created_at: timestamp,
+      source: 'generated',
+      hidden: true,
+    };
+    
+    newArtifacts.push(artifact);
+    chunkedFiles.push(filename);
+  }
+  
+  // Create summary for LLM
+  const totalChars = results.length;
+  const summary = `[LARGE RESULT - CHUNKED INTO ${chunks.length} FILES]
+The ${toolName} result was ${totalChars.toLocaleString()} characters (too large for context).
+Data has been split into the following searchable files:
+${chunkedFiles.map((f, i) => `  - ${f} (Part ${i + 1})`).join('\n')}
+
+Use <find search="..."/> or <request_file path="${chunkedFiles[0]}"/> to search/view these files.
+First 500 chars preview:
+${results.substring(0, 500)}${results.length > 500 ? '...' : ''}`;
+  
+  return { summary, chunkedFiles, newArtifacts };
 }
 
 // Extract all file request paths from content
@@ -315,6 +414,46 @@ function extractSearchReplaceOperations(content: string): SearchReplaceOp[] {
       search: match[2],
       replace: match[3],
     });
+  }
+  
+  return ops;
+}
+
+// Extract INCOMPLETE search_replace/replace_block operations (missing closing tag)
+// Used as fallback at stream_end when LLM stopped mid-output
+function extractIncompleteSearchReplaceOperations(content: string): SearchReplaceOp[] {
+  const ops: SearchReplaceOp[] = [];
+  
+  // Only try incomplete patterns if we have an opening tag but no closing tag
+  const hasSearchReplaceOpen = content.includes('<search_replace');
+  const hasSearchReplaceClose = content.includes('</search_replace>');
+  const hasReplaceBlockOpen = content.includes('<replace_block');
+  const hasReplaceBlockClose = content.includes('</replace_block>');
+  
+  // Try incomplete search_replace
+  if (hasSearchReplaceOpen && !hasSearchReplaceClose) {
+    const match = content.match(INCOMPLETE_SEARCH_REPLACE_PATTERN);
+    if (match) {
+      console.log('[INCOMPLETE_TOOL] Found incomplete search_replace, closing it');
+      ops.push({
+        path: match[1].trim(),
+        search: match[2],
+        replace: match[3].trimEnd(), // Trim trailing whitespace from incomplete content
+      });
+    }
+  }
+  
+  // Try incomplete replace_block
+  if (hasReplaceBlockOpen && !hasReplaceBlockClose) {
+    const match = content.match(INCOMPLETE_REPLACE_BLOCK_PATTERN);
+    if (match) {
+      console.log('[INCOMPLETE_TOOL] Found incomplete replace_block, closing it');
+      ops.push({
+        path: match[1].trim(),
+        search: match[2],
+        replace: match[3].trimEnd(),
+      });
+    }
   }
   
   return ops;
@@ -1112,7 +1251,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           // Debug: Check for tool tags in final content
           const hasToolTag = streamingContent.includes('<find') || 
                              streamingContent.includes('<request_file') || 
-                             streamingContent.includes('<search_replace');
+                             streamingContent.includes('<search_replace') ||
+                             streamingContent.includes('<replace_block');
           if (hasToolTag) {
             console.warn('[STREAM_END] TOOL TAGS FOUND IN FINAL CONTENT!');
             console.warn('[STREAM_END] Content tail:', streamingContent.slice(-1000));
@@ -1253,7 +1393,17 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           }
           
           // Process search_replace operations (new format)
-          const searchReplaceOps = extractSearchReplaceOperations(streamingContent);
+          let searchReplaceOps = extractSearchReplaceOperations(streamingContent);
+          
+          // Fallback: try to extract incomplete operations (LLM stopped without closing tag)
+          if (searchReplaceOps.length === 0) {
+            const incompleteOps = extractIncompleteSearchReplaceOperations(streamingContent);
+            if (incompleteOps.length > 0) {
+              console.log('[SEARCH_REPLACE] Using', incompleteOps.length, 'incomplete operations (missing closing tag)');
+              searchReplaceOps = incompleteOps;
+            }
+          }
+          
           if (searchReplaceOps.length > 0 && currentChat?.id && !needsAutoContinue) {
             console.log('[SEARCH_REPLACE] Found', searchReplaceOps.length, 'search_replace operations');
             handleSearchReplaceOperations(currentChat.id, searchReplaceOps, chunk.message_id, allArtifacts, chunk.message_id);
@@ -1614,7 +1764,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       // Debug: Check if any tool-like patterns exist
       const hasToolTag = streamingContent.includes('<find') || 
                          streamingContent.includes('<request_file') || 
-                         streamingContent.includes('<search_replace');
+                         streamingContent.includes('<search_replace') ||
+                         streamingContent.includes('<replace_block');
       if (hasToolTag) {
         console.warn('[TOOL_INTERRUPT] Tool tag detected in content, length:', streamingContent.length);
         console.warn('[TOOL_INTERRUPT] Last 500 chars:', streamingContent.slice(-500));
@@ -1651,8 +1802,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       
       // Helper to send tool results without creating new messages
       // Includes notifications about artifacts that were saved during streaming
+      // Large results are chunked into hidden agent files to prevent context overflow
       const sendToolResult = (toolName: string, results: string) => {
-        const { zipContext, streamingContent } = useChatStore.getState();
+        const { zipContext, streamingContent, artifacts, setArtifacts } = useChatStore.getState();
         
         // Build notification about saved artifacts
         let artifactNotification = '';
@@ -1664,7 +1816,17 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         
         // Ensure we always send something, even if results are empty
-        const finalResults = results.trim() || `[${toolName.toUpperCase()}: No results returned]`;
+        let finalResults = results.trim() || `[${toolName.toUpperCase()}: No results returned]`;
+        
+        // Check if results exceed context threshold - chunk into hidden agent files
+        if (finalResults.length > CONTEXT_CHUNK_THRESHOLD) {
+          console.log(`[TOOL_RESULT] Large result (${finalResults.length} chars) - chunking into agent files`);
+          const { summary, chunkedFiles, newArtifacts } = chunkLargeToolResult(toolName, finalResults);
+          finalResults = summary;
+          // Add new hidden artifacts to the store
+          setArtifacts([...artifacts, ...newArtifacts]);
+          console.log(`[TOOL_RESULT] Created ${chunkedFiles.length} agent files: ${chunkedFiles.join(', ')}`);
+        }
         
         // Use current streaming message ID as parent for linear conversation flow
         // This prevents tool continuations from creating branches
@@ -1854,6 +2016,42 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           }
           
           sendToolResult('search_replace', results.join('\n\n'));
+          return;
+        }
+      }
+      
+      // Check for replace_block tag (legacy format, multi-line)
+      const replaceBlockMatch = streamingContent.match(STREAM_REPLACE_BLOCK_PATTERN);
+      if (replaceBlockMatch) {
+        console.log('[TOOL_INTERRUPT] MATCHED replace_block, path:', replaceBlockMatch[1]);
+        const tagKey = getTagKey('replace_block', replaceBlockMatch[0]);
+        if (!processedToolTagsRef.current.has(tagKey)) {
+          processedToolTagsRef.current.add(tagKey);
+          console.log('[TOOL_INTERRUPT] Detected replace_block tag, executing immediately');
+          
+          wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
+          streamingBufferRef.current?.pause();
+          
+          // Convert to SearchReplaceOp format (same structure)
+          const ops: SearchReplaceOp[] = [{
+            path: replaceBlockMatch[1],
+            search: replaceBlockMatch[2],
+            replace: replaceBlockMatch[3],
+          }];
+          
+          const allArtifacts = getAllArtifacts();
+          const { updateArtifact } = useChatStore.getState();
+          const { updatedArtifacts, results, modifiedFiles } = executeSearchReplaceOperations(allArtifacts, ops);
+          
+          // Update modified artifacts in store
+          for (const art of updatedArtifacts) {
+            const key = art.filename || art.title || '';
+            if (key && modifiedFiles.includes(key)) {
+              updateArtifact(key, art);
+            }
+          }
+          
+          sendToolResult('replace_block', results.join('\n\n'));
           return;
         }
       }

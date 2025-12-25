@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type { Artifact } from '../types';
-import { groupArtifactsByFilename, type ArtifactGroup } from '../lib/artifacts';
+import { groupArtifactsByFilename, buildFileTree, type ArtifactGroup, type FileTreeNode } from '../lib/artifacts';
 import { formatFileSize, formatMessageTime } from '../lib/formatters';
 
 interface ArtifactsPanelProps {
@@ -21,6 +21,8 @@ export default function ArtifactsPanel({
 }: ArtifactsPanelProps) {
   console.log('[ArtifactsPanel] RENDERING with', artifacts.length, 'artifacts');
   const [view, setView] = useState<View>('list');
+  const [listMode, setListMode] = useState<'flat' | 'tree'>('flat');
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [selectedGroup, setSelectedGroup] = useState<ArtifactGroup | null>(null);
   const [activeTab, setActiveTab] = useState<'preview' | 'code' | 'signatures'>('preview');
   const [previewMode, setPreviewMode] = useState<PreviewMode>('preview');
@@ -36,8 +38,47 @@ export default function ArtifactsPanel({
     [artifacts]
   );
   
+  // Build file tree structure
+  const fileTree = useMemo(() => 
+    buildFileTree(artifactGroups),
+    [artifactGroups]
+  );
+  
   // Count of unique files
   const uniqueFileCount = artifactGroups.length;
+  
+  // Toggle folder expansion
+  const toggleFolder = (path: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+  
+  // Expand all folders
+  const expandAll = () => {
+    const allPaths = new Set<string>();
+    const collectPaths = (nodes: FileTreeNode[]) => {
+      for (const node of nodes) {
+        if (node.type === 'folder') {
+          allPaths.add(node.path);
+          if (node.children) collectPaths(node.children);
+        }
+      }
+    };
+    collectPaths(fileTree);
+    setExpandedFolders(allPaths);
+  };
+  
+  // Collapse all folders
+  const collapseAll = () => {
+    setExpandedFolders(new Set());
+  };
   
   // Reset view when artifacts change significantly
   useEffect(() => {
@@ -428,6 +469,69 @@ export default function ArtifactsPanel({
     );
   };
   
+  // Tree node component
+  const TreeNode = ({ node, depth = 0 }: { node: FileTreeNode; depth?: number }) => {
+    const isExpanded = expandedFolders.has(node.path);
+    const paddingLeft = depth * 16 + 8;
+    
+    if (node.type === 'folder') {
+      return (
+        <div>
+          <button
+            onClick={() => toggleFolder(node.path)}
+            className="w-full px-2 py-1.5 flex items-center gap-2 hover:bg-[var(--color-background)] rounded text-left"
+            style={{ paddingLeft }}
+          >
+            <svg className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            <svg className="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+            </svg>
+            <span className="text-sm text-[var(--color-text)] truncate">{node.name}</span>
+            {node.children && (
+              <span className="text-xs text-[var(--color-text-secondary)]">
+                ({node.children.filter(c => c.type === 'file').length})
+              </span>
+            )}
+          </button>
+          {isExpanded && node.children && (
+            <div>
+              {node.children.map(child => (
+                <TreeNode key={child.path} node={child} depth={depth + 1} />
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+    
+    // File node
+    const group = node.group!;
+    const sigCount = group.latestVersion.signatures?.length || 0;
+    
+    return (
+      <button
+        onClick={() => handleFileClick(group)}
+        className="w-full px-2 py-1.5 flex items-center gap-2 hover:bg-[var(--color-background)] rounded text-left"
+        style={{ paddingLeft: paddingLeft + 20 }}
+      >
+        <TypeIcon type={group.type} />
+        <span className="text-sm text-[var(--color-text)] truncate flex-1">{node.name}</span>
+        {group.versions.length > 1 && (
+          <span className="text-xs text-[var(--color-text-secondary)] bg-[var(--color-background)] px-1 rounded">
+            v{group.versions.length}
+          </span>
+        )}
+        {sigCount > 0 && (
+          <span className="text-xs text-[var(--color-text-secondary)]" title="Code signatures">
+            {sigCount}σ
+          </span>
+        )}
+      </button>
+    );
+  };
+  
   // VIEW 1: File list
   if (view === 'list') {
     return (
@@ -437,12 +541,54 @@ export default function ArtifactsPanel({
             <h2 className="font-semibold text-[var(--color-text)]">Artifacts</h2>
             <p className="text-xs text-[var(--color-text-secondary)]">{uniqueFileCount} unique file{uniqueFileCount !== 1 ? 's' : ''}</p>
           </div>
-          <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Tree/Flat toggle */}
+            <div className="flex bg-[var(--color-background)] rounded-lg p-0.5">
+              <button
+                onClick={() => setListMode('flat')}
+                className={`p-1.5 rounded ${listMode === 'flat' ? 'bg-[var(--color-surface)] shadow-sm' : ''}`}
+                title="Flat list"
+              >
+                <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setListMode('tree')}
+                className={`p-1.5 rounded ${listMode === 'tree' ? 'bg-[var(--color-surface)] shadow-sm' : ''}`}
+                title="Tree view"
+              >
+                <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1v-2zM14 13a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1v-2z" />
+                </svg>
+              </button>
+            </div>
+            <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
+        
+        {/* Tree expand/collapse controls */}
+        {listMode === 'tree' && fileTree.some(n => n.type === 'folder') && (
+          <div className="px-4 py-2 border-b border-[var(--color-border)] flex gap-2">
+            <button
+              onClick={expandAll}
+              className="text-xs text-[var(--color-primary)] hover:underline"
+            >
+              Expand all
+            </button>
+            <span className="text-[var(--color-text-secondary)]">|</span>
+            <button
+              onClick={collapseAll}
+              className="text-xs text-[var(--color-primary)] hover:underline"
+            >
+              Collapse all
+            </button>
+          </div>
+        )}
         
         <div className="flex-1 overflow-y-auto p-4">
           {artifactGroups.length === 0 ? (
@@ -453,7 +599,15 @@ export default function ArtifactsPanel({
               <p>No artifacts yet</p>
               <p className="text-sm mt-1">Artifacts will appear here when code or files are created</p>
             </div>
+          ) : listMode === 'tree' ? (
+            /* Tree view */
+            <div className="space-y-0.5">
+              {fileTree.map(node => (
+                <TreeNode key={node.path} node={node} />
+              ))}
+            </div>
           ) : (
+            /* Flat list view */
             <div className="space-y-2">
               {artifactGroups.map((group) => {
                 const sigCount = group.latestVersion.signatures?.length || 0;
@@ -469,7 +623,8 @@ export default function ArtifactsPanel({
                       <TypeIcon type={group.type} />
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-[var(--color-text)] truncate">{group.displayName}</p>
-                        <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                        <p className="text-xs text-[var(--color-text-secondary)] truncate">{group.filename}</p>
+                        <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] mt-0.5">
                           <span>{group.language?.toUpperCase() || getLanguageLabel(group.latestVersion)}</span>
                           <span>•</span>
                           <span>{group.versions.length} version{group.versions.length !== 1 ? 's' : ''}</span>

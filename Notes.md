@@ -10,7 +10,205 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.67
+**Current Version:** NC-0.6.77
+
+---
+
+## Recent Changes (NC-0.6.77)
+
+### Bugfix: Breadcrumb Navigation Closes Panel
+- **Root cause**: `setSelectedArtifact(null)` automatically set `showArtifacts: false`
+- **Fix**: Modified `artifactSlice.ts` to only auto-OPEN panel on selection, never auto-close
+- Breadcrumb navigation now works correctly within the artifacts panel
+
+### Feature: File Tree View in Artifacts Panel
+- New tree/flat toggle buttons in artifacts panel header
+- Tree view shows folders expandable/collapsible 
+- "Expand all" / "Collapse all" controls
+- Flat view enhanced to show full filepath
+
+### Bugfix: Agent File Naming Convention
+- Changed frontend chunking from `agent001.md` to `{Agent0001}.md`
+- Now matches backend `{AgentNNNN}.md` convention from `agent_memory.py`
+- Consistent naming prevents duplicate filtering issues
+
+**Files Changed:**
+- `frontend/src/stores/chat/artifactSlice.ts`: Fix setSelectedArtifact behavior
+- `frontend/src/lib/artifacts.ts`: Added `buildFileTree()` and `FileTreeNode` type
+- `frontend/src/components/ArtifactsPanel.tsx`: Added tree view with toggle
+- `frontend/src/contexts/WebSocketContext.tsx`: Fixed agent file naming
+
+---
+
+## Recent Changes (NC-0.6.76)
+
+### Feature: Billing APIs Admin Tab
+- New "Billing APIs" tab in Admin panel for payment provider configuration
+- Configure Stripe, PayPal, and Google Pay settings from the UI
+- Test connection buttons for Stripe and PayPal
+
+**Backend:**
+- Added `BillingApiSettingsSchema` with all payment provider fields
+- Added `GET/PUT /admin/billing-api-settings` endpoints
+- Added `POST /admin/billing-api-settings/test-stripe` endpoint
+- Added `POST /admin/billing-api-settings/test-paypal` endpoint
+- Added defaults for all billing settings in `SETTING_DEFAULTS`
+
+**Frontend (Admin.tsx):**
+- Added `BillingApiSettings` interface
+- Added `billing_apis` to `TabId` type
+- Added state and fetch for billing API settings
+- Added save and test connection functions
+- Full UI for Stripe (API key, publishable key, webhook secret, price IDs)
+- Full UI for PayPal (client ID/secret, webhook ID, mode, plan IDs)
+- Full UI for Google Pay (merchant ID, merchant name)
+
+---
+
+## Recent Changes (NC-0.6.75)
+
+### Feature: Context Window Overflow Protection
+- Large tool results (>32k chars, ~1/4 of context) are automatically chunked into hidden agent files
+- Prevents LLM context overflow while keeping data searchable
+
+**How it works:**
+1. When tool result exceeds `CONTEXT_CHUNK_THRESHOLD` (32000 chars)
+2. Data is split into chunks of ~24000 chars each
+3. Each chunk becomes a hidden artifact: `{Agent0001}.md`, `{Agent0002}.md`, etc.
+4. LLM receives a summary with file list and preview
+5. LLM can use `<find search="..."/>` or `<request_file path="{Agent0001}.md"/>` to access data
+
+**Changes:**
+- `types/index.ts`: Added `hidden?: boolean` to Artifact interface
+- `WebSocketContext.tsx`: Added `chunkLargeToolResult()` function and constants
+- `WebSocketContext.tsx`: Modified `sendToolResult()` to chunk large results
+- `ChatPage.tsx`: Filter hidden artifacts from UI display (but still searchable)
+
+---
+
+## Recent Changes (NC-0.6.74)
+
+### Fix: Auto-Close Incomplete Tool Tags
+- If LLM stops mid-output without closing a tool tag, we now salvage the operation
+- Applies to `<search_replace>` and `<replace_block>` tags
+- Uses `INCOMPLETE_SEARCH_REPLACE_PATTERN` and `INCOMPLETE_REPLACE_BLOCK_PATTERN`
+- Fallback only triggers when opening tag exists but closing tag is missing
+- Example: `<search_replace path="f">===== SEARCH\nold\n===== Replace\nnew` → processed as complete
+
+---
+
+## Recent Changes (NC-0.6.73)
+
+### Feature: KaTeX Math Rendering
+- Added KaTeX support for rendering LaTeX math notation in messages
+- Inline math: `$x^2$` renders as x²
+- Block math: `$$\sum_{i=1}^n i$$` renders as centered equation
+
+**Dependencies Added (package.json):**
+- `katex`: ^0.16.11
+- `remark-math`: ^6.0.0
+- `rehype-katex`: ^7.0.1
+- `@types/katex`: ^0.16.7 (dev)
+
+**Files Updated:**
+- `MessageBubble.tsx` - Main chat messages
+- `ChatPage.tsx` - Streaming message markdown
+- `SharedChat.tsx` - Shared chat view
+- `VibeChat.tsx` - Vibe code assistant chat
+
+Each ReactMarkdown component now uses:
+```tsx
+<ReactMarkdown
+  remarkPlugins={[remarkGfm, remarkMath]}
+  rehypePlugins={[rehypeKatex]}
+  ...
+/>
+```
+
+---
+
+## Recent Changes (NC-0.6.72)
+
+### Fix: Tool Call Closures Detection
+- **Problem**: Tool call closing tags like `</search_replace>` weren't always detected when not alone on a line
+- **Example**: `</body> </html> </search_replace>` - the closing tag would be missed
+
+**Changes (WebSocketContext.tsx):**
+- Added `STREAM_REPLACE_BLOCK_PATTERN` for streaming detection of `</replace_block>` tags
+- Added streaming interrupt handler for `replace_block` tool (was only processed at stream end)
+- Updated `hasToolTag` checks to include `<replace_block>`
+- Both patterns (`search_replace` and `replace_block`) now properly handle closing tags that appear inline with other content
+
+**Note:** The regex patterns were already correct - `([\s\S]*?)</search_replace>` matches everything up to the closing tag regardless of what else is on the line. The main addition was streaming detection for `replace_block`.
+
+---
+
+## Recent Changes (NC-0.6.71)
+
+### UI: Sidebar Right Margin for Delete Icon
+- Added right padding (`pr-[30px]`) to chat list container
+- Increased right margin on chat items (`ml-2 mr-3` instead of `mx-2`)
+- Delete icon now easily reachable without being cut off by scrollbar
+
+---
+
+## Recent Changes (NC-0.6.70)
+
+### Fix: Filter Chain Executor Infinite Loop
+- **Problem**: Chat got stuck when filter chains were enabled ("1 chains to execute..." and then hang)
+- **Root cause**: Duplicate `_execute_steps()` call in `executor.py` - the chain would run twice and could cause infinite loops
+
+**Fix:**
+- Removed duplicate code block in `ChainExecutor.execute()` (lines 548-572 were duplicating 518-546)
+- Now executes steps exactly once as intended
+
+---
+
+## Recent Changes (NC-0.6.69)
+
+### Enhancement: Improved Artifact Tool Guidance
+- Enhanced system prompt with CRITICAL section for artifact editing
+- Clearer instructions about reading tool responses on failure
+- Explicit warning against retrying identical failed operations
+- Better explanation of how file state changes after edits
+
+---
+
+## Recent Changes (NC-0.6.68)
+
+### Feature: Artifact Tools with State Tracking
+- **Problem**: LLM repeatedly failed search_replace operations because it searched for original content after the file had been modified
+- **Root cause**: No state tracking between tool calls; LLM didn't know actual file content
+
+**Solution - Artifact State Manager:**
+- New `artifact_tools.py` with comprehensive file editing tools
+- Per-chat session state tracking for all created artifacts
+- Smart error responses that include actual file content when search fails
+- Duplicate operation detection to prevent repeated identical failures
+- Similar match finding when exact search fails
+
+**New Tools Added:**
+- `create_artifact` - Create tracked files
+- `read_artifact` - Read current file state (with line range support)
+- `search_replace` - Edit with state awareness and smart error recovery
+- `list_artifacts` - List all session artifacts
+- `append_to_artifact` - Append content to files
+- `insert_at_line` - Insert at specific line number
+- `delete_lines` - Delete line ranges
+
+**Key Features:**
+- When search_replace fails, response includes:
+  - `actual_content` - Current file content
+  - `similar_matches` - Similar text that might be what was intended
+  - `hint` - Guidance on what to do next
+- Duplicate detection: If same search attempted twice, returns previous error with file content
+- Version tracking: Each artifact tracks edit history
+- System prompt guidance: LLM instructed to read actual_content before retrying
+
+**Files Changed:**
+- `backend/app/tools/artifact_tools.py` (NEW) - Complete artifact management system
+- `backend/app/tools/registry.py` - Register artifact tools
+- `backend/app/services/llm.py` - Add artifact guidance to system prompt
 
 ---
 
@@ -1031,6 +1229,16 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.77 | 2025-12-25 | File tree view in artifacts, breadcrumb nav fix, agent file naming fix |
+| NC-0.6.76 | 2025-12-25 | Billing APIs admin tab for Stripe/PayPal/Google Pay configuration |
+| NC-0.6.75 | 2025-12-24 | Context window overflow protection - chunk large tool results into hidden agent files |
+| NC-0.6.74 | 2025-12-24 | Auto-close incomplete tool tags when LLM stops mid-output |
+| NC-0.6.73 | 2025-12-24 | KaTeX math rendering for LaTeX notation in messages |
+| NC-0.6.72 | 2025-12-24 | Tool call closures detection - streaming support for replace_block |
+| NC-0.6.71 | 2025-12-24 | Sidebar right margin for delete icon accessibility |
+| NC-0.6.70 | 2025-12-24 | Fix filter chain executor infinite loop (duplicate _execute_steps call) |
+| NC-0.6.69 | 2025-12-24 | Enhanced artifact tool guidance in system prompt |
+| NC-0.6.68 | 2025-12-24 | Artifact tools with state tracking - prevents search_replace confusion |
 | NC-0.6.67 | 2025-12-24 | Persist LLM responses when client disconnects (detached task execution) |
 | NC-0.6.66 | 2025-12-24 | Complete payment system: Stripe, PayPal, Google Pay integration |
 | NC-0.6.65 | 2025-12-24 | Fix artifact closing tag detection when not alone on line |
@@ -1132,7 +1340,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.67**
+Current: **NC-0.6.77**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

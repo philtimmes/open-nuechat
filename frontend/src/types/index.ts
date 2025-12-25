@@ -63,6 +63,7 @@ export interface Artifact {
   size?: number;
   signatures?: CodeSignature[];
   source?: 'upload' | 'generated';  // Track origin for filtering
+  hidden?: boolean;  // Hidden from user but searchable by LLM (e.g., agent context files)
 }
 
 export interface CodeSignature {

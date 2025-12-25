@@ -107,6 +107,28 @@ SETTING_DEFAULTS = {
     "max_knowledge_stores_free": "3",
     "max_knowledge_stores_pro": "20",
     "max_knowledge_stores_enterprise": "100",
+    
+    # Billing API Settings - Stripe
+    "stripe_enabled": "false",
+    "stripe_api_key": settings.STRIPE_API_KEY or "",
+    "stripe_webhook_secret": settings.STRIPE_WEBHOOK_SECRET or "",
+    "stripe_publishable_key": settings.STRIPE_PUBLISHABLE_KEY or "",
+    "stripe_pro_price_id": "",
+    "stripe_enterprise_price_id": "",
+    
+    # Billing API Settings - PayPal
+    "paypal_enabled": "false",
+    "paypal_client_id": settings.PAYPAL_CLIENT_ID or "",
+    "paypal_client_secret": settings.PAYPAL_CLIENT_SECRET or "",
+    "paypal_webhook_id": settings.PAYPAL_WEBHOOK_ID or "",
+    "paypal_mode": settings.PAYPAL_MODE or "sandbox",
+    "paypal_pro_plan_id": "",
+    "paypal_enterprise_plan_id": "",
+    
+    # Billing API Settings - Google Pay
+    "google_pay_enabled": "false",
+    "google_pay_merchant_id": settings.GOOGLE_PAY_MERCHANT_ID or "",
+    "google_pay_merchant_name": settings.GOOGLE_PAY_MERCHANT_NAME or "NueChat",
 }
 
 
@@ -224,6 +246,31 @@ class FeatureFlagsSchema(BaseModel):
     enable_billing: bool = True
     freeforall: bool = False
     enable_safety_filters: bool = False  # Prompt injection & content moderation filters
+
+
+class BillingApiSettingsSchema(BaseModel):
+    """Payment provider API settings"""
+    # Stripe
+    stripe_enabled: bool = False
+    stripe_api_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_publishable_key: str = ""
+    stripe_pro_price_id: str = ""
+    stripe_enterprise_price_id: str = ""
+    
+    # PayPal
+    paypal_enabled: bool = False
+    paypal_client_id: str = ""
+    paypal_client_secret: str = ""
+    paypal_webhook_id: str = ""
+    paypal_mode: str = "sandbox"  # "sandbox" or "live"
+    paypal_pro_plan_id: str = ""
+    paypal_enterprise_plan_id: str = ""
+    
+    # Google Pay
+    google_pay_enabled: bool = False
+    google_pay_merchant_id: str = ""
+    google_pay_merchant_name: str = "NueChat"
 
 
 class APIRateLimitsSchema(BaseModel):
@@ -554,6 +601,136 @@ async def update_feature_flags(
     await db.commit()
     
     return data
+
+
+# =============================================================================
+# BILLING API SETTINGS
+# =============================================================================
+
+@router.get("/billing-api-settings", response_model=BillingApiSettingsSchema)
+async def get_billing_api_settings(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get payment provider API settings"""
+    return BillingApiSettingsSchema(
+        # Stripe
+        stripe_enabled=await get_system_setting_bool(db, "stripe_enabled"),
+        stripe_api_key=await get_system_setting(db, "stripe_api_key"),
+        stripe_webhook_secret=await get_system_setting(db, "stripe_webhook_secret"),
+        stripe_publishable_key=await get_system_setting(db, "stripe_publishable_key"),
+        stripe_pro_price_id=await get_system_setting(db, "stripe_pro_price_id"),
+        stripe_enterprise_price_id=await get_system_setting(db, "stripe_enterprise_price_id"),
+        # PayPal
+        paypal_enabled=await get_system_setting_bool(db, "paypal_enabled"),
+        paypal_client_id=await get_system_setting(db, "paypal_client_id"),
+        paypal_client_secret=await get_system_setting(db, "paypal_client_secret"),
+        paypal_webhook_id=await get_system_setting(db, "paypal_webhook_id"),
+        paypal_mode=await get_system_setting(db, "paypal_mode") or "sandbox",
+        paypal_pro_plan_id=await get_system_setting(db, "paypal_pro_plan_id"),
+        paypal_enterprise_plan_id=await get_system_setting(db, "paypal_enterprise_plan_id"),
+        # Google Pay
+        google_pay_enabled=await get_system_setting_bool(db, "google_pay_enabled"),
+        google_pay_merchant_id=await get_system_setting(db, "google_pay_merchant_id"),
+        google_pay_merchant_name=await get_system_setting(db, "google_pay_merchant_name") or "NueChat",
+    )
+
+
+@router.put("/billing-api-settings", response_model=BillingApiSettingsSchema)
+async def update_billing_api_settings(
+    data: BillingApiSettingsSchema,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update payment provider API settings"""
+    # Stripe
+    await set_setting(db, "stripe_enabled", str(data.stripe_enabled).lower())
+    await set_setting(db, "stripe_api_key", data.stripe_api_key)
+    await set_setting(db, "stripe_webhook_secret", data.stripe_webhook_secret)
+    await set_setting(db, "stripe_publishable_key", data.stripe_publishable_key)
+    await set_setting(db, "stripe_pro_price_id", data.stripe_pro_price_id)
+    await set_setting(db, "stripe_enterprise_price_id", data.stripe_enterprise_price_id)
+    # PayPal
+    await set_setting(db, "paypal_enabled", str(data.paypal_enabled).lower())
+    await set_setting(db, "paypal_client_id", data.paypal_client_id)
+    await set_setting(db, "paypal_client_secret", data.paypal_client_secret)
+    await set_setting(db, "paypal_webhook_id", data.paypal_webhook_id)
+    await set_setting(db, "paypal_mode", data.paypal_mode)
+    await set_setting(db, "paypal_pro_plan_id", data.paypal_pro_plan_id)
+    await set_setting(db, "paypal_enterprise_plan_id", data.paypal_enterprise_plan_id)
+    # Google Pay
+    await set_setting(db, "google_pay_enabled", str(data.google_pay_enabled).lower())
+    await set_setting(db, "google_pay_merchant_id", data.google_pay_merchant_id)
+    await set_setting(db, "google_pay_merchant_name", data.google_pay_merchant_name)
+    
+    await db.commit()
+    
+    return data
+
+
+@router.post("/billing-api-settings/test-stripe")
+async def test_stripe_connection(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Test Stripe API connection"""
+    api_key = await get_system_setting(db, "stripe_api_key")
+    if not api_key:
+        return {"success": False, "message": "Stripe API key not configured"}
+    
+    try:
+        import stripe
+        stripe.api_key = api_key
+        # Try to fetch account info
+        account = stripe.Account.retrieve()
+        return {
+            "success": True,
+            "message": f"Connected to Stripe account: {account.get('email', account.get('id', 'Unknown'))}",
+            "account_id": account.get("id"),
+        }
+    except ImportError:
+        return {"success": False, "message": "Stripe library not installed"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.post("/billing-api-settings/test-paypal")
+async def test_paypal_connection(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Test PayPal API connection"""
+    import httpx
+    
+    client_id = await get_system_setting(db, "paypal_client_id")
+    client_secret = await get_system_setting(db, "paypal_client_secret")
+    mode = await get_system_setting(db, "paypal_mode") or "sandbox"
+    
+    if not client_id or not client_secret:
+        return {"success": False, "message": "PayPal credentials not configured"}
+    
+    base_url = "https://api-m.sandbox.paypal.com" if mode == "sandbox" else "https://api-m.paypal.com"
+    
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Get access token
+            response = await client.post(
+                f"{base_url}/v1/oauth2/token",
+                auth=(client_id, client_secret),
+                data={"grant_type": "client_credentials"},
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "success": True,
+                    "message": f"Connected to PayPal ({mode} mode)",
+                    "app_id": data.get("app_id"),
+                }
+            else:
+                return {"success": False, "message": f"PayPal returned status {response.status_code}"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 
 # =============================================================================

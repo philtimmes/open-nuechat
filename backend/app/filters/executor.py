@@ -545,24 +545,6 @@ class ChainExecutor:
             logger.info(f"[FILTER_DEBUG:{chain_name}] Variables: {dict(ctx.variables)}")
             logger.info(f"[FILTER_DEBUG:{chain_name}] ════════════════════════════════════════════════════════")
         
-        # Execute steps
-        ctx = await self._execute_steps(steps, ctx, max_iter)
-        
-        # Determine final content
-        if ctx.final_message:
-            final_content = ctx.final_message
-        elif ctx.context_items:
-            # Inject context into query
-            context_str = ctx.get_context_string()
-            final_content = f"Context:\n{context_str}\n\nQuery: {ctx.original_query}"
-        else:
-            final_content = ctx.current_value or ctx.original_query
-        
-        ctx.debug_log("Chain execution complete")
-        ctx.debug_log("Final signal", ctx.signal.name)
-        ctx.debug_log("Proceed to LLM", ctx.proceed_to_llm)
-        ctx.debug_log("Final content", final_content)
-        
         return ExecutionResult(
             content=str(final_content),
             context=ctx,

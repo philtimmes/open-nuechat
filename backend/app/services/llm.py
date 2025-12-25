@@ -1136,7 +1136,18 @@ When you receive search results or external data in the conversation, follow the
 3. Extract the key points and present them clearly
 4. If multiple sources are provided, synthesize them into a coherent answer
 5. Present information as your own knowledge - do not mention "search results" or "according to the data"
-6. Be concise but comprehensive"""
+6. Be concise but comprehensive
+
+CRITICAL - When working with artifacts (files you create/edit):
+1. Use create_artifact to create new files - they are tracked and can be edited later
+2. ALWAYS read the tool response carefully - if search_replace fails, it returns the ACTUAL CURRENT content
+3. NEVER retry the exact same search_replace - if it failed, the search text doesn't match the current file
+4. When search_replace fails:
+   - Check 'actual_content' in the response to see what the file currently contains
+   - Check 'similar_matches' to find text similar to what you searched for
+   - The file may have been modified by your earlier edits - search for the CURRENT content, not the original
+5. Use read_artifact if you're unsure what a file contains before editing
+6. After a successful edit, the file content has CHANGED - subsequent edits must use the NEW content as the search target"""
             
             system_prompt = system_prompt + tools_instruction
         

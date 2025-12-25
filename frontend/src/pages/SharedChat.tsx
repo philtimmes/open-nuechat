@@ -4,8 +4,11 @@ import { useBrandingStore } from '../stores/brandingStore';
 import { useAuthStore } from '../stores/authStore';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import 'katex/dist/katex.min.css';
 
 interface SharedAttachment {
   type: 'image' | 'file';
@@ -243,7 +246,8 @@ export default function SharedChat() {
                   ) : (
                   <div className="max-w-none text-[var(--color-text)] leading-relaxed">
                     <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeKatex]}
                       components={{
                         code({ className, children, ...props }) {
                           const match = /language-(\w+)/.exec(className || '');

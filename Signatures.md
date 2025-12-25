@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.67"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.77"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1226,9 +1226,19 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.67**
+**NC-0.6.68**
 
 Changes:
+- NC-0.6.77: **File tree view & breadcrumb fix** - tree/flat toggle in artifacts, fixed breadcrumb nav closing panel, agent file naming aligned to `{AgentNNNN}.md`
+- NC-0.6.76: **Billing APIs admin tab** - configure Stripe/PayPal/Google Pay settings from Admin panel with test connection buttons
+- NC-0.6.75: **Context overflow protection** - chunk large tool results (>32k chars) into hidden `{AgentNNNN}.md` files, searchable by LLM
+- NC-0.6.74: **Auto-close incomplete tool tags** - salvage search_replace/replace_block even without closing tag
+- NC-0.6.73: **KaTeX math rendering** - LaTeX notation support ($...$, $$...$$) via remark-math + rehype-katex
+- NC-0.6.72: **Tool call closures** - added streaming detection for replace_block, improved inline closing tag handling
+- NC-0.6.71: **Sidebar right margin** - added 30px padding so delete icon is reachable past scrollbar
+- NC-0.6.70: **Fix filter chain infinite loop** - removed duplicate `_execute_steps()` call in executor.py
+- NC-0.6.69: **Enhanced artifact guidance** - improved system prompt with CRITICAL section for artifact editing rules
+- NC-0.6.68: **Artifact tools with state tracking** - prevents search_replace confusion, returns actual content on failure
 - NC-0.6.67: **Persist LLM on disconnect** - streaming tasks continue when client leaves, content saved to DB, artifacts preserved
 - NC-0.6.66: **Complete payment system** - Stripe/PayPal/Google Pay integration, subscriptions, payment methods, transaction history, webhooks
 - NC-0.6.65: **Fix artifact closing tag** - detect `</artifact>` even when not alone on line (handles inline content before/after)

@@ -83,6 +83,28 @@ interface FeatureFlags {
   enable_safety_filters: boolean;
 }
 
+interface BillingApiSettings {
+  // Stripe
+  stripe_enabled: boolean;
+  stripe_api_key: string;
+  stripe_webhook_secret: string;
+  stripe_publishable_key: string;
+  stripe_pro_price_id: string;
+  stripe_enterprise_price_id: string;
+  // PayPal
+  paypal_enabled: boolean;
+  paypal_client_id: string;
+  paypal_client_secret: string;
+  paypal_webhook_id: string;
+  paypal_mode: string;
+  paypal_pro_plan_id: string;
+  paypal_enterprise_plan_id: string;
+  // Google Pay
+  google_pay_enabled: boolean;
+  google_pay_merchant_id: string;
+  google_pay_merchant_name: string;
+}
+
 interface APIRateLimits {
   api_rate_limit_completions: number;
   api_rate_limit_embeddings: number;
@@ -194,7 +216,7 @@ interface FilterConfig {
   is_global: boolean;
 }
 
-type TabId = 'system' | 'oauth' | 'llm' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'dev';
+type TabId = 'system' | 'oauth' | 'llm' | 'billing_apis' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'dev';
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -209,6 +231,9 @@ export default function Admin() {
   const [showProviderForm, setShowProviderForm] = useState(false);
   const [testingProvider, setTestingProvider] = useState<string | null>(null);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags | null>(null);
+  const [billingApiSettings, setBillingApiSettings] = useState<BillingApiSettings | null>(null);
+  const [testingStripe, setTestingStripe] = useState(false);
+  const [testingPaypal, setTestingPaypal] = useState(false);
   const [apiRateLimits, setApiRateLimits] = useState<APIRateLimits | null>(null);
   const [tiers, setTiers] = useState<TierConfig[]>([]);
   
@@ -576,13 +601,14 @@ export default function Admin() {
   
   const fetchData = async () => {
     try {
-      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes, rateLimitsRes] = await Promise.all([
+      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes, rateLimitsRes, billingApisRes] = await Promise.all([
         api.get('/admin/settings'),
         api.get('/admin/oauth-settings'),
         api.get('/admin/llm-settings'),
         api.get('/admin/feature-flags'),
         api.get('/admin/tiers'),
         api.get('/admin/api-rate-limits'),
+        api.get('/admin/billing-api-settings'),
       ]);
       setSystemSettings(systemRes.data);
       setOAuthSettings(oauthRes.data);
@@ -590,6 +616,7 @@ export default function Admin() {
       setFeatureFlags(featuresRes.data);
       setTiers(tiersRes.data.tiers);
       setApiRateLimits(rateLimitsRes.data);
+      setBillingApiSettings(billingApisRes.data);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to load settings');
     } finally {
@@ -747,6 +774,57 @@ export default function Admin() {
       setError(err.response?.data?.detail || 'Failed to save API rate limits');
     } finally {
       setIsSaving(false);
+    }
+  };
+  
+  const saveBillingApiSettings = async () => {
+    if (!billingApiSettings) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      await api.put('/admin/billing-api-settings', billingApiSettings);
+      setSuccess('Billing API settings saved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save billing API settings');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  const testStripeConnection = async () => {
+    setTestingStripe(true);
+    setError(null);
+    try {
+      const response = await api.post('/admin/billing-api-settings/test-stripe');
+      if (response.data.success) {
+        setSuccess(response.data.message);
+      } else {
+        setError(response.data.message);
+      }
+      setTimeout(() => setSuccess(null), 5000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to test Stripe connection');
+    } finally {
+      setTestingStripe(false);
+    }
+  };
+  
+  const testPaypalConnection = async () => {
+    setTestingPaypal(true);
+    setError(null);
+    try {
+      const response = await api.post('/admin/billing-api-settings/test-paypal');
+      if (response.data.success) {
+        setSuccess(response.data.message);
+      } else {
+        setError(response.data.message);
+      }
+      setTimeout(() => setSuccess(null), 5000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to test PayPal connection');
+    } finally {
+      setTestingPaypal(false);
     }
   };
   
@@ -1477,6 +1555,8 @@ export default function Admin() {
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>;
       case 'llm':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>;
+      case 'billing':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>;
       case 'features':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>;
       case 'filters':
@@ -1504,6 +1584,7 @@ export default function Admin() {
     { id: 'system', label: 'System', iconType: 'system' },
     { id: 'oauth', label: 'OAuth', iconType: 'oauth' },
     { id: 'llm', label: 'LLM', iconType: 'llm' },
+    { id: 'billing_apis', label: 'Billing APIs', iconType: 'billing' },
     { id: 'features', label: 'Features', iconType: 'features' },
     { id: 'filters', label: 'Filters', iconType: 'filters' },
     { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
@@ -2401,6 +2482,235 @@ export default function Admin() {
                     {isSaving ? 'Saving...' : 'Save Legacy Settings'}
                   </button>
                 </details>
+              </div>
+            )}
+            
+            {/* BILLING APIS TAB */}
+            {activeTab === 'billing_apis' && billingApiSettings && (
+              <div className="space-y-6">
+                {/* Stripe Section */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-lg font-semibold text-[var(--color-text)]">Stripe</h2>
+                      <span className={`px-2 py-0.5 rounded text-xs ${billingApiSettings.stripe_enabled ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
+                        {billingApiSettings.stripe_enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={billingApiSettings.stripe_enabled}
+                      onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_enabled: e.target.checked })}
+                      className="w-5 h-5 rounded"
+                    />
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Key (Secret)</label>
+                      <input
+                        type="password"
+                        value={billingApiSettings.stripe_api_key}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_api_key: e.target.value })}
+                        placeholder="sk_live_..."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Publishable Key</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.stripe_publishable_key}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_publishable_key: e.target.value })}
+                        placeholder="pk_live_..."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Webhook Secret</label>
+                      <input
+                        type="password"
+                        value={billingApiSettings.stripe_webhook_secret}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_webhook_secret: e.target.value })}
+                        placeholder="whsec_..."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Pro Plan Price ID</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.stripe_pro_price_id}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_pro_price_id: e.target.value })}
+                        placeholder="price_..."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Enterprise Plan Price ID</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.stripe_enterprise_price_id}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_enterprise_price_id: e.target.value })}
+                        placeholder="price_..."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <button
+                        onClick={testStripeConnection}
+                        disabled={testingStripe || !billingApiSettings.stripe_api_key}
+                        className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-500 disabled:opacity-50 text-sm"
+                      >
+                        {testingStripe ? 'Testing...' : 'Test Connection'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* PayPal Section */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-lg font-semibold text-[var(--color-text)]">PayPal</h2>
+                      <span className={`px-2 py-0.5 rounded text-xs ${billingApiSettings.paypal_enabled ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
+                        {billingApiSettings.paypal_enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={billingApiSettings.paypal_enabled}
+                      onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_enabled: e.target.checked })}
+                      className="w-5 h-5 rounded"
+                    />
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Client ID</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.paypal_client_id}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_client_id: e.target.value })}
+                        placeholder="Client ID"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Client Secret</label>
+                      <input
+                        type="password"
+                        value={billingApiSettings.paypal_client_secret}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_client_secret: e.target.value })}
+                        placeholder="Client Secret"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Webhook ID</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.paypal_webhook_id}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_webhook_id: e.target.value })}
+                        placeholder="Webhook ID"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Mode</label>
+                      <select
+                        value={billingApiSettings.paypal_mode}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_mode: e.target.value })}
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      >
+                        <option value="sandbox">Sandbox (Testing)</option>
+                        <option value="live">Live (Production)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Pro Plan ID</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.paypal_pro_plan_id}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_pro_plan_id: e.target.value })}
+                        placeholder="Plan ID"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Enterprise Plan ID</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.paypal_enterprise_plan_id}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_enterprise_plan_id: e.target.value })}
+                        placeholder="Plan ID"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <button
+                        onClick={testPaypalConnection}
+                        disabled={testingPaypal || !billingApiSettings.paypal_client_id || !billingApiSettings.paypal_client_secret}
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 disabled:opacity-50 text-sm"
+                      >
+                        {testingPaypal ? 'Testing...' : 'Test Connection'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Google Pay Section */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-lg font-semibold text-[var(--color-text)]">Google Pay</h2>
+                      <span className={`px-2 py-0.5 rounded text-xs ${billingApiSettings.google_pay_enabled ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
+                        {billingApiSettings.google_pay_enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={billingApiSettings.google_pay_enabled}
+                      onChange={(e) => setBillingApiSettings({ ...billingApiSettings, google_pay_enabled: e.target.checked })}
+                      className="w-5 h-5 rounded"
+                    />
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Merchant ID</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.google_pay_merchant_id}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, google_pay_merchant_id: e.target.value })}
+                        placeholder="Merchant ID"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Merchant Name</label>
+                      <input
+                        type="text"
+                        value={billingApiSettings.google_pay_merchant_name}
+                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, google_pay_merchant_name: e.target.value })}
+                        placeholder="Your Business Name"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-3">
+                    Note: Google Pay requires Stripe or PayPal as the payment processor. Configure one of them above.
+                  </p>
+                </div>
+                
+                {/* Save Button */}
+                <button
+                  onClick={saveBillingApiSettings}
+                  disabled={isSaving}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSaving ? 'Saving...' : 'Save Billing API Settings'}
+                </button>
               </div>
             )}
             

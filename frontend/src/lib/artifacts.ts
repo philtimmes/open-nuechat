@@ -968,3 +968,89 @@ export function getLatestArtifacts(artifacts: Artifact[]): Artifact[] {
   const groups = groupArtifactsByFilename(artifacts);
   return groups.map(g => g.latestVersion);
 }
+
+// ============ FILE TREE STRUCTURE ============
+
+export interface FileTreeNode {
+  name: string;
+  path: string;
+  type: 'file' | 'folder';
+  children?: FileTreeNode[];
+  group?: ArtifactGroup;  // Only for files
+}
+
+/**
+ * Build a file tree from artifact groups
+ */
+export function buildFileTree(groups: ArtifactGroup[]): FileTreeNode[] {
+  const root: FileTreeNode[] = [];
+  const folderMap = new Map<string, FileTreeNode>();
+  
+  // Helper to ensure a folder exists and return it
+  const ensureFolder = (path: string): FileTreeNode => {
+    if (folderMap.has(path)) {
+      return folderMap.get(path)!;
+    }
+    
+    const parts = path.split('/');
+    const name = parts[parts.length - 1];
+    const parentPath = parts.slice(0, -1).join('/');
+    
+    const folder: FileTreeNode = {
+      name,
+      path,
+      type: 'folder',
+      children: [],
+    };
+    folderMap.set(path, folder);
+    
+    if (parentPath) {
+      const parent = ensureFolder(parentPath);
+      parent.children!.push(folder);
+    } else {
+      root.push(folder);
+    }
+    
+    return folder;
+  };
+  
+  // Add each file to the tree
+  for (const group of groups) {
+    const parts = group.filename.split('/');
+    const fileName = parts[parts.length - 1];
+    
+    const fileNode: FileTreeNode = {
+      name: fileName,
+      path: group.filename,
+      type: 'file',
+      group,
+    };
+    
+    if (parts.length > 1) {
+      // Has a directory path
+      const folderPath = parts.slice(0, -1).join('/');
+      const parent = ensureFolder(folderPath);
+      parent.children!.push(fileNode);
+    } else {
+      // Root level file
+      root.push(fileNode);
+    }
+  }
+  
+  // Sort: folders first, then alphabetically
+  const sortNodes = (nodes: FileTreeNode[]): FileTreeNode[] => {
+    return nodes.sort((a, b) => {
+      if (a.type !== b.type) {
+        return a.type === 'folder' ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    }).map(node => {
+      if (node.children) {
+        node.children = sortNodes(node.children);
+      }
+      return node;
+    });
+  };
+  
+  return sortNodes(root);
+}

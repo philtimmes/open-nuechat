@@ -323,7 +323,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
       </div>
       
       {/* Chat list */}
-      <div ref={chatListRef} className="flex-1 overflow-y-auto py-2">
+      <div ref={chatListRef} className="flex-1 overflow-y-auto py-2 pr-[30px]">
         {isLoadingChats && chats.length === 0 ? (
           <div className="flex items-center justify-center py-8">
             <svg className="animate-spin h-6 w-6 text-[var(--color-text-secondary)]" viewBox="0 0 24 24">
@@ -354,7 +354,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
                 <div
                   key={chat.id}
                   onClick={() => handleSelectChat(chat)}
-                  className={`group mx-2 px-3 py-3 md:py-2.5 rounded-lg cursor-pointer transition-colors ${
+                  className={`group ml-2 mr-3 px-3 py-3 md:py-2.5 rounded-lg cursor-pointer transition-colors ${
                     chatId === chat.id
                       ? 'bg-[var(--color-button)]/80 border border-[var(--color-border)]'
                       : 'hover:bg-zinc-700/30 active:bg-zinc-700/50'

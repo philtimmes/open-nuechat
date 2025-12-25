@@ -18,8 +18,11 @@ import { groupArtifactsByFilename, getLatestArtifacts } from '../lib/artifacts';
 import api, { chatApi } from '../lib/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import 'katex/dist/katex.min.css';
 
 /**
  * Fix nested code fences for proper markdown rendering.
@@ -99,7 +102,8 @@ const MessageMarkdown = memo(function MessageMarkdown({ content }: { content: st
   
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
       components={{
         code({ node, inline, className, children, ...props }: any) {
           const match = /language-(\w+)/.exec(className || '');
@@ -649,10 +653,10 @@ export default function ChatPage() {
   };
   
   // Combine saved artifacts with streaming and uploaded artifacts for real-time updates
-  // Filter out agent memory files - they're internal and invisible to user
+  // Filter out agent memory files and hidden artifacts - they're internal and invisible to user
   const artifacts = useMemo(() => {
     const combined = [...savedArtifacts, ...streamingArtifacts, ...uploadedArtifacts];
-    const filtered = combined.filter(a => !isAgentFile(a.filename));
+    const filtered = combined.filter(a => !isAgentFile(a.filename) && !a.hidden);
     console.log('[ChatPage] Combined artifacts:', {
       saved: savedArtifacts.length,
       streaming: streamingArtifacts.length,

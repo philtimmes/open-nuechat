@@ -20,6 +20,16 @@ class ToolRegistry:
         self._tools: Dict[str, Dict[str, Any]] = {}
         self._handlers: Dict[str, Callable] = {}
         self._register_builtin_tools()
+        self._register_artifact_tools()
+    
+    def _register_artifact_tools(self):
+        """Register artifact/file editing tools"""
+        try:
+            from app.tools.artifact_tools import register_artifact_tools
+            register_artifact_tools(self)
+        except ImportError as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Could not load artifact tools: {e}")
     
     def register(
         self,
