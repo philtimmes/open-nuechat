@@ -10,7 +10,73 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.85
+**Current Version:** NC-0.6.88
+
+---
+
+## Recent Changes (NC-0.6.88)
+
+### Fix: Chats disappearing on page refresh - Auto-load all chats
+
+**Problem:** On page refresh, only 50 chats were loaded due to pagination. Users with 630+ chats would only see the first page, making it appear that chats "disappeared".
+
+**Solution:**
+
+1. **Increased page size**: Backend now allows up to 1000 chats per request (was 100). Frontend requests 500 at a time (was 50).
+
+2. **Auto-load remaining chats**: After initial load, sidebar automatically fetches remaining chats in the background. This ensures all accordion groups show complete counts.
+
+3. **Loading indicator**: Shows "Loading chats..." at the bottom while fetching additional pages.
+
+**Files Changed:**
+- `backend/app/api/routes/chats.py`: Increased `page_size` limit from 100 to 1000
+- `frontend/src/stores/chat/chatSlice.ts`: Increased `page_size` from 50 to 500
+- `frontend/src/components/Sidebar.tsx`: Added auto-load effect, improved loading indicator
+
+**How it works:**
+1. Page loads → First 500 chats fetched immediately
+2. If more chats exist → Auto-fetch next batch (100ms delay between batches)
+3. Repeat until all chats are loaded
+4. User sees "Loading chats..." indicator during this process
+
+---
+
+## Recent Changes (NC-0.6.87)
+
+### Sidebar Accordion Fixes - All Sections Expanded by Default
+
+**Problem:** Clicking sort options made chats appear to "disappear" because only one section was expanded at a time.
+
+**Changes:**
+
+1. **All sections expanded by default**: Changed from single expanded section to `Set<string>` allowing multiple expanded sections. All date/source groups are now expanded when sort changes.
+
+2. **Fixed nested button HTML**: The accordion header had buttons nested inside a button element (invalid HTML). Restructured to use a clickable div for toggle and separate buttons for actions.
+
+3. **Double confirmation for section delete**: Section delete now requires typing confirmation (e.g., "DELETE TODAY") to prevent accidental bulk deletions.
+
+**How it works now:**
+- Switch sort → All groups expand automatically
+- Click group header → Toggle that group only (others stay as-is)
+- Delete section → Requires confirm dialog + type "DELETE [GROUP NAME]"
+
+**File Changed:** `frontend/src/components/Sidebar.tsx`
+
+---
+
+## Recent Changes (NC-0.6.86)
+
+### Fix sidebar date grouping - proper calendar day comparison
+
+**Problem:** Chats from late yesterday (e.g., 11 PM) would appear in "Today" if viewed early morning, because the calculation used hours difference instead of calendar days.
+
+**Solution:** Reset both dates to midnight before comparing, ensuring proper calendar day boundaries:
+- Today = same calendar day
+- This Week = 1-6 calendar days ago (excludes Today)
+- Last 30 Days = 7-29 calendar days ago (excludes This Week)
+- Older = 30+ calendar days ago
+
+**File Changed:** `frontend/src/components/Sidebar.tsx`
 
 ---
 
@@ -1448,6 +1514,9 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.6.88 | 2025-12-25 | Fix chats disappearing on refresh - auto-load all, larger page size |
+| NC-0.6.87 | 2025-12-25 | All sidebar sections expanded by default, nested button fix, double-confirm delete |
+| NC-0.6.86 | 2025-12-25 | Fix sidebar date grouping to use calendar days not hours |
 | NC-0.6.85 | 2025-12-25 | Overflow fix, sidebar section buttons, Source sort, Delete all chats |
 | NC-0.6.84 | 2025-12-25 | Real-time thinking block hiding during streaming |
 | NC-0.6.83 | 2025-12-25 | Fix admin thinking tags - 30s cache TTL, tokens now actually work |
@@ -1455,8 +1524,6 @@ The editor uses React Flow and supports all step types with intuitive configurat
 | NC-0.6.81 | 2025-12-25 | Import prefixes (ChatGPT:/Grok:), sidebar sort/accordions, collapsible tool calls |
 | NC-0.6.80 | 2025-12-25 | Fix ChatGPT import - skip hidden system messages, capture model |
 | NC-0.6.79 | 2025-12-25 | Fix chat compression never triggering - use admin threshold setting |
-| NC-0.6.78 | 2025-12-25 | Dynamic max_tokens cap to prevent context overflow errors |
-| NC-0.6.77 | 2025-12-25 | File tree view in artifacts, breadcrumb nav fix, agent file naming fix |
 | NC-0.6.76 | 2025-12-25 | Billing APIs admin tab for Stripe/PayPal/Google Pay configuration |
 | NC-0.6.75 | 2025-12-24 | Context window overflow protection - chunk large tool results into hidden agent files |
 | NC-0.6.74 | 2025-12-24 | Auto-close incomplete tool tags when LLM stops mid-output |
@@ -1567,7 +1634,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.85**
+Current: **NC-0.6.88**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

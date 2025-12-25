@@ -119,7 +119,7 @@ async def delete_message_images(db: AsyncSession, message_ids: set) -> int:
 @router.get("", response_model=ChatListResponse)
 async def list_chats(
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=1000),
     search: Optional[str] = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -171,7 +171,84 @@ async def list_chats(
     )
 
 
-@router.post("", response_model=ChatResponse)
+@router.get("/counts")
+async def get_chat_counts(
+    sort_by: str = Query("modified", regex="^(modified|created|source)$"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get chat counts grouped by date category or source for sidebar display."""
+    from datetime import datetime, timedelta
+    from sqlalchemy import case
+    
+    now = datetime.utcnow()
+    today_start = datetime(now.year, now.month, now.day)
+    week_start = today_start - timedelta(days=today_start.weekday())  # Start of this week
+    days_ago_7 = today_start - timedelta(days=6)  # 6 days ago (This Week = 1-6 days)
+    days_ago_30 = today_start - timedelta(days=29)  # 29 days ago (Last 30 = 7-29 days)
+    
+    base_filter = Chat.owner_id == user.id
+    
+    if sort_by == "source":
+        # Group by title prefix (ChatGPT:, Grok:, or Local)
+        source_case = case(
+            (Chat.title.like("ChatGPT:%"), "ChatGPT"),
+            (Chat.title.like("Grok:%"), "Grok"),
+            else_="Local"
+        )
+        
+        query = (
+            select(source_case.label("group_name"), func.count(Chat.id).label("count"))
+            .where(base_filter)
+            .group_by(source_case)
+        )
+        
+        result = await db.execute(query)
+        rows = result.all()
+        
+        # Ensure all groups exist
+        counts = {"Local": 0, "ChatGPT": 0, "Grok": 0}
+        for row in rows:
+            counts[row.group_name] = row.count
+        
+        return {
+            "sort_by": sort_by,
+            "groups": ["Local", "ChatGPT", "Grok"],
+            "counts": counts,
+            "total": sum(counts.values())
+        }
+    
+    else:
+        # Group by date category (Today, This Week, Last 30 Days, Older)
+        date_field = Chat.created_at if sort_by == "created" else Chat.updated_at
+        
+        date_case = case(
+            (date_field >= today_start, "Today"),
+            (date_field >= days_ago_7, "This Week"),
+            (date_field >= days_ago_30, "Last 30 Days"),
+            else_="Older"
+        )
+        
+        query = (
+            select(date_case.label("group_name"), func.count(Chat.id).label("count"))
+            .where(base_filter)
+            .group_by(date_case)
+        )
+        
+        result = await db.execute(query)
+        rows = result.all()
+        
+        # Ensure all groups exist
+        counts = {"Today": 0, "This Week": 0, "Last 30 Days": 0, "Older": 0}
+        for row in rows:
+            counts[row.group_name] = row.count
+        
+        return {
+            "sort_by": sort_by,
+            "groups": ["Today", "This Week", "Last 30 Days", "Older"],
+            "counts": counts,
+            "total": sum(counts.values())
+        }
 async def create_chat(
     chat_data: ChatCreate,
     user: User = Depends(get_current_user),

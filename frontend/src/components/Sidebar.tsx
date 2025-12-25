@@ -9,6 +9,12 @@ import type { Chat } from '../types';
 
 type SortOption = 'modified' | 'created' | 'alphabetical' | 'source';
 
+interface GroupCounts {
+  groups: string[];
+  counts: Record<string, number>;
+  total: number;
+}
+
 interface SidebarProps {
   isOpen: boolean;
   onToggle: () => void;
@@ -27,7 +33,8 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   const [importResult, setImportResult] = useState<{ success: number; failed: number } | null>(null);
   const [sortBy, setSortBy] = useState<SortOption>('modified');
   const [showSortDropdown, setShowSortDropdown] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<string | null>(null);
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const [groupCounts, setGroupCounts] = useState<GroupCounts | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const sortDropdownRef = useRef<HTMLDivElement>(null);
@@ -67,6 +74,29 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
       }
     };
   }, [searchQuery, fetchChats]);
+  
+  // Fetch group counts from backend (lightweight query for accurate counts)
+  // Re-fetches when sortBy changes or when chats are added/deleted
+  useEffect(() => {
+    if (sortBy === 'alphabetical' || searchQuery) {
+      // No counts needed for alphabetical or when searching
+      setGroupCounts(null);
+      return;
+    }
+    
+    const fetchCounts = async () => {
+      try {
+        const res = await api.get('/chats/counts', { 
+          params: { sort_by: sortBy } 
+        });
+        setGroupCounts(res.data);
+      } catch (err) {
+        console.error('Failed to fetch chat counts:', err);
+      }
+    };
+    
+    fetchCounts();
+  }, [sortBy, searchQuery, chats.length]); // chats.length triggers refetch after add/delete
   
   // Handle infinite scroll
   const handleScroll = useCallback(() => {
@@ -163,6 +193,18 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
         addImportedChats(result.imported_chats);
       }
       
+      // Refresh counts from server
+      if (sortBy !== 'alphabetical') {
+        try {
+          const countsRes = await api.get('/chats/counts', { 
+            params: { sort_by: sortBy } 
+          });
+          setGroupCounts(countsRes.data);
+        } catch (err) {
+          console.error('Failed to refresh chat counts:', err);
+        }
+      }
+      
       // Navigate to the first imported chat if any
       if (result.results?.length > 0 && result.results[0].chat_id) {
         navigate(`/chat/${result.results[0].chat_id}`);
@@ -223,16 +265,20 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
   
-  // Get date category for grouping
+  // Get date category for grouping - uses calendar days, not hours
   const getDateCategory = (dateStr: string): string => {
     const date = new Date(dateStr);
     const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
     
-    if (days === 0) return 'Today';
-    if (days < 7) return 'This Week';
-    if (days < 30) return 'Last 30 Days';
+    // Reset times to midnight for proper calendar day comparison
+    const dateDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    const diffDays = Math.floor((today.getTime() - dateDay.getTime()) / (1000 * 60 * 60 * 24));
+    
+    if (diffDays === 0) return 'Today';
+    if (diffDays > 0 && diffDays < 7) return 'This Week';
+    if (diffDays >= 7 && diffDays < 30) return 'Last 30 Days';
     return 'Older';
   };
   
@@ -308,19 +354,36 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     return { sortedChats: sorted, groupedChats: groups, dateGroups: activeGroups };
   }, [safeChats, sortBy]);
   
-  // Auto-expand first group when dateGroups changes (e.g., after sort change)
-  useEffect(() => {
-    if ((sortBy === 'modified' || sortBy === 'created' || sortBy === 'source') && dateGroups.length > 0) {
-      // If current expanded section doesn't exist in groups, expand first group
-      if (!expandedSection || !dateGroups.includes(expandedSection)) {
-        setExpandedSection(dateGroups[0]);
-      }
+  // Get display groups - prefer API counts, fall back to loaded chats
+  const displayGroups = useMemo(() => {
+    if (sortBy === 'alphabetical') return [];
+    // Use API groups if available (they have accurate counts even before data is loaded)
+    if (groupCounts && groupCounts.groups) {
+      return groupCounts.groups.filter(g => (groupCounts.counts[g] || 0) > 0);
     }
-  }, [dateGroups, sortBy]);
+    // Fall back to groups from loaded chats
+    return dateGroups;
+  }, [sortBy, groupCounts, dateGroups]);
+  
+  // Get count for a group - prefer API counts
+  const getGroupCount = (group: string): number => {
+    if (groupCounts && groupCounts.counts) {
+      return groupCounts.counts[group] || 0;
+    }
+    return groupedChats[group]?.length || 0;
+  };
   
   // Toggle accordion section
   const toggleSection = (section: string) => {
-    setExpandedSection(expandedSection === section ? null : section);
+    setExpandedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(section)) {
+        next.delete(section);
+      } else {
+        next.add(section);
+      }
+      return next;
+    });
   };
   
   // Export chats in a section
@@ -353,21 +416,46 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     }
   };
   
+  // Refetch counts from API
+  const refetchCounts = async () => {
+    if (sortBy === 'alphabetical') return;
+    try {
+      const res = await api.get('/chats/counts', { 
+        params: { sort_by: sortBy } 
+      });
+      setGroupCounts(res.data);
+    } catch (err) {
+      console.error('Failed to refetch chat counts:', err);
+    }
+  };
+  
   // Delete all chats in a section
   const handleDeleteSection = async (e: React.MouseEvent, group: string) => {
     e.stopPropagation();
-    const chatsToDelete = groupedChats[group] || [];
-    if (chatsToDelete.length === 0) return;
+    const count = getGroupCount(group);
+    if (count === 0) return;
     
-    if (!confirm(`Are you sure you want to delete all ${chatsToDelete.length} chats in "${group}"? This cannot be undone.`)) {
+    // First confirmation
+    if (!confirm(`Are you sure you want to delete all ${count} chats in "${group}"? This cannot be undone.`)) {
+      return;
+    }
+    
+    // Second confirmation - require typing
+    const confirmText = prompt(`Type "DELETE ${group.toUpperCase()}" to confirm:`);
+    if (confirmText !== `DELETE ${group.toUpperCase()}`) {
+      alert('Deletion cancelled. Text did not match.');
       return;
     }
     
     try {
-      // Delete each chat
+      // Delete each chat that's loaded in this group
+      const chatsToDelete = groupedChats[group] || [];
       for (const chat of chatsToDelete) {
         await deleteChat(chat.id);
       }
+      
+      // Refresh counts from server
+      await refetchCounts();
       
       // If currently viewing a deleted chat, navigate home
       if (chatId && chatsToDelete.some(c => c.id === chatId)) {
@@ -617,59 +705,80 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
         ) : (
           // Date-based and source sorts: accordion groups
           <div className="space-y-1">
-            {dateGroups.map((group) => (
+            {displayGroups.map((group) => (
               <div key={group} className="border-b border-[var(--color-border)]/50 last:border-b-0">
-                {/* Accordion header with hover actions */}
-                <div className="group/header relative">
-                  <button
+                {/* Accordion header with hover actions - no nested buttons */}
+                <div className="group/header relative flex items-center justify-between px-4 py-3 hover:bg-[var(--color-background)]/50 transition-colors">
+                  {/* Toggle area - clickable div, not button */}
+                  <div 
                     onClick={() => toggleSection(group)}
-                    className="w-full flex items-center justify-between px-4 py-3 hover:bg-[var(--color-background)]/50 transition-colors"
+                    className="flex items-center gap-2 cursor-pointer flex-1"
                   >
-                    <div className="flex items-center gap-2">
-                      <svg
-                        className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${
-                          expandedSection === group ? 'rotate-90' : ''
-                        }`}
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
+                    <svg
+                      className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${
+                        expandedSections.has(group) ? 'rotate-90' : ''
+                      }`}
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                    <span className="text-sm font-medium text-[var(--color-text)]">{group}</span>
+                  </div>
+                  
+                  <div className="flex items-center gap-2">
+                    {/* Section action buttons - appear on hover */}
+                    <div className="flex items-center gap-1 opacity-0 group-hover/header:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleExportSection(e, group);
+                        }}
+                        className="p-1 rounded hover:bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                        title={`Export all chats in ${group}`}
                       >
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                      </svg>
-                      <span className="text-sm font-medium text-[var(--color-text)]">{group}</span>
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteSection(e, group);
+                        }}
+                        className="p-1 rounded hover:bg-red-500/10 text-[var(--color-text-secondary)] hover:text-[var(--color-error)]"
+                        title={`Delete all chats in ${group}`}
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
                     </div>
-                    <div className="flex items-center gap-2">
-                      {/* Section action buttons - appear on hover */}
-                      <div className="flex items-center gap-1 opacity-0 group-hover/header:opacity-100 transition-opacity">
-                        <button
-                          onClick={(e) => handleExportSection(e, group)}
-                          className="p-1 rounded hover:bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-                          title={`Export all chats in ${group}`}
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                          </svg>
-                        </button>
-                        <button
-                          onClick={(e) => handleDeleteSection(e, group)}
-                          className="p-1 rounded hover:bg-red-500/10 text-[var(--color-text-secondary)] hover:text-[var(--color-error)]"
-                          title={`Delete all chats in ${group}`}
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      </div>
-                      <span className="text-xs text-[var(--color-text-secondary)]">
-                        {groupedChats[group]?.length || 0}
-                      </span>
-                    </div>
-                  </button>
+                    <span className="text-xs text-[var(--color-text-secondary)]">
+                      {getGroupCount(group)}
+                    </span>
+                  </div>
                 </div>
                 
                 {/* Accordion content */}
-                {expandedSection === group && (
+                {expandedSections.has(group) && (
                   <div className="pb-2">
+                    {(!groupedChats[group] || groupedChats[group].length === 0) && getGroupCount(group) > 0 ? (
+                      <div className="ml-2 mr-3 px-3 py-3 text-sm text-[var(--color-text-secondary)]">
+                        {isLoadingChats ? (
+                          <div className="flex items-center gap-2">
+                            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                            </svg>
+                            <span>Loading...</span>
+                          </div>
+                        ) : (
+                          <span>Scroll down to load more chats</span>
+                        )}
+                      </div>
+                    ) : null}
                     {groupedChats[group]?.map((chat) => (
                       <div
                         key={chat.id}
@@ -744,11 +853,12 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
         
         {/* Loading more indicator */}
         {isLoadingChats && chats.length > 0 && (
-          <div className="flex items-center justify-center py-4">
-            <svg className="animate-spin h-5 w-5 text-[var(--color-text-secondary)]" viewBox="0 0 24 24">
+          <div className="flex items-center justify-center gap-2 py-4 text-[var(--color-text-secondary)]">
+            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
             </svg>
+            <span className="text-xs">Loading chats...</span>
           </div>
         )}
       </div>
