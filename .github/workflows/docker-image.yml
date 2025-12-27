@@ -14,5 +14,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    -name: Make control.sh executable
+    run: chmod +x ./control.sh
     - name: Build the Docker image
-      run: ./control.sh build 
+    run: ./control.sh build 
