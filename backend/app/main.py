@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.89"
+SCHEMA_VERSION = "NC-0.6.96"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -103,6 +103,21 @@ async def run_migrations(conn):
     
     if current == target:
         logger.info("Schema is up to date, no migrations needed")
+        # Still check for missing columns that might have failed to add
+        critical_columns = [
+            ("messages", "time_to_first_token", "INTEGER"),
+            ("messages", "time_to_complete", "INTEGER"),
+        ]
+        for table, column, col_type in critical_columns:
+            result = await conn.execute(text(f"PRAGMA table_info({table})"))
+            columns = [row[1] for row in result.fetchall()]
+            if column not in columns:
+                logger.info(f"Adding missing column {table}.{column}")
+                try:
+                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                    logger.info(f"  {table}.{column}: OK")
+                except Exception as e:
+                    logger.warning(f"  {table}.{column}: failed ({e})")
         return
     
     # Define migrations: version -> list of SQL statements
@@ -302,6 +317,11 @@ async def run_migrations(conn):
             ("CREATE INDEX IF NOT EXISTS idx_llm_provider_default ON llm_providers(is_default)", "llm_providers.idx_default"),
             ("CREATE INDEX IF NOT EXISTS idx_llm_provider_vision ON llm_providers(is_vision_default)", "llm_providers.idx_vision"),
         ],
+        "NC-0.6.90": [
+            # Message timing metrics
+            ("ALTER TABLE messages ADD COLUMN time_to_first_token INTEGER", "messages.time_to_first_token"),
+            ("ALTER TABLE messages ADD COLUMN time_to_complete INTEGER", "messages.time_to_complete"),
+        ],
     }
     
     # Sort versions and run migrations in order
@@ -365,6 +385,45 @@ async def run_migrations(conn):
     logger.info(f"Schema updated to {SCHEMA_VERSION}")
 
 
+async def ensure_persistent_secret_key(conn):
+    """
+    Ensure SECRET_KEY is persistent across server restarts.
+    
+    If SECRET_KEY is set in environment, use that.
+    Otherwise, check database for stored key or generate and store a new one.
+    This prevents users from being logged out when the server restarts.
+    """
+    import os
+    import secrets
+    
+    # If SECRET_KEY is explicitly set in environment, use it
+    env_secret = os.environ.get("SECRET_KEY")
+    if env_secret and env_secret.strip():
+        logger.info("Using SECRET_KEY from environment")
+        return
+    
+    # Check if we have a stored secret key in the database
+    result = await conn.execute(
+        text("SELECT value FROM system_settings WHERE key = 'jwt_secret_key'")
+    )
+    row = result.fetchone()
+    
+    if row and row[0]:
+        # Use stored key
+        stored_key = row[0]
+        settings.SECRET_KEY = stored_key
+        logger.info("Loaded persistent SECRET_KEY from database")
+    else:
+        # Generate and store a new key
+        new_key = secrets.token_urlsafe(32)
+        await conn.execute(
+            text("INSERT INTO system_settings (key, value) VALUES ('jwt_secret_key', :key)"),
+            {"key": new_key}
+        )
+        settings.SECRET_KEY = new_key
+        logger.info("Generated and stored new persistent SECRET_KEY")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown events"""
@@ -389,6 +448,11 @@ async def lifespan(app: FastAPI):
     # Run migrations for existing databases
     async with engine.begin() as conn:
         await run_migrations(conn)
+    
+    # Ensure SECRET_KEY is persistent across restarts
+    # This prevents users from being logged out when server restarts
+    async with engine.begin() as conn:
+        await ensure_persistent_secret_key(conn)
     
     # Initialize RAG service (loads embedding model)
     try:

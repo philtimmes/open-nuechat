@@ -62,7 +62,7 @@ const SEARCH_REPLACE_REGEX = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s
 // ============ STREAMING DETECTION PATTERNS ============
 // These detect COMPLETE tool tags during streaming for immediate execution
 
-// Single-line tool tags - match on closing > or />
+// Single-line tool tags - match on closing > or /> (the /? handles self-closing tags)
 const STREAM_FIND_LINE_PATTERN = /<find_line\s+path=["']([^"']+)["']\s+contains=["']([^"']+)["']\s*\/?>/i;
 const STREAM_FIND_PATTERN_WITH_PATH = /<find\s+path=["']([^"']+)["']\s+search=["']([^"']+)["']\s*\/?>/i;
 const STREAM_FIND_PATTERN_NO_PATH = /<find\s+search=["']([^"']+)["']\s*\/?>/i;
@@ -986,6 +986,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             parent_id: parentMessageId,
             zip_context: zipContext,
             save_user_message: false,
+            is_tool_continuation: true,
           },
         }));
         
@@ -1027,6 +1028,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           parent_id: parentMessageId,
           zip_context: zipContext,
           save_user_message: false,
+          is_tool_continuation: true,
         },
       }));
     }
@@ -1059,6 +1061,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           parent_id: parentMessageId,
           zip_context: zipContext,
           save_user_message: false,
+          is_tool_continuation: true,
         },
       }));
     }
@@ -1114,6 +1117,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           parent_id: parentMessageId,
           zip_context: zipContext,
           save_user_message: false,
+          is_tool_continuation: true,
         },
       }));
     }
@@ -1537,6 +1541,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
                     parent_id: chunk.message_id,
                     zip_context: zipContext,
                     save_user_message: false,
+                    is_tool_continuation: true,
                   },
                 }));
                 // Don't clear streaming - LLM will continue
@@ -1841,6 +1846,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             parent_id: parentId,  // Link to current streaming message for linear conversation
             zip_context: zipContext,
             save_user_message: false,
+            is_tool_continuation: true,
           },
         }));
       };

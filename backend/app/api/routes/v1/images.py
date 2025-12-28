@@ -96,6 +96,10 @@ async def create_image(
     
     Compatible with OpenAI's /v1/images/generations endpoint.
     
+    **Authentication:**
+    - Header: `Authorization: Bearer nxs_...`
+    - Query parameter: `?api_key=nxs_...`
+    
     **Supported sizes:**
     - Square: 512x512, 768x768, 1024x1024, 1080x1080
     - Landscape: 1280x720, 1920x1080, 1024x768, 1200x800

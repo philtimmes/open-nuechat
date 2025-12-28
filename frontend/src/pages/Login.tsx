@@ -75,19 +75,19 @@ export default function Login() {
       </div>
       
       <div className="relative w-full max-w-md">
-        {/* Logo */}
+        {/* Logo and Branding */}
         <div className="text-center mb-8">
-          {config?.logo_url ? (
+          {config?.logo_url && (
             <img 
               src={config.logo_url} 
               alt={appName} 
               className="h-12 mx-auto mb-4"
+              onError={(e) => { e.currentTarget.style.display = 'none'; }}
             />
-          ) : (
-            <h1 className="text-4xl font-bold tracking-tight bg-gradient-to-r from-[var(--color-primary)] to-[var(--color-secondary)] bg-clip-text text-transparent">
-              {appName}
-            </h1>
           )}
+          <h1 className="text-4xl font-bold tracking-tight bg-gradient-to-r from-[var(--color-primary)] to-[var(--color-secondary)] bg-clip-text text-transparent">
+            {appName}
+          </h1>
           <p className="text-[var(--color-text-secondary)] mt-2">
             {appTagline}
           </p>

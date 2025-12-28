@@ -369,56 +369,69 @@ async def regenerate_api_key(
 async def get_api_key_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    api_key: Optional[str] = None,  # Query parameter
 ) -> tuple[User, APIKey]:
     """
     Authenticate a request using an API key.
     
-    Expects the key in the Authorization header as:
-    `Authorization: Bearer nxs_...`
+    Accepts the key in:
+    1. Authorization header: `Authorization: Bearer nxs_...`
+    2. Query parameter: `?api_key=nxs_...`
     
     Returns tuple of (User, APIKey)
     """
-    auth_header = request.headers.get("Authorization")
+    api_key_value = None
     
-    if not auth_header or not auth_header.startswith("Bearer nxs_"):
+    # Try Authorization header first
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer nxs_"):
+        api_key_value = auth_header.replace("Bearer ", "")
+    
+    # Fall back to query parameter
+    if not api_key_value:
+        # Check query params directly from request
+        api_key_param = request.query_params.get("api_key")
+        if api_key_param and api_key_param.startswith("nxs_"):
+            api_key_value = api_key_param
+    
+    if not api_key_value:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key format. Use: Bearer nxs_..."
+            detail="Invalid API key format. Use: Authorization: Bearer nxs_... or ?api_key=nxs_..."
         )
     
-    api_key_value = auth_header.replace("Bearer ", "")
     key_hash = hash_api_key(api_key_value)
     
     # Find the key
     result = await db.execute(
         select(APIKey).where(APIKey.key_hash == key_hash)
     )
-    api_key = result.scalar_one_or_none()
+    api_key_obj = result.scalar_one_or_none()
     
-    if not api_key:
+    if not api_key_obj:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key"
         )
     
     # Check if active
-    if not api_key.is_active:
+    if not api_key_obj.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="API key is deactivated"
         )
     
     # Check expiration
-    if api_key.expires_at and api_key.expires_at < datetime.now(timezone.utc):
+    if api_key_obj.expires_at and api_key_obj.expires_at < datetime.now(timezone.utc):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="API key has expired"
         )
     
     # Check IP restrictions
-    if api_key.allowed_ips:
+    if api_key_obj.allowed_ips:
         client_ip = request.client.host if request.client else None
-        if client_ip and client_ip not in api_key.allowed_ips:
+        if client_ip and client_ip not in api_key_obj.allowed_ips:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="IP address not allowed for this API key"
@@ -426,7 +439,7 @@ async def get_api_key_user(
     
     # Get user
     result = await db.execute(
-        select(User).where(User.id == api_key.user_id)
+        select(User).where(User.id == api_key_obj.user_id)
     )
     user = result.scalar_one_or_none()
     
@@ -437,12 +450,12 @@ async def get_api_key_user(
         )
     
     # Update usage stats
-    api_key.last_used_at = datetime.now(timezone.utc)
-    api_key.last_used_ip = request.client.host if request.client else None
-    api_key.usage_count += 1
+    api_key_obj.last_used_at = datetime.now(timezone.utc)
+    api_key_obj.last_used_ip = request.client.host if request.client else None
+    api_key_obj.usage_count += 1
     await db.commit()
     
-    return user, api_key
+    return user, api_key_obj
 
 
 def require_scope(required_scope: str):

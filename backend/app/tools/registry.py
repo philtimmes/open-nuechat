@@ -266,6 +266,57 @@ class ToolRegistry:
             },
             handler=FileViewingTools.view_signature,
         )
+        
+        # Agent memory search tool - allows LLM to search archived context
+        self.register(
+            name="search_archived_context",
+            description="""Search through archived conversation history stored in {AgentNNNN}.md files. 
+Use this when you need to find information from earlier in a long conversation that may have been archived.
+Also use this to search large project summaries that were too big to fit in context.""",
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "Search terms to find in archived content",
+                    "required": True,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return. Default: 3",
+                    "required": False,
+                }
+            },
+            handler=self._search_agent_files_handler,
+        )
+    
+    async def _search_agent_files_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Search agent memory files"""
+        query = args.get("query", "")
+        max_results = args.get("max_results", 3)
+        
+        if not query:
+            return {"error": "Query is required"}
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "No chat context available"}
+        
+        from app.services.agent_memory import AgentMemoryService
+        
+        db = context["db"]
+        chat_id = context["chat_id"]
+        
+        service = AgentMemoryService()
+        results = await service.search_agent_files(db, chat_id, query, max_results)
+        
+        if not results:
+            return {
+                "found": False,
+                "message": "No matching content found in archived history",
+            }
+        
+        return {
+            "found": True,
+            "results": results,
+        }
     
     async def _calculator_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Safe mathematical expression evaluator"""

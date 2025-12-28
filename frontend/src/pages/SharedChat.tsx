@@ -166,15 +166,17 @@ export default function SharedChat() {
       {/* Header */}
       <header className="border-b border-[var(--color-border)] px-4 py-3">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
-          <div>
-            <a href="/" className="text-lg font-semibold text-[var(--color-text)] hover:text-[var(--color-primary)] transition-colors">
-              {config?.logo_url ? (
-                <img src={config.logo_url} alt={appName} className="h-8" />
-              ) : (
-                appName
-              )}
-            </a>
-          </div>
+          <a href="/" className="flex items-center gap-2 text-lg font-semibold text-[var(--color-text)] hover:text-[var(--color-primary)] transition-colors">
+            {config?.logo_url && (
+              <img 
+                src={config.logo_url} 
+                alt="" 
+                className="h-7 w-7 object-contain rounded"
+                onError={(e) => { e.currentTarget.style.display = 'none'; }}
+              />
+            )}
+            <span>{appName}</span>
+          </a>
           <div className="text-sm text-[var(--color-text-secondary)]">
             Shared Chat
           </div>
@@ -217,13 +219,32 @@ export default function SharedChat() {
             <div key={message.id} className="py-4 px-4">
               <div className="flex items-start gap-3">
                 {/* Avatar */}
-                <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-medium ${
-                  message.role === 'user'
-                    ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
-                    : 'bg-[var(--color-surface)] text-[var(--color-text)] border border-[var(--color-border)]'
-                }`}>
-                  {message.role === 'user' ? userDisplayName.charAt(0).toUpperCase() : 'AI'}
-                </div>
+                {message.role === 'user' ? (
+                  <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-medium bg-[var(--color-button)] text-[var(--color-button-text)]">
+                    {userDisplayName.charAt(0).toUpperCase()}
+                  </div>
+                ) : config?.logo_url ? (
+                  <img 
+                    src={config.logo_url} 
+                    alt="AI" 
+                    className="w-8 h-8 rounded-full flex-shrink-0 object-contain bg-[var(--color-surface)] border border-[var(--color-border)] p-0.5"
+                    onError={(e) => {
+                      // Fall back to text on error
+                      const parent = e.currentTarget.parentElement;
+                      if (parent) {
+                        e.currentTarget.style.display = 'none';
+                        const fallback = document.createElement('div');
+                        fallback.className = 'w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-medium bg-[var(--color-surface)] text-[var(--color-text)] border border-[var(--color-border)]';
+                        fallback.textContent = 'AI';
+                        parent.insertBefore(fallback, e.currentTarget);
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-medium bg-[var(--color-surface)] text-[var(--color-text)] border border-[var(--color-border)]">
+                    AI
+                  </div>
+                )}
                 
                 {/* Content */}
                 <div className="flex-1 min-w-0">

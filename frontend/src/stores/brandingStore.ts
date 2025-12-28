@@ -9,6 +9,12 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+export interface CustomTheme {
+  id: string;
+  name: string;
+  [key: string]: string;  // CSS variables
+}
+
 export interface BrandingConfig {
   app_name: string;
   app_tagline: string;
@@ -18,6 +24,8 @@ export interface BrandingConfig {
   logo_url: string | null;
   logo_text: string;
   default_theme: string;
+  custom_css: string;
+  custom_themes: CustomTheme[];
   brand_colors: {
     primary: string | null;
     secondary: string | null;
@@ -55,6 +63,7 @@ interface BrandingState {
   getAppName: () => string;
   getFaviconUrl: () => string;
   getDefaultTheme: () => string;
+  getCustomThemes: () => CustomTheme[];
 }
 
 const defaultConfig: BrandingConfig = {
@@ -66,6 +75,8 @@ const defaultConfig: BrandingConfig = {
   logo_url: null,
   logo_text: 'Open-NueChat',
   default_theme: 'dark',
+  custom_css: '',
+  custom_themes: [],
   brand_colors: {
     primary: null,
     secondary: null,
@@ -106,13 +117,39 @@ export const useBrandingStore = create<BrandingState>()(
         set({ isLoading: true, error: null });
         
         try {
-          const response = await fetch('/api/branding/config');
+          // Try the admin public branding endpoint first
+          const response = await fetch('/api/admin/public/branding');
           
           if (!response.ok) {
             throw new Error('Failed to load branding config');
           }
           
-          const config = await response.json();
+          const data = await response.json();
+          
+          // Parse custom themes JSON
+          let customThemes: CustomTheme[] = [];
+          try {
+            if (data.custom_themes) {
+              customThemes = JSON.parse(data.custom_themes);
+            }
+          } catch (e) {
+            console.warn('Failed to parse custom themes:', e);
+          }
+          
+          const config: BrandingConfig = {
+            ...defaultConfig,
+            app_name: data.app_name || defaultConfig.app_name,
+            app_tagline: data.app_tagline || defaultConfig.app_tagline,
+            favicon_url: data.favicon_url || defaultConfig.favicon_url,
+            logo_url: data.logo_url || defaultConfig.logo_url,
+            logo_text: data.app_name || defaultConfig.logo_text,
+            custom_css: data.custom_css || '',
+            custom_themes: customThemes,
+            welcome: {
+              title: `Welcome to ${data.app_name || 'Open-NueChat'}!`,
+              message: data.app_tagline || 'Start a conversation with AI.',
+            },
+          };
           
           set({ 
             config, 
@@ -152,6 +189,10 @@ export const useBrandingStore = create<BrandingState>()(
       getDefaultTheme: () => {
         return get().config?.default_theme || defaultConfig.default_theme;
       },
+      
+      getCustomThemes: () => {
+        return get().config?.custom_themes || [];
+      },
     }),
     {
       name: 'nexus-branding',
@@ -171,7 +212,9 @@ function applyBranding(config: BrandingConfig) {
   document.title = config.app_name;
   
   // Update favicon
-  updateFavicon(config.favicon_url);
+  if (config.favicon_url) {
+    updateFavicon(config.favicon_url);
+  }
   
   // Apply brand colors as CSS variables (override theme defaults)
   if (config.brand_colors.primary) {
@@ -184,12 +227,17 @@ function applyBranding(config: BrandingConfig) {
     document.documentElement.style.setProperty('--color-accent', config.brand_colors.accent);
   }
   
+  // Apply custom CSS
+  applyCustomCSS(config.custom_css);
+  
   // Update meta tags
   updateMetaTag('description', config.app_description);
   updateMetaTag('application-name', config.app_name);
 }
 
 function updateFavicon(url: string) {
+  if (!url) return;
+  
   let link = document.querySelector<HTMLLinkElement>("link[rel~='icon']");
   
   if (!link) {
@@ -213,6 +261,22 @@ function updateMetaTag(name: string, content: string) {
   meta.content = content;
 }
 
+function applyCustomCSS(css: string) {
+  // Remove existing custom CSS
+  const existingStyle = document.getElementById('custom-branding-css');
+  if (existingStyle) {
+    existingStyle.remove();
+  }
+  
+  // Add new custom CSS
+  if (css && css.trim()) {
+    const style = document.createElement('style');
+    style.id = 'custom-branding-css';
+    style.textContent = css;
+    document.head.appendChild(style);
+  }
+}
+
 // Export helper hook for easy access
 export function useAppName() {
   return useBrandingStore((state) => state.config?.app_name || 'Open-NueChat');
@@ -224,4 +288,8 @@ export function useBrandingConfig() {
 
 export function useFeatureFlags() {
   return useBrandingStore((state) => state.config?.features || defaultConfig.features);
+}
+
+export function useCustomThemes() {
+  return useBrandingStore((state) => state.config?.custom_themes || []);
 }

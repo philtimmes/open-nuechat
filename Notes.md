@@ -10,7 +10,108 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.89
+**Current Version:** NC-0.6.96
+
+---
+
+## Recent Changes (NC-0.6.96)
+
+### Context Overflow Fix - Agent Files & Search Tool
+
+**Problem:** Large code summaries (888KB) were being injected into system prompt, exceeding context window.
+
+**Solution:**
+1. Large code summaries (>12.8K tokens) are saved to `{AgentCodeSummary}.md` files
+2. Truncated preview injected with notice about agent file
+3. New `search_archived_context` tool lets LLM search agent files
+4. LLM informed it can search for specific functions/classes
+
+**New Tool:**
+- `search_archived_context` - Search through `{AgentNNNN}.md` files for archived conversation history and large code summaries
+
+**Context Size Fix:**
+- `LLMService.context_size` now properly reads from `LLMProvider.context_size` in database
+- Previously was reading from wrong settings table (`model_context_size` key)
+- Added input validation - returns error if input tokens exceed context window
+
+**Files Changed:**
+- `backend/app/services/llm.py`: Added context_size to LLMService, fixed context limit reading
+- `backend/app/api/routes/websocket.py`: Code summary saves overflow to agent files, informs LLM
+- `backend/app/tools/registry.py`: Added search_archived_context tool
+
+---
+
+## Recent Changes (NC-0.6.95)
+
+### Image Generation Detection Fix & Admin Settings
+
+**Problem:** Image generation requests like "Make an image: 1280x720 A surreal image..." were being rejected because a negative regex pattern `\b(this|the)\s+(image|picture|photo|pic|img)\b` matched "The image has a photorealistic style" at the end of the prompt.
+
+**Root Cause:** Redundant detection systems - regex negative patterns AND LLM confirmation both trying to filter. The negative pattern was too broad and killed detection before LLM could run.
+
+**Solution:**
+1. Removed negative regex patterns entirely - LLM confirmation handles false positive filtering
+2. Simple positive regex triggers: `make.*image`, `create.*pic`, etc.
+3. Moved `IMAGE_CONFIRM_WITH_LLM` from .env to admin panel setting
+
+**New Admin Settings (System tab):**
+- `image_confirm_with_llm` - Toggle LLM confirmation (default: true)
+- `image_classification_prompt` - Custom prompt for LLM classifier
+- `image_classification_true_response` - Expected response prefix (default: "YES")
+
+**Detection Flow:**
+1. Regex checks if text contains verb + image word (make/create/generate + image/pic/picture)
+2. If regex matches AND LLM confirmation enabled → LLM confirms/rejects
+3. If LLM errors → falls back to regex result (generate image)
+4. If LLM disabled → use regex result directly
+
+**Files Changed:**
+- `backend/app/services/image_gen.py`: Removed negative patterns, simplified regex
+- `backend/app/api/routes/websocket.py`: Read LLM confirm setting from admin panel
+- `backend/app/api/routes/admin.py`: Added image classification settings to schema
+- `frontend/src/pages/Admin.tsx`: Added UI for image classification settings
+
+---
+
+## Recent Changes (NC-0.6.94)
+
+### Global Knowledge Not Loading on Retry/Regenerate Fix
+
+**Problem:** When users retry/regenerate messages, global knowledge stores were not being searched.
+
+**Root Cause:** `is_tool_result` flag was set based on `save_user_message=False`, which is used for BOTH tool continuations (should skip RAG) and regenerate operations (should NOT skip RAG).
+
+**Solution:** Changed to explicit `is_tool_continuation` flag in payload. Frontend sends this flag only for actual tool result continuations, not for regenerates.
+
+**Files Changed:**
+- `backend/app/api/routes/websocket.py`: Check `is_tool_continuation` instead of `not save_user_message`
+- `frontend/src/contexts/WebSocketContext.tsx`: Added `is_tool_continuation: true` to tool result payloads
+
+---
+
+## Recent Changes (NC-0.6.90)
+
+### Inline Tool Calls with `<$ToolName>` Syntax
+
+Added support for inline tool calls during streaming responses:
+
+**1. Streaming Tool Detection**
+- During streaming, the system now detects `<$tool_name>` patterns
+- Supports parameters: `<$web_search:query=hello world>`
+- When detected, executes the tool and sends `tool_call` / `tool_result` events
+- Allows LLMs to trigger tools mid-response without native function calling
+
+**2. New `call_tool` Primitive for Filter Chains**
+- Simpler alternative to `to_tool` for common use cases
+- String format: `{"type": "call_tool", "config": "web_search"}`
+- Object format: `{"type": "call_tool", "config": {"name": "web_search", "query": "{Query}"}}`
+- Automatically uses `$Query` or `$PreviousResult` if no query specified
+
+**Files Changed:**
+- `backend/app/services/websocket.py`: Added tool call detection in StreamingHandler
+- `backend/app/filters/executor.py`: Added `_prim_call_tool` primitive
+- `backend/app/api/routes/filter_chains.py`: Added `call_tool` to step type schema
+- `backend/app/api/routes/websocket.py`: Pass tool executor to start_stream
 
 ---
 
@@ -32,9 +133,21 @@ Full-stack LLM chat application with:
 - Source sort: "Local" expanded by default
 - Improves UX by showing most relevant chats immediately
 
+**4. API Key as URL Parameter**
+All OpenAI-compatible v1 endpoints now accept API key via query parameter:
+- `GET /v1/models?api_key=nxs_...`
+- `POST /v1/chat/completions?api_key=nxs_...`
+- `POST /v1/images/generations?api_key=nxs_...`
+- `POST /v1/embeddings?api_key=nxs_...`
+
+This allows easier testing and integration where setting headers is difficult.
+Authorization header still works: `Authorization: Bearer nxs_...`
+
 **Files Changed:**
 - `backend/app/api/routes/chats.py`: Fixed create_chat decorator, lenient model validation
 - `backend/app/main.py`: Added `/api/models/validate/{model_id}` endpoint
+- `backend/app/api/routes/api_keys.py`: `get_api_key_user` now accepts `?api_key=` query param
+- `backend/app/api/routes/v1/*.py`: Updated docstrings documenting query parameter auth
 - `frontend/src/components/Sidebar.tsx`: Default expanded sections
 
 ---
@@ -1539,7 +1652,8 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
-| NC-0.6.89 | 2025-12-25 | Fix new chat broken, add model validation, Today expanded by default |
+| NC-0.6.90 | 2025-12-26 | Inline tool calls with `<$ToolName>` syntax, call_tool primitive |
+| NC-0.6.89 | 2025-12-25 | Fix new chat, model validation, Today expanded, API key as URL param |
 | NC-0.6.88 | 2025-12-25 | Fix chats disappearing on refresh - auto-load all, larger page size |
 | NC-0.6.87 | 2025-12-25 | All sidebar sections expanded by default, nested button fix, double-confirm delete |
 | NC-0.6.86 | 2025-12-25 | Fix sidebar date grouping to use calendar days not hours |
@@ -1659,7 +1773,7 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.89**
+Current: **NC-0.6.90**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 

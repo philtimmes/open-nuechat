@@ -636,6 +636,9 @@ function MessageBubbleInner({
           {message.input_tokens != null && message.output_tokens != null && (
             <span className="text-sm md:text-xs text-[var(--color-text-secondary)]">
               · {message.input_tokens + message.output_tokens} tokens
+              {message.time_to_first_token != null && message.time_to_complete != null && message.output_tokens > 0 && (
+                <> · {(message.time_to_first_token / 1000).toFixed(2)}s TTFT · {(message.time_to_complete / 1000).toFixed(2)}s total · {(message.output_tokens / (message.time_to_complete / 1000)).toFixed(1)} t/s</>
+              )}
             </span>
           )}
           

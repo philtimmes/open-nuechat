@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuthStore } from '../stores/authStore';
 import { useChatStore } from '../stores/chatStore';
 import { useThemeStore } from '../stores/themeStore';
@@ -93,7 +93,19 @@ export default function Settings() {
   const [savingKey, setSavingKey] = useState(false);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{ success: boolean; chats: number; messages: number; errors: string[] } | null>(null);
   const [deletingAllChats, setDeletingAllChats] = useState(false);
+  const importFileRef = useRef<HTMLInputElement>(null);
+  
+  // Password change state
+  const [showPasswordChange, setShowPasswordChange] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState(false);
   
   // Export all user data
   const handleExportData = async () => {
@@ -128,6 +140,49 @@ export default function Settings() {
     }
   };
   
+  // Import user data from export file
+  const handleImportData = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    setImporting(true);
+    setImportResult(null);
+    
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const response = await api.post('/user/import-data', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      
+      setImportResult({
+        success: response.data.success,
+        chats: response.data.chats_imported,
+        messages: response.data.messages_imported,
+        errors: response.data.errors || []
+      });
+      
+      // Refresh chat list
+      await fetchChats(false);
+      
+    } catch (err: any) {
+      console.error('Import failed:', err);
+      setImportResult({
+        success: false,
+        chats: 0,
+        messages: 0,
+        errors: [err.response?.data?.detail || 'Import failed. Please check the file format.']
+      });
+    } finally {
+      setImporting(false);
+      // Reset file input
+      if (importFileRef.current) {
+        importFileRef.current.value = '';
+      }
+    }
+  };
+  
   // Delete all chats
   const handleDeleteAllChats = async () => {
     if (!confirm('Are you sure you want to delete ALL your chats? This action cannot be undone.')) {
@@ -155,6 +210,44 @@ export default function Settings() {
       alert(err.response?.data?.detail || 'Failed to delete chats. Please try again.');
     } finally {
       setDeletingAllChats(false);
+    }
+  };
+  
+  // Handle password change
+  const handleChangePassword = async () => {
+    setPasswordError(null);
+    setPasswordSuccess(false);
+    
+    // Validate
+    if (newPassword.length < 8) {
+      setPasswordError('New password must be at least 8 characters');
+      return;
+    }
+    
+    if (newPassword !== confirmPassword) {
+      setPasswordError('Passwords do not match');
+      return;
+    }
+    
+    setChangingPassword(true);
+    try {
+      await api.post('/auth/change-password', {
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+      
+      setPasswordSuccess(true);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setShowPasswordChange(false);
+      
+      // Auto-hide success after 3 seconds
+      setTimeout(() => setPasswordSuccess(false), 3000);
+    } catch (err: any) {
+      setPasswordError(err.response?.data?.detail || 'Failed to change password');
+    } finally {
+      setChangingPassword(false);
     }
   };
   
@@ -578,6 +671,95 @@ export default function Settings() {
                   </p>
                 </div>
               </div>
+            </section>
+            
+            {/* Password section */}
+            <section className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+              <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Password</h2>
+              
+              {passwordSuccess && (
+                <div className="mb-4 p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-400">
+                  ✓ Password changed successfully
+                </div>
+              )}
+              
+              {!showPasswordChange ? (
+                <button
+                  onClick={() => setShowPasswordChange(true)}
+                  className="px-4 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-zinc-700/30 transition-colors"
+                >
+                  Change Password
+                </button>
+              ) : (
+                <div className="space-y-4">
+                  {passwordError && (
+                    <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
+                      {passwordError}
+                    </div>
+                  )}
+                  
+                  <div>
+                    <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                      Current Password
+                    </label>
+                    <input
+                      type="password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                      placeholder="Enter current password"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                      New Password
+                    </label>
+                    <input
+                      type="password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                      placeholder="At least 8 characters"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                      Confirm New Password
+                    </label>
+                    <input
+                      type="password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                      placeholder="Confirm new password"
+                    />
+                  </div>
+                  
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleChangePassword}
+                      disabled={changingPassword}
+                      className="px-4 py-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 transition-colors disabled:opacity-50"
+                    >
+                      {changingPassword ? 'Saving...' : 'Save Password'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowPasswordChange(false);
+                        setCurrentPassword('');
+                        setNewPassword('');
+                        setConfirmPassword('');
+                        setPasswordError(null);
+                      }}
+                      className="px-4 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-zinc-700/30 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
             </section>
             
             {/* Danger zone */}
@@ -1398,9 +1580,80 @@ export default function Settings() {
                       Exporting...
                     </>
                   ) : (
-                    'Export All Data'
+                    <>
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      Export All Data
+                    </>
                   )}
                 </button>
+                
+                {/* Import button */}
+                <div className="mt-4">
+                  <input
+                    ref={importFileRef}
+                    type="file"
+                    accept=".zip,.json"
+                    onChange={handleImportData}
+                    className="hidden"
+                  />
+                  <button 
+                    onClick={() => importFileRef.current?.click()}
+                    disabled={importing}
+                    className="px-4 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-zinc-700/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  >
+                    {importing ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Importing...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                        </svg>
+                        Import Data
+                      </>
+                    )}
+                  </button>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                    Import chats from a previously exported ZIP or JSON file
+                  </p>
+                </div>
+                
+                {/* Import result notification */}
+                {importResult && (
+                  <div className={`mt-3 p-3 rounded-lg border ${
+                    importResult.success 
+                      ? 'bg-green-500/10 border-green-500/30 text-green-400'
+                      : 'bg-red-500/10 border-red-500/30 text-red-400'
+                  }`}>
+                    {importResult.success ? (
+                      <div>
+                        <div className="font-medium">✓ Import successful</div>
+                        <div className="text-sm mt-1">
+                          Imported {importResult.chats} chat{importResult.chats !== 1 ? 's' : ''} with {importResult.messages} message{importResult.messages !== 1 ? 's' : ''}
+                        </div>
+                        {importResult.errors.length > 0 && (
+                          <div className="text-sm mt-1 text-yellow-400">
+                            {importResult.errors.length} warning{importResult.errors.length !== 1 ? 's' : ''}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="font-medium">✗ Import failed</div>
+                        {importResult.errors.map((err, i) => (
+                          <div key={i} className="text-sm mt-1">{err}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </section>
           </div>

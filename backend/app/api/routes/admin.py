@@ -1,11 +1,15 @@
 """
 Admin routes for system settings management
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 from typing import Optional, List
+from pathlib import Path
 import json
+import uuid
+import shutil
 
 from app.api.dependencies import get_current_user, get_db
 from app.models.models import User, SystemSetting, UserTier, Chat, Message
@@ -14,6 +18,49 @@ from app.services.billing import BillingService
 from sqlalchemy import select, func, or_
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def get_branding_dir() -> Path:
+    """
+    Get the branding assets directory, located in the same directory as the database.
+    This ensures branding images persist with the database.
+    """
+    # Parse database path from DATABASE_URL
+    # Format: sqlite+aiosqlite:///./data/nuechat.db or sqlite+aiosqlite:////absolute/path/nuechat.db
+    db_url = settings.DATABASE_URL
+    
+    if "sqlite" in db_url:
+        # Extract path after sqlite+aiosqlite:///
+        if ":///" in db_url:
+            db_path = db_url.split(":///", 1)[1]
+            # Handle relative vs absolute paths
+            if db_path.startswith("/"):
+                # Absolute path (4 slashes total: sqlite+aiosqlite:////path)
+                db_dir = Path(db_path).parent
+            else:
+                # Relative path (3 slashes: sqlite+aiosqlite:///./data/db)
+                db_dir = Path(db_path).parent
+        else:
+            # Fallback to default
+            db_dir = Path("./data")
+    else:
+        # Non-SQLite database - use a default data directory
+        db_dir = Path("./data")
+    
+    branding_dir = db_dir / "branding_assets"
+    branding_dir.mkdir(parents=True, exist_ok=True)
+    return branding_dir
+
+
+# Directory for branding assets - lazily initialized
+_branding_dir: Optional[Path] = None
+
+def get_branding_assets_dir() -> Path:
+    """Get or create the branding assets directory."""
+    global _branding_dir
+    if _branding_dir is None:
+        _branding_dir = get_branding_dir()
+    return _branding_dir
 
 
 # Default tier configuration
@@ -129,6 +176,14 @@ SETTING_DEFAULTS = {
     "google_pay_enabled": "false",
     "google_pay_merchant_id": settings.GOOGLE_PAY_MERCHANT_ID or "",
     "google_pay_merchant_name": settings.GOOGLE_PAY_MERCHANT_NAME or "NueChat",
+    
+    # Branding
+    "app_name": "Open-NueChat",
+    "app_tagline": "AI-Powered Chat",
+    "favicon_url": "",
+    "logo_url": "",
+    "custom_css": "",
+    "custom_themes": "[]",
 }
 
 
@@ -184,6 +239,11 @@ class SystemSettingsSchema(BaseModel):
     all_models_prompt: str = ""  # Appended to all system prompts including Custom GPTs
     title_generation_prompt: str
     rag_context_prompt: str
+    
+    # Image classification
+    image_confirm_with_llm: bool = True  # Whether to use LLM to confirm image requests
+    image_classification_prompt: str = ""
+    image_classification_true_response: str = "YES"
     
     # Pricing
     input_token_price: float
@@ -281,6 +341,16 @@ class APIRateLimitsSchema(BaseModel):
     api_rate_limit_models: int = Field(default=100, ge=1, le=1000, description="Model list requests per minute")
 
 
+class BrandingSettingsSchema(BaseModel):
+    """Branding and customization settings"""
+    app_name: str = Field(default="Open-NueChat", description="Application name")
+    app_tagline: str = Field(default="AI-Powered Chat", description="Application tagline")
+    favicon_url: str = Field(default="", description="URL to favicon")
+    logo_url: str = Field(default="", description="URL to logo image")
+    custom_css: str = Field(default="", description="Custom CSS rules")
+    custom_themes: str = Field(default="[]", description="JSON array of custom themes")
+
+
 class TiersSchema(BaseModel):
     """Pricing tiers configuration"""
     tiers: List[TierConfig]
@@ -369,11 +439,15 @@ async def get_admin_settings(
     db: AsyncSession = Depends(get_db),
 ):
     """Get all system settings"""
+    image_confirm_setting = await get_system_setting(db, "image_confirm_with_llm")
     return SystemSettingsSchema(
         default_system_prompt=await get_system_setting(db, "default_system_prompt"),
         all_models_prompt=await get_system_setting(db, "all_models_prompt"),
         title_generation_prompt=await get_system_setting(db, "title_generation_prompt"),
         rag_context_prompt=await get_system_setting(db, "rag_context_prompt"),
+        image_confirm_with_llm=image_confirm_setting.lower() == "true" if image_confirm_setting else True,
+        image_classification_prompt=await get_system_setting(db, "image_classification_prompt") or "",
+        image_classification_true_response=await get_system_setting(db, "image_classification_true_response") or "YES",
         input_token_price=await get_system_setting_float(db, "input_token_price"),
         output_token_price=await get_system_setting_float(db, "output_token_price"),
         token_refill_interval_hours=await get_system_setting_int(db, "token_refill_interval_hours"),
@@ -399,6 +473,9 @@ async def update_admin_settings(
     await set_setting(db, "all_models_prompt", data.all_models_prompt)
     await set_setting(db, "title_generation_prompt", data.title_generation_prompt)
     await set_setting(db, "rag_context_prompt", data.rag_context_prompt)
+    await set_setting(db, "image_confirm_with_llm", "true" if data.image_confirm_with_llm else "false")
+    await set_setting(db, "image_classification_prompt", data.image_classification_prompt)
+    await set_setting(db, "image_classification_true_response", data.image_classification_true_response)
     await set_setting(db, "input_token_price", str(data.input_token_price))
     await set_setting(db, "output_token_price", str(data.output_token_price))
     await set_setting(db, "token_refill_interval_hours", str(data.token_refill_interval_hours))
@@ -414,6 +491,152 @@ async def update_admin_settings(
     await db.commit()
     
     return data
+
+
+# =============================================================================
+# BRANDING SETTINGS
+# =============================================================================
+
+@router.get("/settings/branding", response_model=BrandingSettingsSchema)
+async def get_branding_settings(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get branding settings"""
+    return BrandingSettingsSchema(
+        app_name=await get_system_setting(db, "app_name"),
+        app_tagline=await get_system_setting(db, "app_tagline"),
+        favicon_url=await get_system_setting(db, "favicon_url"),
+        logo_url=await get_system_setting(db, "logo_url"),
+        custom_css=await get_system_setting(db, "custom_css"),
+        custom_themes=await get_system_setting(db, "custom_themes"),
+    )
+
+
+@router.post("/settings/branding", response_model=BrandingSettingsSchema)
+async def update_branding_settings(
+    data: BrandingSettingsSchema,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update branding settings"""
+    await set_setting(db, "app_name", data.app_name)
+    await set_setting(db, "app_tagline", data.app_tagline)
+    await set_setting(db, "favicon_url", data.favicon_url)
+    await set_setting(db, "logo_url", data.logo_url)
+    await set_setting(db, "custom_css", data.custom_css)
+    await set_setting(db, "custom_themes", data.custom_themes)
+    
+    await db.commit()
+    
+    return data
+
+
+@router.post("/settings/branding/favicon")
+async def upload_favicon(
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a favicon image (PNG, JPG, ICO, or SVG)"""
+    # Validate file type
+    allowed_types = ["image/png", "image/jpeg", "image/x-icon", "image/svg+xml", "image/vnd.microsoft.icon"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type. Allowed: PNG, JPG, ICO, SVG"
+        )
+    
+    # Validate file size (max 1MB)
+    contents = await file.read()
+    if len(contents) > 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File too large. Maximum size is 1MB"
+        )
+    
+    # Determine extension
+    ext_map = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/x-icon": ".ico",
+        "image/vnd.microsoft.icon": ".ico",
+        "image/svg+xml": ".svg",
+    }
+    ext = ext_map.get(file.content_type, ".png")
+    
+    # Save file with unique name
+    filename = f"favicon{ext}"
+    filepath = get_branding_assets_dir() / filename
+    
+    with open(filepath, "wb") as f:
+        f.write(contents)
+    
+    # Update favicon_url setting to point to the uploaded file
+    favicon_url = f"/api/admin/branding/favicon{ext}"
+    await set_setting(db, "favicon_url", favicon_url)
+    await db.commit()
+    
+    return {"url": favicon_url, "filename": filename}
+
+
+@router.post("/settings/branding/logo")
+async def upload_logo(
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a logo image (PNG, JPG, or SVG)"""
+    # Validate file type
+    allowed_types = ["image/png", "image/jpeg", "image/svg+xml"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid file type. Allowed: PNG, JPG, SVG"
+        )
+    
+    # Validate file size (max 2MB)
+    contents = await file.read()
+    if len(contents) > 2 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File too large. Maximum size is 2MB"
+        )
+    
+    # Determine extension
+    ext_map = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/svg+xml": ".svg",
+    }
+    ext = ext_map.get(file.content_type, ".png")
+    
+    # Save file
+    filename = f"logo{ext}"
+    filepath = get_branding_assets_dir() / filename
+    
+    with open(filepath, "wb") as f:
+        f.write(contents)
+    
+    # Update logo_url setting
+    logo_url = f"/api/admin/branding/logo{ext}"
+    await set_setting(db, "logo_url", logo_url)
+    await db.commit()
+    
+    return {"url": logo_url, "filename": filename}
+
+
+@router.get("/branding/{filename}")
+async def serve_branding_asset(filename: str):
+    """Serve uploaded branding assets (favicon, logo)"""
+    # Sanitize filename to prevent directory traversal
+    safe_filename = Path(filename).name
+    filepath = get_branding_assets_dir() / safe_filename
+    
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    return FileResponse(filepath)
 
 
 # =============================================================================
@@ -830,6 +1053,21 @@ async def get_public_tiers(
     return TiersSchema(tiers=[TierConfig(**t) for t in tiers])
 
 
+@router.get("/public/branding", response_model=BrandingSettingsSchema)
+async def get_public_branding(
+    db: AsyncSession = Depends(get_db),
+):
+    """Get branding settings (public endpoint for frontend)"""
+    return BrandingSettingsSchema(
+        app_name=await get_system_setting(db, "app_name"),
+        app_tagline=await get_system_setting(db, "app_tagline"),
+        favicon_url=await get_system_setting(db, "favicon_url"),
+        logo_url=await get_system_setting(db, "logo_url"),
+        custom_css=await get_system_setting(db, "custom_css"),
+        custom_themes=await get_system_setting(db, "custom_themes"),
+    )
+
+
 # =============================================================================
 # USER MANAGEMENT
 # =============================================================================
@@ -862,6 +1100,11 @@ class UserUpdateRequest(BaseModel):
     is_admin: Optional[bool] = None
     is_active: Optional[bool] = None
     tokens_limit: Optional[int] = None
+
+
+class SetUserPasswordRequest(BaseModel):
+    """Request to set user password (admin only)"""
+    password: str
 
 
 class TokenResetResponse(BaseModel):
@@ -1003,6 +1246,43 @@ async def update_user(
         "is_admin": target_user.is_admin,
         "is_active": target_user.is_active,
         "tokens_limit": target_user.tokens_limit,
+    }
+
+
+@router.post("/users/{user_id}/set-password")
+async def set_user_password(
+    user_id: str,
+    data: SetUserPasswordRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a user's password (admin only). For non-OAuth users."""
+    from app.services.auth import AuthService
+    
+    result = await db.execute(select(User).where(User.id == user_id))
+    target_user = result.scalar_one_or_none()
+    
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Validate password length
+    if len(data.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters"
+        )
+    
+    # Hash and set the new password
+    target_user.hashed_password = AuthService.hash_password(data.password)
+    
+    await db.commit()
+    
+    return {
+        "message": f"Password updated for user {target_user.email}",
+        "user_id": target_user.id,
     }
 
 

@@ -314,7 +314,53 @@ async def handle_chat_message(
             return
         
         # Check if this is an image generation request (with LLM confirmation)
-        is_image_request, image_prompt = await detect_image_request_async(content, db)
+        try:
+            logger.info(f"[IMAGE_DETECT] Checking if image request: '{content[:60]}...'")
+            
+            # Import and call with inline debugging
+            from app.services.image_gen import detect_image_request_regex, extract_image_prompt, confirm_image_request_with_llm
+            from app.api.routes.admin import get_system_setting
+            
+            # Get LLM confirmation setting from admin panel (not env var)
+            image_llm_confirm_setting = await get_system_setting(db, "image_confirm_with_llm")
+            use_llm_confirm = image_llm_confirm_setting.lower() == "true" if image_llm_confirm_setting else True  # Default to True
+            logger.info(f"[IMAGE_DETECT] LLM confirmation enabled: {use_llm_confirm}")
+            
+            # Step 1: Regex check
+            regex_match, regex_prompt = detect_image_request_regex(content)
+            logger.info(f"[IMAGE_DETECT] Regex result: match={regex_match}")
+            
+            if not regex_match:
+                is_image_request = False
+                image_prompt = None
+            else:
+                # Step 2: LLM confirmation if enabled
+                if use_llm_confirm:
+                    logger.info("[IMAGE_DETECT] Calling LLM for confirmation...")
+                    llm_result, llm_prompt, was_error = await confirm_image_request_with_llm(content, db)
+                    logger.info(f"[IMAGE_DETECT] LLM result: {llm_result}, error={was_error}")
+                    
+                    if was_error:
+                        # LLM error - fall back to regex result
+                        is_image_request = True
+                        image_prompt = extract_image_prompt(regex_prompt)
+                    elif llm_result:
+                        is_image_request = True
+                        image_prompt = llm_prompt if llm_prompt else extract_image_prompt(regex_prompt)
+                    else:
+                        is_image_request = False
+                        image_prompt = None
+                else:
+                    logger.info("[IMAGE_DETECT] LLM disabled, using regex result")
+                    is_image_request = True
+                    image_prompt = extract_image_prompt(regex_prompt)
+            
+            logger.info(f"[IMAGE_DETECT] Final result: is_image_request={is_image_request}, prompt_len={len(image_prompt) if image_prompt else 0}")
+        except Exception as e:
+            logger.error(f"[IMAGE_DETECT] Exception during detection: {e}", exc_info=True)
+            is_image_request = False
+            image_prompt = None
+        
         if is_image_request:
             logger.debug(f"Image generation request detected: {content[:100]}...")
             
@@ -643,9 +689,10 @@ async def handle_chat_message(
         rag_had_results = False
         import time
         
-        # Skip RAG for tool result continuations (save_user_message=False)
-        # These are system-generated responses that don't need knowledge retrieval
-        is_tool_result = not save_user_message
+        # Determine if this is a tool result continuation vs a regenerate/retry
+        # Tool continuations have is_tool_continuation=True in payload
+        # Regenerates have save_user_message=False but are NOT tool continuations
+        is_tool_result = payload.get("is_tool_continuation", False)
         
         # 1. Global Knowledge Base search (automatic, independent of user RAG settings)
         # Skip for tool results to avoid unnecessary searches and potential GPU issues
@@ -1000,64 +1047,170 @@ The following is relevant information from your previous conversations:
                 logger.warning(f"Failed to get procedural memory context: {e}")
         
         # Inject zip manifest if provided in payload (preferred) or from DB (fallback)
+        # Large manifests are saved to {AgentNNNN}.md files
         zip_context = payload.get("zip_context")
-        if zip_context:
-            system_prompt = f"{system_prompt}\n\n{zip_context}"
-            logger.debug(f"Injected zip context from payload for chat {chat_id} ({len(zip_context)} chars)")
-        else:
+        if not zip_context:
             # Fallback to database
             from app.api.routes.chats import get_zip_manifest_from_db
-            zip_manifest = await get_zip_manifest_from_db(db, chat_id)
-            if zip_manifest:
-                system_prompt = f"{system_prompt}\n\n{zip_manifest}"
-                logger.debug(f"Injected zip manifest from DB for chat {chat_id} ({len(zip_manifest)} chars)")
+            zip_context = await get_zip_manifest_from_db(db, chat_id)
+        
+        if zip_context:
+            from app.services.agent_memory import (
+                AgentMemoryService, estimate_tokens,
+                AGENT_FILE_PREFIX, AGENT_FILE_SUFFIX
+            )
+            from app.models.models import UploadedFile
+            
+            zip_tokens = estimate_tokens(zip_context)
+            max_zip_tokens = 12800  # ~50KB limit
+            
+            if zip_tokens > max_zip_tokens:
+                # Save full manifest to agent file
+                service = AgentMemoryService()
+                file_num = await service.get_next_agent_number(db, chat_id)
+                agent_filename = f"{AGENT_FILE_PREFIX}{file_num:04d}{AGENT_FILE_SUFFIX}"
+                
+                # Check if zip manifest agent file already exists
+                existing = await db.execute(
+                    select(UploadedFile)
+                    .where(UploadedFile.chat_id == chat_id)
+                    .where(UploadedFile.filepath.like(f"{AGENT_FILE_PREFIX}%"))
+                    .where(UploadedFile.content.like("%PROJECT FILES%"))
+                    .limit(1)
+                )
+                agent_file = existing.scalar_one_or_none()
+                
+                if not agent_file:
+                    agent_file = UploadedFile(
+                        chat_id=chat_id,
+                        filepath=agent_filename,
+                        filename=agent_filename,
+                        extension=".md",
+                        size=len(zip_context),
+                        content=zip_context,
+                    )
+                    db.add(agent_file)
+                    await db.commit()
+                    logger.info(f"[ZIP_MANIFEST] Saved full manifest to {agent_filename} ({zip_tokens} tokens)")
+                else:
+                    agent_filename = agent_file.filepath
+                
+                # Inject truncated manifest with notice
+                truncated = zip_context[:20000]  # First ~5K tokens
+                if len(zip_context) > 20000:
+                    truncated += f"\n\n... [TRUNCATED - Full manifest ({zip_tokens} tokens) saved to {agent_filename}]\n"
+                    truncated += "Use search_archived_context tool to find specific files/code."
+                
+                system_prompt = f"{system_prompt}\n\n{truncated}"
+                logger.debug(f"Injected truncated zip manifest for chat {chat_id} ({len(truncated)} chars, full={zip_tokens} tokens)")
             else:
-                logger.debug(f"No zip context found for chat {chat_id}")
+                system_prompt = f"{system_prompt}\n\n{zip_context}"
+                logger.debug(f"Injected zip manifest for chat {chat_id} ({len(zip_context)} chars)")
         
         # Inject code summary if available (provides overview of project structure)
+        # Large summaries are stored in {AgentNNNN}.md files for LLM to search
         if chat.code_summary:
             try:
-                summary = chat.code_summary
-                summary_lines = ["[PROJECT_CODE_SUMMARY]"]
+                from app.services.agent_memory import (
+                    AgentMemoryService, estimate_tokens, 
+                    AGENT_FILE_PREFIX, AGENT_FILE_SUFFIX
+                )
+                from app.models.models import UploadedFile
                 
-                # Include file signatures
+                summary = chat.code_summary
                 files = summary.get("files", [])
-                if files:
-                    summary_lines.append("\nFiles with signatures:")
-                    for file_entry in files[:20]:  # Limit to 20 files
-                        # Support both "filename" and "path" field names
+                
+                # Build full summary text
+                full_summary_lines = ["# Project Code Summary\n"]
+                full_summary_lines.append(f"Total files: {len(files)}\n")
+                
+                for file_entry in files:
+                    fname = file_entry.get("filename") or file_entry.get("path", "unknown")
+                    sigs = file_entry.get("signatures", [])
+                    full_summary_lines.append(f"\n## {fname}")
+                    for sig in sigs:
+                        kind = sig.get("kind") or sig.get("type", "")
+                        name = sig.get("name", "")
+                        line = sig.get("line", 0)
+                        full_summary_lines.append(f"- {kind} {name} (line {line})")
+                
+                # Add warnings
+                if summary.get("warnings"):
+                    full_summary_lines.append("\n## Warnings")
+                    for warning in summary.get("warnings", []):
+                        full_summary_lines.append(f"- {warning.get('message', 'Unknown')}")
+                
+                full_summary = "\n".join(full_summary_lines)
+                full_tokens = estimate_tokens(full_summary)
+                
+                # Max 10% of context for code summary
+                max_summary_tokens = 12800  # ~50KB - reasonable limit
+                
+                if full_tokens > max_summary_tokens:
+                    # Store full summary in agent file with number
+                    service = AgentMemoryService()
+                    file_num = await service.get_next_agent_number(db, chat_id)
+                    agent_filename = f"{AGENT_FILE_PREFIX}{file_num:04d}{AGENT_FILE_SUFFIX}"
+                    
+                    # Check if code summary agent file already exists
+                    existing = await db.execute(
+                        select(UploadedFile)
+                        .where(UploadedFile.chat_id == chat_id)
+                        .where(UploadedFile.filepath.like(f"{AGENT_FILE_PREFIX}%"))
+                        .where(UploadedFile.content.like("%# Project Code Summary%"))
+                        .limit(1)
+                    )
+                    agent_file = existing.scalar_one_or_none()
+                    
+                    if not agent_file:
+                        # Create agent file
+                        agent_file = UploadedFile(
+                            chat_id=chat_id,
+                            filepath=agent_filename,
+                            filename=agent_filename,
+                            extension=".md",
+                            size=len(full_summary),
+                            content=full_summary,
+                        )
+                        db.add(agent_file)
+                        await db.commit()
+                        logger.info(f"[CODE_SUMMARY] Saved full summary to {agent_filename} ({full_tokens} tokens)")
+                    
+                    # Inject truncated summary with notice about agent file
+                    truncated_lines = ["[PROJECT_CODE_SUMMARY]"]
+                    truncated_lines.append(f"\nThis project has {len(files)} files with code signatures.")
+                    truncated_lines.append(f"Full summary is stored in {agent_filename} ({full_tokens} tokens).")
+                    truncated_lines.append("Use search_archived_context tool to find specific functions/classes.")
+                    truncated_lines.append("\nTop files preview:")
+                    
+                    # Add first few files
+                    for file_entry in files[:10]:
                         fname = file_entry.get("filename") or file_entry.get("path", "unknown")
                         sigs = file_entry.get("signatures", [])
                         if sigs:
-                            summary_lines.append(f"\n  {fname}:")
-                            for sig in sigs[:10]:  # Limit signatures per file
-                                # Support both "kind" and "type" field names
+                            truncated_lines.append(f"\n  {fname}:")
+                            for sig in sigs[:5]:
                                 kind = sig.get("kind") or sig.get("type", "")
                                 name = sig.get("name", "")
-                                line = sig.get("line", 0)
-                                summary_lines.append(f"    - {kind} {name} (line {line})")
-                            if len(sigs) > 10:
-                                summary_lines.append(f"    ... and {len(sigs) - 10} more")
+                                truncated_lines.append(f"    - {kind} {name}")
+                            if len(sigs) > 5:
+                                truncated_lines.append(f"    ... and {len(sigs) - 5} more")
+                    
+                    if len(files) > 10:
+                        truncated_lines.append(f"\n  ... and {len(files) - 10} more files")
+                    
+                    truncated_lines.append("\n[END_PROJECT_CODE_SUMMARY]")
+                    summary_context = "\n".join(truncated_lines)
+                else:
+                    # Small enough to include directly
+                    summary_context = f"[PROJECT_CODE_SUMMARY]\n{full_summary}\n[END_PROJECT_CODE_SUMMARY]"
                 
-                # Include warnings
-                if summary.get("warnings"):
-                    summary_lines.append("\nCode warnings detected:")
-                    for warning in summary.get("warnings", [])[:10]:
-                        warning_type = warning.get('type', '')
-                        warning_msg = warning.get('message', 'Unknown warning')
-                        summary_lines.append(f"  - {warning_msg}")
-                        
-                        # Include error summary for log_error type warnings
-                        if warning_type == 'log_error' and warning.get('errorSummary'):
-                            summary_lines.append(f"\n{warning.get('errorSummary')}")
-                
-                summary_lines.append("\n[END_PROJECT_CODE_SUMMARY]")
-                
-                summary_context = "\n".join(summary_lines)
                 system_prompt = f"{system_prompt}\n\n{summary_context}"
-                logger.debug(f"Injected code summary for chat {chat_id} ({len(summary_context)} chars)")
+                logger.debug(f"Injected code summary for chat {chat_id} ({len(summary_context)} chars, full={full_tokens} tokens)")
             except Exception as e:
                 logger.warning(f"Failed to inject code summary: {e}")
+                import traceback
+                logger.warning(traceback.format_exc())
         
         # ==== PROCESS LARGE FILE ATTACHMENTS ====
         # If attachments are too large for context, store as searchable artifacts
@@ -1183,7 +1336,8 @@ The following is relevant information from your previous conversations:
         logger.info(f"[PRE_STREAM] Generated assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}")
         
         # Notify frontend of the message ID BEFORE streaming starts
-        await streaming_handler.start_stream(assistant_message_id, chat_id)
+        # Pass execute_tool for inline tool call detection (e.g., <$web_search>)
+        await streaming_handler.start_stream(assistant_message_id, chat_id, tool_executor=execute_tool)
         
         try:
             # Log content being sent to LLM

@@ -50,12 +50,14 @@ class LLMService:
         timeout: Optional[int] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        context_size: Optional[int] = None,
     ):
         self.base_url = base_url or settings.LLM_API_BASE_URL
         self.api_key = api_key or settings.LLM_API_KEY
         self.timeout = timeout or settings.LLM_TIMEOUT
         self.max_tokens = max_tokens or settings.LLM_MAX_TOKENS
         self.temperature = temperature or settings.LLM_TEMPERATURE
+        self.context_size = context_size or 128000  # Default 128k
         
         # Use httpx.Timeout for granular control:
         # - connect: initial connection timeout
@@ -100,13 +102,14 @@ class LLMService:
             provider = result.scalar_one_or_none()
             
             if provider:
-                logger.info(f"[LLM] Using provider: {provider.name} ({provider.model_id})")
+                logger.info(f"[LLM] Using provider: {provider.name} ({provider.model_id}), context_size={provider.context_size}")
                 return cls(
                     base_url=provider.base_url,
                     api_key=provider.api_key,
                     timeout=provider.timeout,
                     max_tokens=provider.max_tokens,
                     temperature=float(provider.temperature) if provider.temperature else 0.7,
+                    context_size=provider.context_size,
                 )
         except Exception as e:
             logger.debug(f"[LLM] Provider lookup failed, using legacy settings: {e}")
@@ -240,7 +243,7 @@ class LLMService:
         # Dynamic max_tokens cap to prevent context overflow
         from app.services.agent_memory import estimate_message_tokens
         estimated_input = estimate_message_tokens(messages)
-        model_context_size = 524288  # Conservative default
+        model_context_size = self.context_size  # Use provider's context_size
         requested_max = max_tokens or self.max_tokens
         available = model_context_size - estimated_input - 1000
         effective_max_tokens = max(1000, min(requested_max, available))
@@ -409,17 +412,10 @@ class LLMService:
         
         # Dynamic max_tokens calculation to prevent context overflow
         from app.services.agent_memory import estimate_message_tokens
-        from app.services.settings_service import SettingsService
         estimated_input_tokens = estimate_message_tokens(messages)
         
-        # Get model context size
-        model_context_size = 524288  # Default 512k
-        try:
-            context_setting = await SettingsService.get(db, "model_context_size")
-            if context_setting:
-                model_context_size = int(context_setting)
-        except:
-            pass
+        # Use context_size from LLMService (set from provider or default)
+        model_context_size = self.context_size
         
         available_for_output = model_context_size - estimated_input_tokens - 1000
         effective_max_tokens = max(1000, min(self.max_tokens, available_for_output))
@@ -751,15 +747,17 @@ class LLMService:
             from app.services.agent_memory import estimate_message_tokens
             estimated_input_tokens = estimate_message_tokens(messages)
             
-            # Get model context size (default 128k, but large models can be 512k+)
-            # Use a conservative default if not set
-            model_context_size = 524288  # 512k tokens for large models
-            try:
-                context_setting = await SettingsService.get(db, "model_context_size")
-                if context_setting:
-                    model_context_size = int(context_setting)
-            except:
-                pass
+            # Use context_size from LLMService (set from provider or default)
+            model_context_size = self.context_size
+            
+            # Check if input exceeds context window
+            if estimated_input_tokens > model_context_size:
+                logger.error(f"[LLM_REQUEST] Input ({estimated_input_tokens} tokens) exceeds context window ({model_context_size} tokens)")
+                # Yield error message to user
+                error_msg = f"Error: Message too long. Input is ~{estimated_input_tokens:,} tokens but context window is {model_context_size:,} tokens. Please shorten your message or clear chat history."
+                yield {"type": "text", "content": error_msg}
+                yield {"type": "done", "content": error_msg}
+                return
             
             # Calculate available tokens for output (leave 1k buffer for safety)
             available_for_output = model_context_size - estimated_input_tokens - 1000
@@ -829,6 +827,11 @@ class LLMService:
             cancelled = False
             chunk_count = 0
             first_content = ""
+            
+            # Timing tracking
+            stream_start_time = time.time()
+            first_token_time = None
+            
             try:
                 async for chunk in stream:
                     chunk_count += 1
@@ -850,6 +853,10 @@ class LLMService:
                     delta = chunk.choices[0].delta
                     
                     if delta.content:
+                        # Record first token time
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                        
                         filtered_content += delta.content
                         
                         # Log first 500 chars of response
@@ -918,7 +925,10 @@ class LLMService:
                 total_output_tokens = self._estimate_tokens(filtered_content)
             
             # Log stream completion summary
-            logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}")
+            stream_end_time = time.time()
+            time_to_first_token_ms = int((first_token_time - stream_start_time) * 1000) if first_token_time else None
+            time_to_complete_ms = int((stream_end_time - stream_start_time) * 1000)
+            logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}, ttft={time_to_first_token_ms}ms, total={time_to_complete_ms}ms")
             
             # Use direct SQL update instead of ORM to avoid stale object issues
             # This is more robust during long streaming sessions
@@ -935,6 +945,8 @@ class LLMService:
                         content=filtered_content,
                         input_tokens=total_input_tokens,
                         output_tokens=total_output_tokens,
+                        time_to_first_token=time_to_first_token_ms,
+                        time_to_complete=time_to_complete_ms,
                         is_streaming=False,
                     )
                 )
@@ -983,6 +995,8 @@ class LLMService:
                 "type": "message_end",
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,
+                "time_to_first_token": time_to_first_token_ms,
+                "time_to_complete": time_to_complete_ms,
                 "parent_id": parent_id,  # For conversation tree tracking
             }
             
@@ -1201,7 +1215,12 @@ CRITICAL - When working with artifacts (files you create/edit):
    - Check 'similar_matches' to find text similar to what you searched for
    - The file may have been modified by your earlier edits - search for the CURRENT content, not the original
 5. Use read_artifact if you're unsure what a file contains before editing
-6. After a successful edit, the file content has CHANGED - subsequent edits must use the NEW content as the search target"""
+6. After a successful edit, the file content has CHANGED - subsequent edits must use the NEW content as the search target
+
+SEARCHING LARGE PROJECTS:
+When working with large codebases or long conversations, some content may be stored in {AgentNNNN}.md files.
+If you see a message like "[TRUNCATED - Full manifest saved to {AgentNNNN}.md]", use the search_archived_context tool to search for specific files, functions, or code patterns.
+Example: search_archived_context(query="network socket connection") to find networking code."""
             
             system_prompt = system_prompt + tools_instruction
         
@@ -1300,9 +1319,8 @@ CRITICAL - When working with artifacts (files you create/edit):
             try:
                 from app.services.agent_memory import compress_chat_history, estimate_message_tokens
                 
-                # Get model context size - use dedicated setting or default to 128k
-                # Most modern models (Claude, GPT-4, etc.) have 128k+ context
-                model_context = int(await SettingsService.get(db, "model_context_size") or "128000")
+                # Use provider's context_size
+                model_context = self.context_size
                 keep_recent = int(await SettingsService.get(db, "history_compression_keep_recent") or "10")
                 # Get compression threshold from admin settings
                 threshold_tokens = int(await SettingsService.get(db, "history_compression_target_tokens") or "8000")

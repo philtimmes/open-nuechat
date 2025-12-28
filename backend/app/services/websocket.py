@@ -5,13 +5,15 @@ Supports:
 - Client-to-client chat
 - Real-time notifications
 - Detached task continuation (tasks continue when client disconnects)
+- Inline tool calls with <$ToolName> syntax
 """
-from typing import Dict, Set, Optional, Any, List
+from typing import Dict, Set, Optional, Any, List, Callable
 from datetime import datetime, timezone
 import json
 import asyncio
 import uuid
 import logging
+import re
 from fastapi import WebSocket, WebSocketDisconnect
 from dataclasses import dataclass, field
 
@@ -259,6 +261,10 @@ class StreamingHandler:
     - Large buffer size to minimize WebSocket messages
     - Time-based flushing to ensure responsiveness
     
+    Supports inline tool calls with <$ToolName> syntax:
+    - Detects <$tool_name> or <$tool_name:param1=value1,param2=value2> patterns
+    - Executes tools and injects results into stream
+    
     Sends messages in the format expected by the frontend:
     { "type": "stream_start", "payload": { "message_id": ..., "chat_id": ... } }
     { "type": "stream_chunk", "payload": { "content": ... } }
@@ -268,6 +274,11 @@ class StreamingHandler:
     # Aggressive batching - prioritize performance over real-time feel
     MIN_FLUSH_INTERVAL = 0.1  # 100ms - much less frequent than 60fps
     MAX_BUFFER_SIZE = 200  # characters before forced flush
+    
+    # Tool call pattern: <$tool_name> or <$tool_name:params>
+    # Also supports </$ to close tool calls
+    TOOL_CALL_START_PATTERN = re.compile(r'<\$([a-zA-Z_][a-zA-Z0-9_]*)(?::([^>]+))?>')
+    TOOL_CALL_END_PATTERN = re.compile(r'</\$([a-zA-Z_][a-zA-Z0-9_]*)>')
     
     def __init__(self, manager: WebSocketManager, connection: Connection):
         self.manager = manager
@@ -282,6 +293,13 @@ class StreamingHandler:
         # Batching state
         self._buffer: str = ""
         self._last_flush_time: float = 0
+        
+        # Tool call detection state
+        self._tool_detection_buffer: str = ""  # Buffer for detecting tool patterns
+        self._in_tool_call: bool = False
+        self._current_tool_name: Optional[str] = None
+        self._current_tool_params: Optional[str] = None
+        self._tool_executor: Optional[Callable] = None  # Tool executor function
     
     def set_streaming_task(self, task: asyncio.Task):
         """Set the current streaming task for cancellation"""
@@ -366,14 +384,67 @@ class StreamingHandler:
         self._streaming_task = None
         self._active_stream = None
     
-    async def start_stream(self, message_id: str, chat_id: str):
-        """Start a new streaming response"""
+    def set_tool_executor(self, executor: Callable):
+        """Set the tool executor function for inline tool calls.
+        
+        The executor should be an async function with signature:
+        async def executor(tool_name: str, params: Dict) -> Any
+        """
+        self._tool_executor = executor
+    
+    def _parse_tool_params(self, params_str: Optional[str]) -> Dict[str, Any]:
+        """Parse tool parameters from string format.
+        
+        Supports formats:
+        - key1=value1,key2=value2
+        - key1="value with spaces",key2=value2
+        - JSON format: {"key1": "value1"}
+        """
+        if not params_str:
+            return {}
+        
+        params_str = params_str.strip()
+        
+        # Try JSON first
+        if params_str.startswith('{'):
+            try:
+                return json.loads(params_str)
+            except json.JSONDecodeError:
+                pass
+        
+        # Parse key=value format
+        params = {}
+        # Simple parsing - split by comma, then by =
+        for part in params_str.split(','):
+            if '=' in part:
+                key, value = part.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"\'')
+                params[key] = value
+        
+        return params
+    
+    async def start_stream(self, message_id: str, chat_id: str, tool_executor: Callable = None):
+        """Start a new streaming response.
+        
+        Args:
+            message_id: The message ID for this stream
+            chat_id: The chat ID for this stream
+            tool_executor: Optional function to execute inline tool calls
+        """
         self._is_streaming = True
         self._stop_requested = False
         self._current_message_id = message_id
         self._current_chat_id = chat_id
         self._buffer = ""
         self._last_flush_time = asyncio.get_event_loop().time()
+        self._tool_detection_buffer = ""
+        self._in_tool_call = False
+        self._current_tool_name = None
+        self._current_tool_params = None
+        
+        if tool_executor:
+            self._tool_executor = tool_executor
         
         await self.manager.send_to_connection(self.connection, {
             "type": "stream_start",
@@ -386,21 +457,96 @@ class StreamingHandler:
     async def send_chunk(self, text: str):
         """Buffer a text chunk and flush if needed.
         
+        Detects inline tool calls with <$tool_name> or <$tool_name:params> syntax.
+        When a tool call is detected:
+        1. Flushes any buffered content before the tool call
+        2. Executes the tool
+        3. Sends tool_call and tool_result events
+        4. Continues with remaining content
+        
         Continues buffering even if client disconnected - content will be saved to DB.
         """
         if not self._is_streaming:
             return
         
-        self._buffer += text
+        # Add to detection buffer
+        self._tool_detection_buffer += text
         
-        # Skip sending to disconnected clients (but keep buffering for DB save)
+        # Process the detection buffer for tool calls
+        await self._process_tool_detection_buffer()
+    
+    async def _process_tool_detection_buffer(self):
+        """Process the tool detection buffer, extracting and executing tool calls."""
+        while self._tool_detection_buffer:
+            # Look for tool call start pattern
+            match = self.TOOL_CALL_START_PATTERN.search(self._tool_detection_buffer)
+            
+            if match:
+                # Found a tool call - flush content before it
+                before_tool = self._tool_detection_buffer[:match.start()]
+                if before_tool:
+                    self._buffer += before_tool
+                    await self._maybe_flush()
+                
+                tool_name = match.group(1)
+                tool_params_str = match.group(2)
+                tool_params = self._parse_tool_params(tool_params_str)
+                
+                logger.info(f"[TOOL_CALL] Detected inline tool call: {tool_name} with params: {tool_params}")
+                
+                # Execute the tool if we have an executor
+                if self._tool_executor:
+                    tool_id = str(uuid.uuid4())[:8]
+                    
+                    # Send tool_call notification
+                    await self.send_tool_call(tool_name, tool_id, tool_params)
+                    
+                    # Execute the tool
+                    try:
+                        result = await self._tool_executor(tool_name, tool_params)
+                        
+                        # Send tool_result
+                        await self.send_tool_result(tool_id, result)
+                        
+                        # Optionally inject result into stream
+                        # For now, we just notify - the LLM should see the result
+                        logger.info(f"[TOOL_CALL] Tool {tool_name} completed: {str(result)[:200]}")
+                    except Exception as e:
+                        logger.error(f"[TOOL_CALL] Tool {tool_name} failed: {e}")
+                        await self.send_tool_result(tool_id, {"error": str(e)})
+                else:
+                    logger.warning(f"[TOOL_CALL] No tool executor configured for {tool_name}")
+                
+                # Remove the tool call from buffer and continue
+                self._tool_detection_buffer = self._tool_detection_buffer[match.end():]
+            else:
+                # No complete tool call found
+                # Check if we might have a partial pattern at the end
+                if '<$' in self._tool_detection_buffer:
+                    # Keep characters from last '<$' onwards for next iteration
+                    last_start = self._tool_detection_buffer.rfind('<$')
+                    if last_start > 0:
+                        # Flush everything before the potential tool call
+                        self._buffer += self._tool_detection_buffer[:last_start]
+                        self._tool_detection_buffer = self._tool_detection_buffer[last_start:]
+                        await self._maybe_flush()
+                    # If last_start == 0, keep the whole buffer
+                    break
+                else:
+                    # No potential tool call, flush everything
+                    self._buffer += self._tool_detection_buffer
+                    self._tool_detection_buffer = ""
+                    await self._maybe_flush()
+                    break
+    
+    async def _maybe_flush(self):
+        """Flush buffer if conditions are met."""
         if self.connection.is_disconnected:
             return
         
         current_time = asyncio.get_event_loop().time()
         time_since_flush = current_time - self._last_flush_time
         
-        # Flush if buffer is large enough or enough time has passed
         if len(self._buffer) >= self.MAX_BUFFER_SIZE or time_since_flush >= self.MIN_FLUSH_INTERVAL:
             await self._flush_buffer()
     
@@ -454,10 +600,18 @@ class StreamingHandler:
     
     async def end_stream(self, input_tokens: int = 0, output_tokens: int = 0, parent_id: str = None):
         """End the streaming response"""
+        # Flush any remaining tool detection buffer content
+        if self._tool_detection_buffer:
+            self._buffer += self._tool_detection_buffer
+            self._tool_detection_buffer = ""
+        
         # Flush any remaining buffered content
         await self._flush_buffer()
         
         self._is_streaming = False
+        self._in_tool_call = False
+        self._current_tool_name = None
+        self._current_tool_params = None
         
         await self.manager.send_to_connection(self.connection, {
             "type": "stream_end",

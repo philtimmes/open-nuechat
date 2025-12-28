@@ -112,6 +112,8 @@ export interface Message {
   artifacts?: Artifact[];
   input_tokens?: number;
   output_tokens?: number;
+  time_to_first_token?: number;  // milliseconds
+  time_to_complete?: number;  // milliseconds
   created_at: string;
   // Tree structure for conversation branching
   parent_id?: string | null;

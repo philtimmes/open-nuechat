@@ -1347,3 +1347,78 @@ class ChainExecutor:
         getattr(logger, level, logger.debug)(f"[ChainLog] {resolved}")
         
         return ctx
+    
+    async def _prim_call_tool(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Simplified tool call primitive.
+        
+        Supports two formats:
+        1. String format: "tool_name" - calls tool with $Query as default param
+        2. Object format: {"name": "tool_name", "query": "...", "param1": "value1"}
+        
+        Config options:
+        - name/tool: Tool name (required)
+        - query: Query parameter (defaults to $Query or $PreviousResult)
+        - Any other keys become tool parameters
+        - output_var: Variable to store result
+        - add_to_context: Add result to context for LLM
+        - context_label: Label for context
+        
+        Example usage in chain:
+        {"type": "call_tool", "config": "web_search"}
+        {"type": "call_tool", "config": {"name": "web_search", "query": "{Query}"}}
+        """
+        if not self._tool_func:
+            raise RuntimeError("Tool function not configured")
+        
+        # Handle string config (just tool name)
+        if isinstance(config, str):
+            config = {"name": config}
+        
+        tool_name = config.get("name") or config.get("tool") or config.get("tool_name")
+        if not tool_name:
+            ctx.debug_log("  call_tool - SKIPPED (no tool name)")
+            return ctx
+        
+        output_var = config.get("output_var")
+        add_to_context = config.get("add_to_context", False)
+        context_label = config.get("context_label", tool_name)
+        
+        ctx.debug_log("  call_tool - tool", tool_name)
+        
+        # Build params from remaining config keys
+        params = {}
+        reserved_keys = {"name", "tool", "tool_name", "output_var", "add_to_context", "context_label"}
+        
+        for key, value in config.items():
+            if key not in reserved_keys:
+                if isinstance(value, str):
+                    params[key] = ctx.interpolate(value)
+                else:
+                    params[key] = value
+        
+        # If no query param, use previous result or original query
+        if "query" not in params:
+            if ctx.previous_result:
+                params["query"] = str(ctx.previous_result)
+            else:
+                params["query"] = ctx.original_query
+        
+        ctx.debug_log("  call_tool - params", params)
+        
+        # Call tool
+        result = await self._tool_func(tool_name, params)
+        
+        ctx.previous_result = result
+        
+        if output_var:
+            ctx.set_variable(output_var, result)
+        else:
+            ctx.current_value = result
+        
+        if add_to_context and result:
+            ctx.add_context(str(result), context_label, tool_name)
+        
+        ctx.debug_log("  call_tool - result", str(result)[:200] if result else None)
+        
+        return ctx

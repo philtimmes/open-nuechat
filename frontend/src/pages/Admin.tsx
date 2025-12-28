@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
+import { useBrandingStore } from '../stores/brandingStore';
+import { useThemeStore } from '../stores/themeStore';
 import api from '../lib/api';
 
 // Lazy load FlowEditor for better performance
@@ -23,6 +25,10 @@ interface SystemSettings {
   max_knowledge_stores_free: number;
   max_knowledge_stores_pro: number;
   max_knowledge_stores_enterprise: number;
+  // Image classification
+  image_confirm_with_llm: boolean;
+  image_classification_prompt: string;
+  image_classification_true_response: string;
 }
 
 interface OAuthSettings {
@@ -110,6 +116,15 @@ interface APIRateLimits {
   api_rate_limit_embeddings: number;
   api_rate_limit_images: number;
   api_rate_limit_models: number;
+}
+
+interface BrandingSettings {
+  app_name: string;
+  app_tagline: string;
+  favicon_url: string;
+  logo_url: string;
+  custom_css: string;
+  custom_themes: string;  // JSON array of theme objects
 }
 
 interface TierConfig {
@@ -216,7 +231,292 @@ interface FilterConfig {
   is_global: boolean;
 }
 
-type TabId = 'system' | 'oauth' | 'llm' | 'billing_apis' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'dev';
+type TabId = 'system' | 'oauth' | 'llm' | 'billing_apis' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'dev' | 'branding';
+
+// Theme color variables with labels
+const THEME_COLOR_VARS = [
+  { key: '--color-background', label: 'Background', description: 'Main page background' },
+  { key: '--color-surface', label: 'Surface', description: 'Cards, panels, elevated elements' },
+  { key: '--color-text', label: 'Text', description: 'Primary text color' },
+  { key: '--color-text-secondary', label: 'Text Secondary', description: 'Muted/secondary text' },
+  { key: '--color-border', label: 'Border', description: 'Borders and dividers' },
+  { key: '--color-primary', label: 'Primary', description: 'Primary accent color' },
+  { key: '--color-secondary', label: 'Secondary', description: 'Secondary accent color' },
+  { key: '--color-accent', label: 'Accent', description: 'Highlights and accents' },
+  { key: '--color-button', label: 'Button', description: 'Button background' },
+  { key: '--color-button-text', label: 'Button Text', description: 'Button text color' },
+  { key: '--color-error', label: 'Error', description: 'Error messages' },
+  { key: '--color-success', label: 'Success', description: 'Success messages' },
+  { key: '--color-warning', label: 'Warning', description: 'Warning messages' },
+];
+
+interface CustomTheme {
+  id: string;
+  name: string;
+  [key: string]: string;
+}
+
+interface ThemeEditorProps {
+  themes: string;
+  onChange: (themes: string) => void;
+}
+
+function ThemeEditor({ themes, onChange }: ThemeEditorProps) {
+  const [parsedThemes, setParsedThemes] = useState<CustomTheme[]>([]);
+  const [selectedThemeIndex, setSelectedThemeIndex] = useState<number | null>(null);
+  const [previewTheme, setPreviewTheme] = useState<CustomTheme | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  
+  // Parse themes JSON on mount and when themes prop changes
+  useEffect(() => {
+    try {
+      const parsed = themes ? JSON.parse(themes) : [];
+      setParsedThemes(Array.isArray(parsed) ? parsed : []);
+      setParseError(null);
+    } catch (e) {
+      setParseError('Invalid JSON format');
+      setParsedThemes([]);
+    }
+  }, [themes]);
+  
+  // Serialize and update parent when themes change
+  const updateThemes = (newThemes: CustomTheme[]) => {
+    setParsedThemes(newThemes);
+    onChange(JSON.stringify(newThemes, null, 2));
+  };
+  
+  // Add new theme
+  const addTheme = () => {
+    const newTheme: CustomTheme = {
+      id: `custom-${Date.now()}`,
+      name: 'New Theme',
+      '--color-background': '#1a1a2e',
+      '--color-surface': '#16213e',
+      '--color-text': '#ffffff',
+      '--color-text-secondary': '#a0a0a0',
+      '--color-border': '#2a2a4e',
+      '--color-primary': '#0f3460',
+      '--color-secondary': '#533483',
+      '--color-accent': '#e94560',
+      '--color-button': '#0f3460',
+      '--color-button-text': '#ffffff',
+      '--color-error': '#ff4444',
+      '--color-success': '#00c851',
+      '--color-warning': '#ffbb33',
+    };
+    updateThemes([...parsedThemes, newTheme]);
+    setSelectedThemeIndex(parsedThemes.length);
+  };
+  
+  // Delete theme
+  const deleteTheme = (index: number) => {
+    const newThemes = parsedThemes.filter((_, i) => i !== index);
+    updateThemes(newThemes);
+    if (selectedThemeIndex === index) {
+      setSelectedThemeIndex(null);
+    } else if (selectedThemeIndex !== null && selectedThemeIndex > index) {
+      setSelectedThemeIndex(selectedThemeIndex - 1);
+    }
+  };
+  
+  // Update theme property
+  const updateThemeProperty = (index: number, key: string, value: string) => {
+    const newThemes = [...parsedThemes];
+    newThemes[index] = { ...newThemes[index], [key]: value };
+    updateThemes(newThemes);
+  };
+  
+  // Preview theme (apply temporarily)
+  const applyPreview = (theme: CustomTheme) => {
+    setPreviewTheme(theme);
+    const root = document.documentElement;
+    THEME_COLOR_VARS.forEach(({ key }) => {
+      if (theme[key]) {
+        root.style.setProperty(key, theme[key]);
+      }
+    });
+  };
+  
+  // Reset preview - restore current theme from store
+  const resetPreview = async () => {
+    setPreviewTheme(null);
+    // Re-apply current theme from theme store
+    const { currentTheme, applyTheme } = useThemeStore.getState();
+    if (currentTheme) {
+      applyTheme(currentTheme);
+    } else {
+      // Fall back to reloading branding config
+      const { loadConfig } = useBrandingStore.getState();
+      await loadConfig(true);
+    }
+  };
+  
+  const selectedTheme = selectedThemeIndex !== null ? parsedThemes[selectedThemeIndex] : null;
+  
+  return (
+    <div className="space-y-4">
+      {parseError && (
+        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+          {parseError}
+        </div>
+      )}
+      
+      {/* Theme List */}
+      <div className="flex flex-wrap gap-2 items-center">
+        {parsedThemes.map((theme, index) => (
+          <button
+            key={theme.id}
+            onClick={() => setSelectedThemeIndex(index)}
+            className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
+              selectedThemeIndex === index
+                ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                : 'bg-[var(--color-background)] text-[var(--color-text)] hover:bg-[var(--color-border)]'
+            }`}
+          >
+            <span
+              className="w-4 h-4 rounded-full border border-[var(--color-border)]"
+              style={{ backgroundColor: theme['--color-primary'] || '#666' }}
+            />
+            {theme.name}
+          </button>
+        ))}
+        <button
+          onClick={addTheme}
+          className="px-3 py-2 rounded-lg text-sm font-medium bg-[var(--color-background)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border)] flex items-center gap-1"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
+          Add Theme
+        </button>
+      </div>
+      
+      {/* Theme Editor */}
+      {selectedTheme && (
+        <div className="bg-[var(--color-background)] rounded-lg p-4 border border-[var(--color-border)]">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-4">
+              <input
+                type="text"
+                value={selectedTheme.name}
+                onChange={(e) => updateThemeProperty(selectedThemeIndex!, 'name', e.target.value)}
+                className="px-3 py-1.5 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] font-medium"
+                placeholder="Theme Name"
+              />
+              <input
+                type="text"
+                value={selectedTheme.id}
+                onChange={(e) => updateThemeProperty(selectedThemeIndex!, 'id', e.target.value.toLowerCase().replace(/\s+/g, '-'))}
+                className="px-3 py-1.5 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-secondary)] text-sm font-mono"
+                placeholder="theme-id"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => applyPreview(selectedTheme)}
+                className="px-3 py-1.5 rounded-lg text-sm bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
+              >
+                Preview
+              </button>
+              {previewTheme && (
+                <button
+                  onClick={resetPreview}
+                  className="px-3 py-1.5 rounded-lg text-sm bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30"
+                >
+                  Reset
+                </button>
+              )}
+              <button
+                onClick={() => deleteTheme(selectedThemeIndex!)}
+                className="px-3 py-1.5 rounded-lg text-sm bg-red-500/20 text-red-400 hover:bg-red-500/30"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+          
+          {/* Color Grid */}
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+            {THEME_COLOR_VARS.map(({ key, label, description }) => (
+              <div key={key} className="space-y-1">
+                <label className="block text-xs font-medium text-[var(--color-text)]">
+                  {label}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={selectedTheme[key] || '#000000'}
+                    onChange={(e) => updateThemeProperty(selectedThemeIndex!, key, e.target.value)}
+                    className="w-8 h-8 rounded cursor-pointer border border-[var(--color-border)]"
+                  />
+                  <input
+                    type="text"
+                    value={selectedTheme[key] || ''}
+                    onChange={(e) => updateThemeProperty(selectedThemeIndex!, key, e.target.value)}
+                    className="flex-1 px-2 py-1 bg-[var(--color-surface)] border border-[var(--color-border)] rounded text-[var(--color-text)] text-xs font-mono"
+                    placeholder="#000000"
+                  />
+                </div>
+                <p className="text-xs text-[var(--color-text-secondary)]">{description}</p>
+              </div>
+            ))}
+          </div>
+          
+          {/* Theme Preview Swatch */}
+          <div className="mt-4 p-4 rounded-lg border border-[var(--color-border)]" style={{
+            backgroundColor: selectedTheme['--color-background'],
+            color: selectedTheme['--color-text'],
+          }}>
+            <div className="text-sm font-medium mb-2">Preview</div>
+            <div className="flex flex-wrap gap-2">
+              <div className="px-3 py-1.5 rounded text-sm" style={{
+                backgroundColor: selectedTheme['--color-surface'],
+                border: `1px solid ${selectedTheme['--color-border']}`,
+              }}>
+                Surface
+              </div>
+              <div className="px-3 py-1.5 rounded text-sm" style={{
+                backgroundColor: selectedTheme['--color-button'],
+                color: selectedTheme['--color-button-text'],
+              }}>
+                Button
+              </div>
+              <div className="px-3 py-1.5 rounded text-sm" style={{
+                backgroundColor: selectedTheme['--color-primary'],
+                color: '#fff',
+              }}>
+                Primary
+              </div>
+              <div className="px-3 py-1.5 rounded text-sm" style={{
+                backgroundColor: selectedTheme['--color-accent'],
+                color: '#fff',
+              }}>
+                Accent
+              </div>
+              <span style={{ color: selectedTheme['--color-text-secondary'] }}>
+                Secondary text
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Raw JSON Toggle */}
+      <details className="mt-4">
+        <summary className="cursor-pointer text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
+          View/Edit Raw JSON
+        </summary>
+        <textarea
+          value={themes}
+          onChange={(e) => onChange(e.target.value)}
+          rows={8}
+          className="mt-2 w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] font-mono text-sm"
+          placeholder="[]"
+        />
+      </details>
+    </div>
+  );
+}
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -260,6 +560,15 @@ export default function Admin() {
   const [editingTier, setEditingTier] = useState<string | null>(null);
   const [newFeature, setNewFeature] = useState<string>('');
   
+  // Branding state
+  const [brandingSettings, setBrandingSettings] = useState<BrandingSettings>({
+    app_name: 'Open-NueChat',
+    app_tagline: 'AI-Powered Chat',
+    favicon_url: '',
+    logo_url: '',
+    custom_css: '',
+    custom_themes: '[]',
+  });
   // User management state
   const [users, setUsers] = useState<UserListItem[]>([]);
   const [usersTotal, setUsersTotal] = useState(0);
@@ -268,8 +577,11 @@ export default function Admin() {
   const [usersLoading, setUsersLoading] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserListItem | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
-  const [userAction, setUserAction] = useState<'upgrade' | 'refund' | 'chats' | null>(null);
+  const [userAction, setUserAction] = useState<'upgrade' | 'refund' | 'chats' | 'password' | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [passwordSetError, setPasswordSetError] = useState<string | null>(null);
+  const [passwordSetSuccess, setPasswordSetSuccess] = useState(false);
   
   // Chat viewing state
   const [userChats, setUserChats] = useState<ChatListItem[]>([]);
@@ -601,7 +913,7 @@ export default function Admin() {
   
   const fetchData = async () => {
     try {
-      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes, rateLimitsRes, billingApisRes] = await Promise.all([
+      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes, rateLimitsRes, billingApisRes, brandingRes] = await Promise.all([
         api.get('/admin/settings'),
         api.get('/admin/oauth-settings'),
         api.get('/admin/llm-settings'),
@@ -609,6 +921,7 @@ export default function Admin() {
         api.get('/admin/tiers'),
         api.get('/admin/api-rate-limits'),
         api.get('/admin/billing-api-settings'),
+        api.get('/admin/settings/branding'),
       ]);
       setSystemSettings(systemRes.data);
       setOAuthSettings(oauthRes.data);
@@ -617,6 +930,7 @@ export default function Admin() {
       setTiers(tiersRes.data.tiers);
       setApiRateLimits(rateLimitsRes.data);
       setBillingApiSettings(billingApisRes.data);
+      setBrandingSettings(brandingRes.data);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to load settings');
     } finally {
@@ -1575,26 +1889,53 @@ export default function Admin() {
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
       case 'dev':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>;
+      case 'branding':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" /></svg>;
       default:
         return null;
     }
   };
 
-  const tabs: { id: TabId; label: string; iconType: string }[] = [
-    { id: 'system', label: 'System', iconType: 'system' },
-    { id: 'oauth', label: 'OAuth', iconType: 'oauth' },
-    { id: 'llm', label: 'LLM', iconType: 'llm' },
-    { id: 'billing_apis', label: 'Billing APIs', iconType: 'billing' },
-    { id: 'features', label: 'Features', iconType: 'features' },
-    { id: 'filters', label: 'Filters', iconType: 'filters' },
-    { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
-    { id: 'global_kb', label: 'Global KB', iconType: 'global_kb' },
-    { id: 'tiers', label: 'Tiers', iconType: 'tiers' },
-    { id: 'users', label: 'Users', iconType: 'users' },
-    { id: 'chats', label: 'Chats', iconType: 'chats' },
-    { id: 'tools', label: 'Tools', iconType: 'tools' },
-    { id: 'dev', label: 'Site Dev', iconType: 'dev' },
+  // Tab groups for better organization
+  const tabGroups: { label: string; tabs: { id: TabId; label: string; iconType: string }[] }[] = [
+    {
+      label: 'Configuration',
+      tabs: [
+        { id: 'system', label: 'System', iconType: 'system' },
+        { id: 'llm', label: 'LLM', iconType: 'llm' },
+        { id: 'branding', label: 'Branding', iconType: 'branding' },
+        { id: 'features', label: 'Features', iconType: 'features' },
+      ],
+    },
+    {
+      label: 'Authentication',
+      tabs: [
+        { id: 'oauth', label: 'OAuth', iconType: 'oauth' },
+        { id: 'billing_apis', label: 'Billing APIs', iconType: 'billing' },
+        { id: 'tiers', label: 'Tiers', iconType: 'tiers' },
+      ],
+    },
+    {
+      label: 'AI & Filters',
+      tabs: [
+        { id: 'filters', label: 'Filters', iconType: 'filters' },
+        { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
+        { id: 'global_kb', label: 'Global KB', iconType: 'global_kb' },
+        { id: 'tools', label: 'Tools', iconType: 'tools' },
+      ],
+    },
+    {
+      label: 'Data',
+      tabs: [
+        { id: 'users', label: 'Users', iconType: 'users' },
+        { id: 'chats', label: 'Chats', iconType: 'chats' },
+        { id: 'dev', label: 'Site Dev', iconType: 'dev' },
+      ],
+    },
   ];
+  
+  // Flatten for backward compatibility
+  const tabs = tabGroups.flatMap(g => g.tabs);
   
   if (!user?.is_admin) {
     return null;
@@ -1618,21 +1959,28 @@ export default function Admin() {
           </div>
         )}
         
-        {/* Tabs */}
-        <div className="flex flex-wrap gap-2 mb-6 border-b border-[var(--color-border)] pb-4">
-          {tabs.map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                activeTab === tab.id
-                  ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
-                  : 'bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border)]'
-              }`}
-            >
-              <AdminTabIcon type={tab.iconType} />
-              {tab.label}
-            </button>
+        {/* Tabs - Grouped */}
+        <div className="mb-6 border-b border-[var(--color-border)] pb-4 space-y-3">
+          {tabGroups.map(group => (
+            <div key={group.label} className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wide w-24 shrink-0">
+                {group.label}
+              </span>
+              {group.tabs.map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                    activeTab === tab.id
+                      ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                      : 'bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border)]'
+                  }`}
+                >
+                  <AdminTabIcon type={tab.iconType} />
+                  {tab.label}
+                </button>
+              ))}
+            </div>
           ))}
         </div>
         
@@ -1689,6 +2037,49 @@ export default function Admin() {
                         rows={2}
                         className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                        Image Classification Prompt
+                        <span className="ml-2 text-xs text-[var(--color-text-secondary)]">(LLM prompt to detect image generation requests)</span>
+                      </label>
+                      <textarea
+                        value={systemSettings.image_classification_prompt || ''}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, image_classification_prompt: e.target.value })}
+                        rows={4}
+                        placeholder="Leave empty for default. The LLM classifies if the user wants to generate an image."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div className="flex items-center gap-4">
+                      <div className="flex-1">
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                          Image Classification True Response
+                          <span className="ml-2 text-xs text-[var(--color-text-secondary)]">(Response prefix that means "generate image")</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={systemSettings.image_classification_true_response || ''}
+                          onChange={(e) => setSystemSettings({ ...systemSettings, image_classification_true_response: e.target.value })}
+                          placeholder="YES"
+                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                        />
+                      </div>
+                      
+                      <div className="flex items-center gap-2 pt-5">
+                        <input
+                          type="checkbox"
+                          id="image_confirm_with_llm"
+                          checked={systemSettings.image_confirm_with_llm ?? true}
+                          onChange={(e) => setSystemSettings({ ...systemSettings, image_confirm_with_llm: e.target.checked })}
+                          className="w-4 h-4 rounded border-[var(--color-border)] text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
+                        />
+                        <label htmlFor="image_confirm_with_llm" className="text-sm text-[var(--color-text)]">
+                          Enable LLM Confirmation
+                        </label>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -3271,7 +3662,7 @@ export default function Admin() {
                             </button>
                           </td>
                           <td className="px-4 py-3">
-                            <div className="flex gap-2">
+                            <div className="flex gap-2 flex-wrap">
                               <button
                                 onClick={() => { setSelectedUser(u); setUserAction('upgrade'); setShowUserModal(true); }}
                                 className="text-xs px-2 py-1 bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30"
@@ -3284,6 +3675,17 @@ export default function Admin() {
                                 onClick={() => handleResetTokens(u)}
                                 className="text-xs px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded hover:bg-yellow-500/30"
                               >Reset</button>
+                              <button
+                                onClick={() => { 
+                                  setSelectedUser(u); 
+                                  setUserAction('password'); 
+                                  setNewUserPassword('');
+                                  setPasswordSetError(null);
+                                  setPasswordSetSuccess(false);
+                                  setShowUserModal(true); 
+                                }}
+                                className="text-xs px-2 py-1 bg-orange-500/20 text-orange-400 rounded hover:bg-orange-500/30"
+                              >Password</button>
                               <button
                                 onClick={() => handleToggleAdmin(u)}
                                 disabled={u.id === user?.id}
@@ -3536,7 +3938,7 @@ export default function Admin() {
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
                 <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-2xl max-h-[80vh] overflow-y-auto border border-[var(--color-border)]">
                   <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
-                    {userAction === 'upgrade' ? 'Change Tier' : userAction === 'refund' ? 'Add Tokens' : 'User Chats'}
+                    {userAction === 'upgrade' ? 'Change Tier' : userAction === 'refund' ? 'Add Tokens' : userAction === 'password' ? 'Set Password' : 'User Chats'}
                     <span className="text-sm font-normal text-[var(--color-text-secondary)] ml-2">— {selectedUser.email}</span>
                   </h3>
                   
@@ -3570,6 +3972,61 @@ export default function Admin() {
                           +{formatTokens(amount)}
                         </button>
                       ))}
+                    </div>
+                  )}
+                  
+                  {userAction === 'password' && (
+                    <div className="space-y-4">
+                      {passwordSetSuccess && (
+                        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-400">
+                          ✓ Password set successfully
+                        </div>
+                      )}
+                      {passwordSetError && (
+                        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
+                          {passwordSetError}
+                        </div>
+                      )}
+                      <div>
+                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                          New Password
+                        </label>
+                        <input
+                          type="password"
+                          value={newUserPassword}
+                          onChange={(e) => setNewUserPassword(e.target.value)}
+                          className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                          placeholder="At least 8 characters"
+                        />
+                      </div>
+                      <button
+                        onClick={async () => {
+                          if (newUserPassword.length < 8) {
+                            setPasswordSetError('Password must be at least 8 characters');
+                            return;
+                          }
+                          setActionLoading(true);
+                          setPasswordSetError(null);
+                          try {
+                            await api.post(`/admin/users/${selectedUser.id}/set-password`, {
+                              password: newUserPassword
+                            });
+                            setPasswordSetSuccess(true);
+                            setNewUserPassword('');
+                          } catch (err: any) {
+                            setPasswordSetError(err.response?.data?.detail || 'Failed to set password');
+                          } finally {
+                            setActionLoading(false);
+                          }
+                        }}
+                        disabled={actionLoading || newUserPassword.length < 8}
+                        className="px-4 py-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 disabled:opacity-50"
+                      >
+                        {actionLoading ? 'Setting...' : 'Set Password'}
+                      </button>
+                      <p className="text-xs text-[var(--color-text-secondary)]">
+                        This will set or reset the user's password. They can use this to log in without OAuth.
+                      </p>
                     </div>
                   )}
                   
@@ -4480,6 +4937,224 @@ export default function Admin() {
                     </div>
                   )}
                 </div>
+              </div>
+            )}
+            
+            {/* BRANDING TAB */}
+            {activeTab === 'branding' && (
+              <div className="space-y-6">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Application Branding</h2>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                    Customize the look and feel of your application. Changes will apply to all users.
+                  </p>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
+                        Application Name
+                      </label>
+                      <input
+                        type="text"
+                        value={brandingSettings.app_name}
+                        onChange={(e) => setBrandingSettings({ ...brandingSettings, app_name: e.target.value })}
+                        className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                        placeholder="Open-NueChat"
+                      />
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                        Replaces "Open-NueChat" throughout the application
+                      </p>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
+                        Tagline
+                      </label>
+                      <input
+                        type="text"
+                        value={brandingSettings.app_tagline}
+                        onChange={(e) => setBrandingSettings({ ...brandingSettings, app_tagline: e.target.value })}
+                        className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                        placeholder="AI-Powered Chat"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
+                        Favicon
+                      </label>
+                      <div className="flex items-center gap-3">
+                        {brandingSettings.favicon_url && (
+                          <img 
+                            src={brandingSettings.favicon_url} 
+                            alt="Current favicon" 
+                            className="w-8 h-8 rounded border border-[var(--color-border)]"
+                            onError={(e) => (e.currentTarget.style.display = 'none')}
+                          />
+                        )}
+                        <input
+                          type="text"
+                          value={brandingSettings.favicon_url}
+                          onChange={(e) => setBrandingSettings({ ...brandingSettings, favicon_url: e.target.value })}
+                          className="flex-1 px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                          placeholder="https://example.com/favicon.ico or upload below"
+                        />
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <label className="px-3 py-1.5 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg cursor-pointer hover:opacity-90 text-sm">
+                          Upload Favicon
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/x-icon,image/svg+xml,.ico"
+                            className="hidden"
+                            onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              
+                              try {
+                                const res = await api.post('/admin/settings/branding/favicon', formData, {
+                                  headers: { 'Content-Type': 'multipart/form-data' }
+                                });
+                                setBrandingSettings({ ...brandingSettings, favicon_url: res.data.url });
+                                setSuccess('Favicon uploaded successfully');
+                                setTimeout(() => setSuccess(null), 3000);
+                                
+                                // Apply immediately
+                                const { loadConfig } = useBrandingStore.getState();
+                                await loadConfig(true);
+                              } catch (err: any) {
+                                setError(err.response?.data?.detail || 'Failed to upload favicon');
+                              }
+                            }}
+                          />
+                        </label>
+                        <span className="text-xs text-[var(--color-text-secondary)]">
+                          PNG, JPG, ICO, or SVG (max 1MB)
+                        </span>
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
+                        Logo
+                      </label>
+                      <div className="flex items-center gap-3">
+                        {brandingSettings.logo_url && (
+                          <img 
+                            src={brandingSettings.logo_url} 
+                            alt="Current logo" 
+                            className="h-8 max-w-32 rounded border border-[var(--color-border)] object-contain"
+                            onError={(e) => (e.currentTarget.style.display = 'none')}
+                          />
+                        )}
+                        <input
+                          type="text"
+                          value={brandingSettings.logo_url}
+                          onChange={(e) => setBrandingSettings({ ...brandingSettings, logo_url: e.target.value })}
+                          className="flex-1 px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                          placeholder="https://example.com/logo.png or upload below"
+                        />
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <label className="px-3 py-1.5 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg cursor-pointer hover:opacity-90 text-sm">
+                          Upload Logo
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/svg+xml"
+                            className="hidden"
+                            onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              
+                              try {
+                                const res = await api.post('/admin/settings/branding/logo', formData, {
+                                  headers: { 'Content-Type': 'multipart/form-data' }
+                                });
+                                setBrandingSettings({ ...brandingSettings, logo_url: res.data.url });
+                                setSuccess('Logo uploaded successfully');
+                                setTimeout(() => setSuccess(null), 3000);
+                                
+                                // Apply immediately
+                                const { loadConfig } = useBrandingStore.getState();
+                                await loadConfig(true);
+                              } catch (err: any) {
+                                setError(err.response?.data?.detail || 'Failed to upload logo');
+                              }
+                            }}
+                          />
+                        </label>
+                        <span className="text-xs text-[var(--color-text-secondary)]">
+                          PNG, JPG, or SVG (max 2MB)
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Custom Themes</h2>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                    Create and edit custom color themes visually.
+                  </p>
+                  
+                  <ThemeEditor 
+                    themes={brandingSettings.custom_themes}
+                    onChange={(themes) => setBrandingSettings({ ...brandingSettings, custom_themes: themes })}
+                  />
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Custom CSS</h2>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                    Add custom CSS rules that will be injected into the application.
+                  </p>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
+                      Custom CSS
+                    </label>
+                    <textarea
+                      value={brandingSettings.custom_css}
+                      onChange={(e) => setBrandingSettings({ ...brandingSettings, custom_css: e.target.value })}
+                      rows={8}
+                      className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] font-mono text-sm"
+                      placeholder={`/* Custom styles */
+.sidebar-header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}`}
+                    />
+                  </div>
+                </div>
+                
+                <button
+                  onClick={async () => {
+                    setIsSaving(true);
+                    try {
+                      await api.post('/admin/settings/branding', brandingSettings);
+                      
+                      // Apply branding immediately without requiring reload
+                      const { loadConfig } = useBrandingStore.getState();
+                      await loadConfig(true);  // Force reload from server
+                      
+                      setSuccess('Branding settings saved and applied');
+                      setTimeout(() => setSuccess(null), 3000);
+                    } catch (err: any) {
+                      setError(err.response?.data?.detail || 'Failed to save branding settings');
+                    } finally {
+                      setIsSaving(false);
+                    }
+                  }}
+                  disabled={isSaving}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSaving ? 'Saving...' : 'Save Branding Settings'}
+                </button>
               </div>
             )}
           </>

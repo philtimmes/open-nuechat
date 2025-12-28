@@ -119,6 +119,10 @@ class Message(Base):
     input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
     
+    # Timing metrics (milliseconds)
+    time_to_first_token = Column(Integer, nullable=True, default=None)  # Time from request to first token
+    time_to_complete = Column(Integer, nullable=True, default=None)  # Time from request to completion
+    
     # Metadata
     model = Column(String(100), nullable=True)
     message_metadata = Column(JSON, default=dict)

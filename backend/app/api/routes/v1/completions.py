@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from app.db.database import get_db
 from app.models import User, APIKey, CustomAssistant, KnowledgeStore
@@ -140,30 +140,43 @@ async def resolve_model(
     """
     Resolve model ID to actual model and optional assistant.
     
+    Model ID formats:
+    - "AssistantName" - lookup by name
+    - "gpt:AssistantName" - lookup by name (legacy)
+    - "gpt:uuid" - lookup by ID (legacy)
+    - "model-name" - base model
+    
     Returns: (model_name, assistant_or_none)
     """
+    # Strip gpt: prefix if present (legacy support)
+    assistant_ref = model_id
     if model_id.startswith("gpt:"):
-        assistant_id = model_id[4:]
-        
-        # Check API key restrictions
-        if api_key.allowed_assistants and assistant_id not in api_key.allowed_assistants:
-            raise HTTPException(status_code=403, detail="Access to this model is not allowed")
-        
-        result = await db.execute(
-            select(CustomAssistant).where(
-                CustomAssistant.id == assistant_id,
+        assistant_ref = model_id[4:]
+    
+    # Try lookup by name first, then by ID
+    result = await db.execute(
+        select(CustomAssistant).where(
+            or_(
+                CustomAssistant.name == assistant_ref,
+                CustomAssistant.id == assistant_ref,
             )
         )
-        assistant = result.scalar_one_or_none()
-        
-        if not assistant:
-            raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
+    )
+    assistant = result.scalar_one_or_none()
+    
+    if assistant:
+        # Check API key restrictions (by ID)
+        if api_key.allowed_assistants and assistant.id not in api_key.allowed_assistants:
+            raise HTTPException(status_code=403, detail="Access to this model is not allowed")
         
         # Check access
-        is_owner = assistant.user_id == user.id
+        is_owner = assistant.owner_id == user.id
         is_public = assistant.is_public
         
-        prefs = json.loads(user.preferences or "{}")
+        # Handle both dict and string preferences
+        prefs = user.preferences or {}
+        if isinstance(prefs, str):
+            prefs = json.loads(prefs) if prefs else {}
         subscribed_ids = prefs.get("subscribed_assistants", [])
         is_subscribed = assistant.id in subscribed_ids
         
@@ -172,7 +185,7 @@ async def resolve_model(
         
         return assistant.model, assistant
     
-    # Base model
+    # Base model (no assistant found, use as-is)
     return model_id, None
 
 
@@ -604,6 +617,10 @@ async def create_chat_completion(
     
     Compatible with OpenAI's /v1/chat/completions endpoint.
     
+    **Authentication:**
+    - Header: `Authorization: Bearer nxs_...`
+    - Query parameter: `?api_key=nxs_...`
+    
     **Model Selection:**
     - Use base model name directly: `"llama3.2"`, `"gpt-4"`, etc.
     - Use Custom GPT: `"gpt:<assistant-id>"` or `"gpt:<assistant-name>"`
@@ -632,5 +649,97 @@ async def create_chat_completion(
                 "X-Accel-Buffering": "no",
             },
         )
+    
+    return result
+
+
+# =============================================================================
+# Text Completions (Legacy /v1/completions)
+# =============================================================================
+
+class TextCompletionRequest(BaseModel):
+    """OpenAI-compatible text completion request (legacy)"""
+    model: str
+    prompt: Union[str, List[str]]
+    max_tokens: Optional[int] = 1024
+    temperature: Optional[float] = 1.0
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    user: Optional[str] = None
+
+
+@router.post("/completions")
+async def text_completions(
+    request: TextCompletionRequest,
+    auth: tuple[User, APIKey] = Depends(require_scope("completions")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Legacy text completion endpoint.
+    
+    **Authentication:**
+    - Header: `Authorization: Bearer nxs_...`
+    - Query parameter: `?api_key=nxs_...`
+    
+    Converts to chat completion format internally.
+    """
+    user, api_key = auth
+    
+    # Convert prompt to messages
+    prompt = request.prompt
+    if isinstance(prompt, list):
+        prompt = "\n".join(prompt)
+    
+    # Create chat completion request
+    chat_request = ChatCompletionRequest(
+        model=request.model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=request.max_tokens,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        n=request.n,
+        stream=request.stream,
+        stop=request.stop,
+        presence_penalty=request.presence_penalty,
+        frequency_penalty=request.frequency_penalty,
+        user=request.user,
+    )
+    
+    result = await create_completion(chat_request, user, api_key, db, None)
+    
+    if request.stream:
+        return StreamingResponse(
+            result,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    
+    # Convert chat completion response to text completion format
+    if isinstance(result, dict):
+        choices = []
+        for choice in result.get("choices", []):
+            choices.append({
+                "text": choice.get("message", {}).get("content", ""),
+                "index": choice.get("index", 0),
+                "logprobs": None,
+                "finish_reason": choice.get("finish_reason"),
+            })
+        
+        return {
+            "id": result.get("id", ""),
+            "object": "text_completion",
+            "created": result.get("created", 0),
+            "model": result.get("model", request.model),
+            "choices": choices,
+            "usage": result.get("usage", {}),
+        }
     
     return result

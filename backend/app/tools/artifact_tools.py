@@ -114,6 +114,93 @@ class ArtifactStateManager:
             return artifact
         return None
     
+    def _get_min_indent(self, text: str) -> int:
+        """Get the minimum indentation (in spaces) of non-empty lines"""
+        lines = text.split('\n')
+        min_indent = float('inf')
+        for line in lines:
+            if line.strip():  # Non-empty line
+                indent = len(line) - len(line.lstrip())
+                min_indent = min(min_indent, indent)
+        return 0 if min_indent == float('inf') else min_indent
+    
+    def _normalize_whitespace(self, text: str) -> str:
+        """Normalize text for whitespace-flexible matching (strip each line, collapse to single spaces)"""
+        lines = text.split('\n')
+        normalized = []
+        for line in lines:
+            # Strip and collapse internal whitespace
+            normalized.append(' '.join(line.split()))
+        return '\n'.join(normalized)
+    
+    def _find_whitespace_flexible_match(self, content: str, search_text: str) -> Optional[Tuple[int, int, int]]:
+        """
+        Find search_text in content, ignoring whitespace differences.
+        
+        Returns:
+            Tuple of (start_index, end_index, min_indent_of_matched_block) or None
+        """
+        # Normalize both for comparison
+        search_normalized = self._normalize_whitespace(search_text)
+        search_lines_normalized = search_normalized.split('\n')
+        
+        content_lines = content.split('\n')
+        
+        # Sliding window search
+        for i in range(len(content_lines) - len(search_lines_normalized) + 1):
+            # Check if this window matches
+            match = True
+            for j, search_line in enumerate(search_lines_normalized):
+                content_line_normalized = ' '.join(content_lines[i + j].split())
+                if content_line_normalized != search_line:
+                    match = False
+                    break
+            
+            if match:
+                # Found match - calculate positions and min indent
+                matched_lines = content_lines[i:i + len(search_lines_normalized)]
+                
+                # Find min indent of matched block
+                min_indent = float('inf')
+                for line in matched_lines:
+                    if line.strip():
+                        indent = len(line) - len(line.lstrip())
+                        min_indent = min(min_indent, indent)
+                min_indent = 0 if min_indent == float('inf') else min_indent
+                
+                # Calculate character positions
+                start_pos = sum(len(content_lines[k]) + 1 for k in range(i))
+                end_pos = start_pos + sum(len(matched_lines[k]) + 1 for k in range(len(matched_lines))) - 1
+                
+                return (start_pos, end_pos, min_indent)
+        
+        return None
+    
+    def _apply_indent_to_replacement(self, replace_text: str, target_indent: int) -> str:
+        """
+        Apply target indentation to replacement text.
+        
+        1. Find the minimum indent in replace_text (treat as base 0)
+        2. Add target_indent to all lines
+        """
+        lines = replace_text.split('\n')
+        
+        # Find min indent in replacement
+        min_indent = self._get_min_indent(replace_text)
+        
+        # Adjust all lines
+        adjusted_lines = []
+        for line in lines:
+            if line.strip():  # Non-empty line
+                current_indent = len(line) - len(line.lstrip())
+                relative_indent = current_indent - min_indent
+                new_indent = target_indent + relative_indent
+                adjusted_lines.append(' ' * new_indent + line.lstrip())
+            else:
+                adjusted_lines.append(line)  # Keep empty lines as-is
+        
+        return '\n'.join(adjusted_lines)
+
     def search_replace(
         self,
         chat_id: str,
@@ -123,6 +210,11 @@ class ArtifactStateManager:
     ) -> Dict[str, Any]:
         """
         Perform search and replace on an artifact.
+        
+        Supports whitespace-flexible matching:
+        - Ignores differences in indentation and internal whitespace
+        - Preserves the indentation of the matched block
+        - Applies relative indentation from replacement text
         
         Returns detailed information including:
         - Success/failure status
@@ -155,9 +247,8 @@ class ArtifactStateManager:
                 "actual_lines": current_content.count('\n') + 1,
             }
         
-        # Try exact match
+        # Try exact match first
         if search_text in current_content:
-            # Count occurrences
             count = current_content.count(search_text)
             if count > 1:
                 return {
@@ -167,11 +258,10 @@ class ArtifactStateManager:
                     "matches_preview": self._find_matches_with_context(current_content, search_text),
                 }
             
-            # Perform replacement
+            # Perform exact replacement
             new_content = current_content.replace(search_text, replace_text, 1)
             artifact.update(new_content)
             
-            # Clear failed ops for this file since we succeeded
             self._failed_ops[chat_id] = [
                 op for op in self._failed_ops[chat_id]
                 if not op.params_hash.startswith(f"{path}:")
@@ -183,6 +273,47 @@ class ArtifactStateManager:
                 "version": artifact.version,
                 "message": f"Successfully replaced text in {path}",
                 "diff_preview": self._generate_diff_preview(search_text, replace_text),
+            }
+        
+        # Try whitespace-flexible match
+        flex_match = self._find_whitespace_flexible_match(current_content, search_text)
+        if flex_match:
+            start_pos, end_pos, matched_indent = flex_match
+            
+            # Apply indentation to replacement
+            adjusted_replacement = self._apply_indent_to_replacement(replace_text, matched_indent)
+            
+            # Find the actual matched text by line indices
+            content_lines = current_content.split('\n')
+            search_line_count = len(search_text.split('\n'))
+            
+            # Recalculate line positions
+            char_count = 0
+            start_line = 0
+            for i, line in enumerate(content_lines):
+                if char_count >= start_pos:
+                    start_line = i
+                    break
+                char_count += len(line) + 1
+            
+            # Replace the matched lines
+            end_line = start_line + search_line_count
+            new_lines = content_lines[:start_line] + adjusted_replacement.split('\n') + content_lines[end_line:]
+            new_content = '\n'.join(new_lines)
+            
+            artifact.update(new_content)
+            
+            self._failed_ops[chat_id] = [
+                op for op in self._failed_ops[chat_id]
+                if not op.params_hash.startswith(f"{path}:")
+            ]
+            
+            return {
+                "success": True,
+                "path": path,
+                "version": artifact.version,
+                "message": f"Successfully replaced text in {path} (whitespace-flexible match, indent={matched_indent})",
+                "diff_preview": self._generate_diff_preview(search_text, adjusted_replacement),
             }
         
         # Search text not found - provide helpful information

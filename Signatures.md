@@ -95,7 +95,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.89"  # Current database schema version
+SCHEMA_VERSION = "NC-0.6.90"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1226,10 +1226,14 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.68**
+**NC-0.6.96**
 
 Changes:
-- NC-0.6.89: **Fix new chat + model validation** - restored missing @router.post decorator, lenient model validation (warn only), validation endpoint /api/models/validate/{model_id}, Today expanded by default
+- NC-0.6.96: **Context overflow fix** - large code summaries saved to {AgentCodeSummary}.md, new search_archived_context tool, fixed context_size reading from LLMProvider
+- NC-0.6.95: **Image detection fix + admin settings** - removed redundant negative regex patterns (caused false negatives when "the image" appeared in prompt), moved IMAGE_CONFIRM_WITH_LLM to admin panel, added image_classification_prompt and image_classification_true_response settings
+- NC-0.6.94: **Global KB retry fix** - regenerate/retry now triggers RAG search (was skipped due to is_tool_result flag), added explicit is_tool_continuation flag for tool results
+- NC-0.6.90: **Inline tool calls** - `<$ToolName>` syntax in streaming, `call_tool` primitive for filter chains
+- NC-0.6.89: **Fix new chat + model validation + API key URL param** - restored missing @router.post, lenient model validation, validation endpoint, Today expanded, v1 APIs accept ?api_key= query param
 - NC-0.6.88: **Auto-load all chats** - increased page_size (500 frontend, 1000 backend max), auto-loads remaining chats after initial fetch, shows loading indicator
 - NC-0.6.87: **All sections expanded** - accordion uses Set<string> for multiple expanded sections, all expand by default, fixed nested button HTML, double-confirm for section delete
 - NC-0.6.86: **Calendar day grouping** - sidebar groups use calendar days (midnight-to-midnight) not hour-based diff, preventing overlap
@@ -1269,7 +1273,7 @@ Changes:
 - NC-0.6.40: Global KB authoritative injection, unified KB search (Global always, Custom GPT only when active), single-path title generation (websocket.py only)
 - NC-0.6.39: Aggressive stop generation (closes HTTP connection), file persistence to database, DB fallback for LLM file tools, remove KB upload rate limit
 - NC-0.6.38: File upload to artifacts, partial file viewing tools (view_file_lines, search_in_file, view_signature), removed 100K char filter limit
-- NC-0.6.37: LLM confirmation for image generation (safe fallback on error - returns False, not regex)
+- NC-0.6.37: LLM confirmation for image generation (NOTE: negative regex patterns were buggy, removed in NC-0.6.95)
 - NC-0.6.36: API keys table with proper migration, parent_id branching fixes
 - NC-0.6.35: Custom assistant chat association (assistant_id, assistant_name on chats)
 - NC-0.6.34: Message artifacts JSON column

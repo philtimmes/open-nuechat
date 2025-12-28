@@ -36,6 +36,7 @@ class ModelObject(BaseModel):
     root: Optional[str] = None
     parent: Optional[str] = None
     # Extension fields for NueChat
+    name: Optional[str] = None  # Display name
     description: Optional[str] = None
     context_length: Optional[int] = None
     is_custom_gpt: bool = False
@@ -57,6 +58,10 @@ async def list_models(
     """
     List available models.
     
+    **Authentication:**
+    - Header: `Authorization: Bearer nxs_...`
+    - Query parameter: `?api_key=nxs_...`
+    
     Returns base models from the LLM backend plus any Custom GPTs
     the user has created or subscribed to.
     
@@ -67,19 +72,36 @@ async def list_models(
     user, api_key = auth
     models: List[ModelObject] = []
     
-    # 1. Add base models from settings
+    # 1. Get ALL available models from the LLM backend
     try:
-        default_model = await SettingsService.get(db, "llm_model")
-        if not default_model:
-            default_model = "llama3.2"
-        models.append(ModelObject(
-            id=default_model,
-            created=int(datetime.now(timezone.utc).timestamp()),
-            owned_by="system",
-            description="Default LLM model",
-        ))
-    except Exception as e:
-        logger.warning(f"Could not get default model: {e}")
+        from app.services.llm import LLMService
+        llm_service = await LLMService.from_database(db)
+        backend_models = await llm_service.list_models()
+        
+        for m in backend_models:
+            if "id" in m and "error" not in m:
+                models.append(ModelObject(
+                    id=m["id"],
+                    name=m.get("name") or m["id"],
+                    created=m.get("created") or int(datetime.now(timezone.utc).timestamp()),
+                    owned_by=m.get("owned_by", "system"),
+                    description=f"LLM model: {m['id']}",
+                ))
+    except Exception:
+        # Fall back to default model from settings
+        try:
+            default_model = await SettingsService.get(db, "llm_model")
+            if not default_model:
+                default_model = "llama3.2"
+            models.append(ModelObject(
+                id=default_model,
+                name=default_model,
+                created=int(datetime.now(timezone.utc).timestamp()),
+                owned_by="system",
+                description="Default LLM model",
+            ))
+        except Exception:
+            pass
     
     # 2. Get user's custom assistants
     result = await db.execute(
@@ -91,19 +113,32 @@ async def list_models(
     
     for assistant in user_assistants:
         models.append(ModelObject(
-            id=f"gpt:{assistant.id}",
+            id=assistant.name,
+            name=assistant.name,
             created=int(assistant.created_at.timestamp()) if assistant.created_at else int(datetime.now(timezone.utc).timestamp()),
             owned_by=user.email or user.id,
             description=assistant.description,
             is_custom_gpt=True,
-            root=assistant.model,  # The underlying model
+            root=assistant.id,  # Store actual UUID for lookup
         ))
     
     # 3. Get subscribed assistants (public ones user subscribed to)
-    try:
-        # Parse subscribed IDs from user preferences
-        import json
-        prefs = json.loads(user.preferences or "{}")
+    # Fetch preferences via raw SQL to be consistent with rest of codebase
+    from sqlalchemy import text
+    result = await db.execute(
+        text("SELECT preferences FROM users WHERE id = :user_id"),
+        {"user_id": user.id}
+    )
+    row = result.fetchone()
+    
+    if row and row[0]:
+        prefs_raw = row[0]
+        if isinstance(prefs_raw, str):
+            import json
+            prefs = json.loads(prefs_raw)
+        else:
+            prefs = dict(prefs_raw) if prefs_raw else {}
+        
         subscribed_ids = prefs.get("subscribed_assistants", [])
         
         if subscribed_ids:
@@ -117,21 +152,19 @@ async def list_models(
             
             for assistant in subscribed:
                 # Avoid duplicates
-                if f"gpt:{assistant.id}" not in [m.id for m in models]:
+                if assistant.name not in [m.id for m in models]:
                     models.append(ModelObject(
-                        id=f"gpt:{assistant.id}",
+                        id=assistant.name,
+                        name=assistant.name,
                         created=int(assistant.created_at.timestamp()) if assistant.created_at else int(datetime.now(timezone.utc).timestamp()),
                         owned_by="marketplace",
                         description=assistant.description,
                         is_custom_gpt=True,
-                        root=assistant.model,
+                        root=assistant.id,  # Store actual UUID for lookup
                     ))
-    except Exception as e:
-        logger.warning(f"Could not load subscribed assistants: {e}")
     
     # 4. Check API key restrictions
     if api_key.allowed_assistants:
-        # Filter to only allowed assistants
         allowed_ids = set(api_key.allowed_assistants)
         models = [
             m for m in models 
@@ -149,12 +182,16 @@ async def get_model(
 ):
     """
     Get details of a specific model.
+    
+    **Authentication:**
+    - Header: `Authorization: Bearer nxs_...`
+    - Query parameter: `?api_key=nxs_...`
     """
     user, api_key = auth
     
     # Check if it's a custom GPT
     if model_id.startswith("gpt:"):
-        assistant_id = model_id[4:]  # Remove "gpt:" prefix
+        assistant_id = model_id[4:]
         
         # Check API key restrictions
         if api_key.allowed_assistants and assistant_id not in api_key.allowed_assistants:
@@ -174,17 +211,31 @@ async def get_model(
         is_owner = assistant.owner_id == user.id
         is_public = assistant.is_public
         
-        # Check subscription
-        import json
-        prefs = json.loads(user.preferences or "{}")
-        subscribed_ids = prefs.get("subscribed_assistants", [])
-        is_subscribed = assistant.id in subscribed_ids
+        # Check subscription via raw SQL
+        from sqlalchemy import text
+        result = await db.execute(
+            text("SELECT preferences FROM users WHERE id = :user_id"),
+            {"user_id": user.id}
+        )
+        row = result.fetchone()
+        
+        is_subscribed = False
+        if row and row[0]:
+            prefs_raw = row[0]
+            if isinstance(prefs_raw, str):
+                import json
+                prefs = json.loads(prefs_raw)
+            else:
+                prefs = dict(prefs_raw) if prefs_raw else {}
+            subscribed_ids = prefs.get("subscribed_assistants", [])
+            is_subscribed = assistant.id in subscribed_ids
         
         if not (is_owner or is_public or is_subscribed):
             raise HTTPException(status_code=403, detail="Access denied to this model")
         
         return ModelObject(
             id=model_id,
+            name=assistant.name,
             created=int(assistant.created_at.timestamp()) if assistant.created_at else int(datetime.now(timezone.utc).timestamp()),
             owned_by=user.email if is_owner else "marketplace",
             description=assistant.description,
@@ -195,6 +246,7 @@ async def get_model(
     # Base model - just return basic info
     return ModelObject(
         id=model_id,
+        name=model_id,
         created=int(datetime.now(timezone.utc).timestamp()),
         owned_by="system",
         description=f"Base model: {model_id}",

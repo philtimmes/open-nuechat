@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore } from '../stores/authStore';
 import { useModelsStore } from '../stores/modelsStore';
+import { useBrandingStore } from '../stores/brandingStore';
 import { formatRelativeTime } from '../lib/formatters';
 import api from '../lib/api';
 import type { Chat } from '../types';
@@ -492,13 +493,27 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   
   return (
     <aside className={sidebarClasses}>
-      {/* Header */}
+      {/* Header with Logo and App Name */}
       <div className="p-4 border-b border-[var(--color-border)]">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold text-lg md:text-base text-[var(--color-text)]">Chats</h2>
+          <div className="flex items-center gap-2 min-w-0">
+            {useBrandingStore.getState().config?.logo_url ? (
+              <img 
+                src={useBrandingStore.getState().config?.logo_url || ''} 
+                alt="Logo" 
+                className="h-7 w-7 object-contain flex-shrink-0 rounded"
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none';
+                }}
+              />
+            ) : null}
+            <h2 className="font-semibold text-lg md:text-base text-[var(--color-text)] truncate">
+              {useBrandingStore.getState().config?.app_name || 'Open-NueChat'}
+            </h2>
+          </div>
           <button
             onClick={onToggle}
-            className="p-2 md:p-1.5 rounded-lg hover:bg-zinc-700/30 transition-colors"
+            className="p-2 md:p-1.5 rounded-lg hover:bg-zinc-700/30 transition-colors flex-shrink-0"
           >
             <svg className="w-6 h-6 md:w-5 md:h-5 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               {isMobile ? (

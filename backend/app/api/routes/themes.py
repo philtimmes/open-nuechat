@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from typing import List
+from datetime import datetime
 
 from app.db.database import get_db
 from app.api.dependencies import get_current_user, get_optional_user
@@ -159,7 +160,9 @@ async def list_themes(
     user: User = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all available themes (system + public + user's own)"""
+    """List all available themes (system + public + user's own + admin custom themes)"""
+    from app.api.routes.admin import get_system_setting
+    import json
     
     # Get system and public themes
     query = select(Theme).where(
@@ -179,7 +182,50 @@ async def list_themes(
     result = await db.execute(query)
     themes = result.scalars().all()
     
-    return [ThemeResponse.model_validate(t) for t in themes]
+    theme_responses = [ThemeResponse.model_validate(t) for t in themes]
+    
+    # Also include custom themes from admin branding settings
+    try:
+        custom_themes_json = await get_system_setting(db, "custom_themes")
+        if custom_themes_json:
+            custom_themes = json.loads(custom_themes_json)
+            for ct in custom_themes:
+                if not ct.get('id') or not ct.get('name'):
+                    continue
+                
+                # Convert CSS variable format to colors dict
+                colors = {
+                    'primary': ct.get('--color-primary', '#8B5CF6'),
+                    'secondary': ct.get('--color-secondary', '#A78BFA'),
+                    'background': ct.get('--color-background', '#0F0F1A'),
+                    'surface': ct.get('--color-surface', '#1A1A2E'),
+                    'text': ct.get('--color-text', '#FAFAFA'),
+                    'text_secondary': ct.get('--color-text-secondary', '#A1A1AA'),
+                    'accent': ct.get('--color-accent', '#C084FC'),
+                    'error': ct.get('--color-error', '#EF4444'),
+                    'success': ct.get('--color-success', '#22C55E'),
+                    'warning': ct.get('--color-warning', '#F59E0B'),
+                    'border': ct.get('--color-border', '#27273A'),
+                    'button': ct.get('--color-button', ct.get('--color-primary', '#8B5CF6')),
+                    'button_text': ct.get('--color-button-text', '#FFFFFF'),
+                }
+                
+                # Create a ThemeResponse-like dict
+                theme_responses.append(ThemeResponse(
+                    id=f"custom-{ct['id']}",
+                    name=ct['name'],
+                    description=ct.get('description', 'Custom admin theme'),
+                    is_public=True,
+                    is_system=False,  # Mark as non-system so they appear in custom section
+                    colors=colors,
+                    fonts={'heading': 'Inter', 'body': 'Inter', 'code': 'JetBrains Mono'},
+                    created_at=datetime.now(),
+                ))
+    except Exception as e:
+        # Silently ignore errors parsing custom themes
+        pass
+    
+    return theme_responses
 
 
 @router.get("/system", response_model=List[dict])

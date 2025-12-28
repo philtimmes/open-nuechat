@@ -192,6 +192,89 @@ async def update_me(
     return user
 
 
+from pydantic import BaseModel, Field
+
+class ChangePasswordRequest(BaseModel):
+    """Request to change password"""
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8)
+
+
+@router.post("/change-password")
+async def change_password(
+    data: ChangePasswordRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Change the current user's password.
+    
+    Requires the current password for verification.
+    Only works for users with a password (not OAuth-only users).
+    """
+    # Check if user has a password set
+    if not user.hashed_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot change password for OAuth-only accounts. Please set a password first through account settings."
+        )
+    
+    # Verify current password
+    if not AuthService.verify_password(data.current_password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect"
+        )
+    
+    # Validate new password
+    if len(data.new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be at least 8 characters"
+        )
+    
+    # Hash and set new password
+    user.hashed_password = AuthService.hash_password(data.new_password)
+    await db.commit()
+    
+    return {"message": "Password changed successfully"}
+
+
+@router.post("/set-password")
+async def set_password(
+    data: ChangePasswordRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Set a password for OAuth-only accounts.
+    
+    For users who signed up via OAuth and want to add a password.
+    current_password field is ignored for OAuth-only accounts.
+    """
+    # If user already has a password, use change-password instead
+    if user.hashed_password:
+        # Verify current password
+        if not AuthService.verify_password(data.current_password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Current password is incorrect"
+            )
+    
+    # Validate new password
+    if len(data.new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters"
+        )
+    
+    # Hash and set password
+    user.hashed_password = AuthService.hash_password(data.new_password)
+    await db.commit()
+    
+    return {"message": "Password set successfully"}
+
+
 @router.post("/logout")
 async def logout(
     request: Request,
