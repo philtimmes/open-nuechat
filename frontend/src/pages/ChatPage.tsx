@@ -204,6 +204,7 @@ interface MessageListProps {
   onReadAloud?: (content: string) => void;
   onImageRetry?: (prompt: string, width?: number, height?: number, seed?: number) => void;
   onImageEdit?: (prompt: string) => void;
+  onPythonError?: (messageId: string, error: string, code: string) => void;
   readingMessageId?: string | null;
   onArtifactClick: (artifact: Artifact) => void;
   onBranchChange: (parentId: string, childId: string) => void;
@@ -341,6 +342,7 @@ const MessageList = memo(function MessageList({
   onReadAloud,
   onImageRetry,
   onImageEdit,
+  onPythonError,
   readingMessageId,
   onArtifactClick,
   onBranchChange,
@@ -504,6 +506,7 @@ const MessageList = memo(function MessageList({
               onReadAloud={message.role === 'assistant' && onReadAloud ? onReadAloud : undefined}
               onImageRetry={onImageRetry}
               onImageEdit={onImageEdit}
+              onPythonError={onPythonError}
               isReadingAloud={readingMessageId === message.id}
               onArtifactClick={onArtifactClick}
               onBranchChange={() => {}}
@@ -1303,6 +1306,42 @@ export default function ChatPage() {
     regenerateMessage(currentChat.id, lastUserMessage.content, lastUserMessage.id);
   }, [currentChat, messages, regenerateMessage, stopReading]);
   
+  // Handle Python execution errors - send error feedback to LLM
+  const handlePythonError = useCallback(async (assistantMessageId: string, error: string, pythonCode: string) => {
+    if (!currentChat) return;
+    
+    // Find the assistant message that contains the error
+    const assistantMessage = messages.find(m => m.id === assistantMessageId);
+    if (!assistantMessage || assistantMessage.role !== 'assistant') return;
+    
+    // Find the parent user message
+    const parentUserMessage = messages.find(m => m.id === assistantMessage.parent_id);
+    if (!parentUserMessage) return;
+    
+    console.log('[PythonError] Sending error feedback to LLM:', error);
+    
+    // Create error feedback message for LLM (don't delete the message, just continue)
+    const errorFeedback = `[PYTHON EXECUTION ERROR - Please review and fix]
+
+The Python code you provided encountered an error when executed:
+
+Error: ${error}
+
+Code that failed:
+\`\`\`python
+${pythonCode}
+\`\`\`
+
+Please analyze the error and provide corrected code. Common issues:
+- Import errors (module not available in Pyodide)
+- Syntax errors
+- Runtime errors (division by zero, index out of range, etc.)
+- Type errors`;
+    
+    // Send as a continuation with error context (empty attachments array)
+    sendChatMessage(currentChat.id, errorFeedback, [], parentUserMessage.id);
+  }, [currentChat, messages, sendChatMessage]);
+  
   const handleBranchChange = useCallback((parentId: string, childId: string) => {
     // Branch change is handled by MessageList state
     // Could persist to server here if needed
@@ -1948,6 +1987,7 @@ export default function ChatPage() {
                   onReadAloud={ttsEnabled ? readAloud : undefined}
                   onImageRetry={handleImageRetry}
                   onImageEdit={handleImageEdit}
+                  onPythonError={handlePythonError}
                   readingMessageId={readingMessageId}
                   onArtifactClick={handleArtifactClick}
                   onBranchChange={handleBranchChange}

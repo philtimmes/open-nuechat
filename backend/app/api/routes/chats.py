@@ -1079,7 +1079,7 @@ async def delete_message(
                     Message.id.not_in(ids_to_delete)
                 ).order_by(Message.created_at.desc())
             )
-            sibling = result.scalar_one_or_none()
+            sibling = result.scalars().first()
             
             if sibling:
                 # Select the most recent remaining sibling

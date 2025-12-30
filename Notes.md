@@ -49,6 +49,77 @@ Full-stack LLM chat application with:
 **Files Changed:**
 - `backend/app/services/auth.py`: Create KnowledgeStore and set `chat_knowledge_store_id` during user creation
 
+### Mermaid Diagram Rendering
+
+Added inline Mermaid diagram rendering in chat messages. When a code block uses the `mermaid` language, it renders as an interactive diagram.
+
+**Features:**
+- Uses iframe with CDN mermaid (same as ArtifactsPanel) for consistent rendering
+- **Theme-aware colors**: Background and text colors match the current theme (reads CSS variables)
+- Preview/Code toggle buttons
+- Auto-sizing iframe based on diagram height
+
+**Theme Integration:**
+- Reads `--color-bg-primary`, `--color-text-primary`, `--color-primary`, `--color-border` from CSS variables
+- Diagram colors automatically adapt to light/dark themes
+
+**Implementation:**
+- Renders mermaid via iframe with `https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js`
+- Sandboxed iframe with `allow-scripts` only
+- Height communicated via postMessage from iframe to parent
+- No npm mermaid dependency - CDN ensures latest version
+
+**Files Changed:**
+- `frontend/src/components/MessageBubble.tsx`: MermaidDiagram component using iframe with theme colors
+- `frontend/package.json`: Removed mermaid npm dependency (using CDN)
+
+### Transparent PNG Export for Artifacts
+
+Added ability to export Mermaid diagrams and SVGs as transparent PNG images.
+
+**Features:**
+- Export button appears for mermaid and SVG artifacts in Preview tab
+- Exports at 2x resolution for better quality
+- Transparent background (no fill)
+- Uses canvas API for conversion
+
+**Files Changed:**
+- `frontend/src/components/ArtifactsPanel.tsx`: Added `downloadPng` function and export button
+
+### Sandboxed Python Runner
+
+Added browser-based Python execution using Pyodide (Python compiled to WebAssembly).
+
+**Features:**
+- Runs Python directly in the browser - no server required
+- **4 tabs**: Code, Args, Packages, Output
+- **Arguments form**: Enter command-line args (available as sys.argv[1:])
+- **Per-session pip install**: Install PyPI packages via micropip
+- **"Inform model of errors" checkbox**: When checked, execution errors are automatically sent to the LLM for correction
+- Pre-loads numpy package
+- Captures stdout and return values
+
+**Tabs:**
+- **Code**: Editable textarea for Python code
+- **Args**: Space-separated command-line arguments
+- **Packages**: Install packages via micropip, shows installed packages
+- **Output**: Execution output and errors
+
+**Usage:** Any ```` ```python ```` or ```` ```py ```` code block renders with Run button and tabs.
+
+**Error reporting flow:**
+1. User checks "Inform model of errors" checkbox
+2. Runs code that fails
+3. Error is sent to LLM as context message
+4. LLM receives error details and can provide corrected code
+
+**Server-side:** The LLM already has access to `execute_python` tool for sandboxed server-side execution.
+
+**Files Changed:**
+- `frontend/src/components/MessageBubble.tsx`: Enhanced PythonRunner with args, packages, error reporting
+- `frontend/src/pages/ChatPage.tsx`: Added handlePythonError for LLM feedback
+- `frontend/package.json`: Added pyodide dependency
+
 ---
 
 ## Recent Changes (NC-0.7.00)

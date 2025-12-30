@@ -17,6 +17,7 @@
     "jszip": "^3.10.1",
     "katex": "^0.16.11",
     "lucide-react": "^0.469.0",
+    "pyodide": "^0.29.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.3",

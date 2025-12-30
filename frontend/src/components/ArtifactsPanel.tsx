@@ -135,6 +135,99 @@ export default function ArtifactsPanel({
     URL.revokeObjectURL(url);
   };
   
+  // Export mermaid/SVG to transparent PNG
+  const [isExportingPng, setIsExportingPng] = useState(false);
+  
+  const downloadPng = useCallback(async () => {
+    if (!selectedArtifact || !iframeRef.current) return;
+    
+    setIsExportingPng(true);
+    
+    try {
+      // Get SVG from iframe
+      const iframeDoc = iframeRef.current.contentDocument || iframeRef.current.contentWindow?.document;
+      if (!iframeDoc) {
+        console.error('Cannot access iframe document');
+        return;
+      }
+      
+      const svgElement = iframeDoc.querySelector('svg');
+      if (!svgElement) {
+        console.error('No SVG found in iframe');
+        return;
+      }
+      
+      // Clone SVG and set transparent background
+      const svgClone = svgElement.cloneNode(true) as SVGSVGElement;
+      svgClone.style.background = 'transparent';
+      
+      // Get dimensions
+      const bbox = svgElement.getBoundingClientRect();
+      const width = bbox.width || 800;
+      const height = bbox.height || 600;
+      
+      // Set viewBox if not present
+      if (!svgClone.getAttribute('viewBox')) {
+        svgClone.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      }
+      svgClone.setAttribute('width', String(width));
+      svgClone.setAttribute('height', String(height));
+      
+      // Convert to data URL
+      const svgData = new XMLSerializer().serializeToString(svgClone);
+      const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+      const svgUrl = URL.createObjectURL(svgBlob);
+      
+      // Create canvas and draw
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      
+      // Use 2x scale for better quality
+      const scale = 2;
+      canvas.width = width * scale;
+      canvas.height = height * scale;
+      ctx.scale(scale, scale);
+      
+      // Don't fill background - leave transparent
+      
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        // Convert to PNG
+        canvas.toBlob((blob) => {
+          if (!blob) return;
+          
+          const filename = selectedArtifact.filename 
+            ? selectedArtifact.filename.replace(/\.(mmd|svg)$/i, '.png').split('/').pop()
+            : `${selectedArtifact.title.replace(/\s+/g, '_')}.png`;
+          
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename || 'diagram.png';
+          a.click();
+          URL.revokeObjectURL(url);
+          URL.revokeObjectURL(svgUrl);
+          setIsExportingPng(false);
+        }, 'image/png');
+      };
+      
+      img.onerror = () => {
+        console.error('Failed to load SVG as image');
+        URL.revokeObjectURL(svgUrl);
+        setIsExportingPng(false);
+      };
+      
+      img.src = svgUrl;
+      
+    } catch (error) {
+      console.error('Failed to export PNG:', error);
+      setIsExportingPng(false);
+    }
+  }, [selectedArtifact]);
+  
   // Convert markdown to PDF and download via API
   const downloadPdf = useCallback(async () => {
     if (!selectedArtifact || selectedArtifact.type !== 'markdown') return;
@@ -874,6 +967,26 @@ export default function ArtifactsPanel({
                     ) : (
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                      </svg>
+                    )}
+                  </button>
+                )}
+                {/* PNG export for mermaid/SVG - show when preview tab */}
+                {(selectedArtifact?.type === 'mermaid' || selectedArtifact?.type === 'svg') && activeTab === 'preview' && (
+                  <button
+                    onClick={downloadPng}
+                    disabled={isExportingPng}
+                    className="p-2 rounded-lg hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] disabled:opacity-50"
+                    title="Export as transparent PNG"
+                  >
+                    {isExportingPng ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                       </svg>
                     )}
                   </button>

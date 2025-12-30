@@ -1,4 +1,4 @@
-import React, { useState, memo, useEffect } from 'react';
+import React, { useState, memo, useEffect, useRef } from 'react';
 import type { Message, Artifact, GeneratedImage } from '../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -9,6 +9,646 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import GeneratedImageCard from './GeneratedImageCard';
 import api from '../lib/api';
 import 'katex/dist/katex.min.css';
+
+// Mermaid diagram component with Preview/Code toggle
+// Uses iframe with CDN mermaid for consistent rendering (same as ArtifactsPanel)
+const MermaidDiagram = memo(({ code }: { code: string }) => {
+  const [view, setView] = useState<'preview' | 'code'>('preview');
+  const [height, setHeight] = useState(200);
+  const iframeId = useRef(`mermaid-iframe-${Math.random().toString(36).substr(2, 9)}`);
+  
+  // Get theme colors from CSS variables
+  const getThemeColors = () => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      background: style.getPropertyValue('--color-bg-primary').trim() || '#18181b',
+      text: style.getPropertyValue('--color-text-primary').trim() || '#e4e4e7',
+      primary: style.getPropertyValue('--color-primary').trim() || '#6366f1',
+      border: style.getPropertyValue('--color-border').trim() || '#52525b',
+    };
+  };
+  
+  const colors = getThemeColors();
+
+  // Generate iframe content with CDN mermaid (same approach as ArtifactsPanel)
+  const iframeContent = `<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { 
+      margin: 0; 
+      padding: 16px; 
+      background: ${colors.background}; 
+      display: flex;
+      justify-content: center;
+      min-height: fit-content;
+    }
+    .mermaid { 
+      background: transparent;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"><\/script>
+</head>
+<body>
+  <div class="mermaid">${code}</div>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      securityLevel: 'loose',
+      themeVariables: {
+        background: '${colors.background}',
+        primaryColor: '${colors.primary}',
+        primaryTextColor: '${colors.text}',
+        primaryBorderColor: '${colors.border}',
+        lineColor: '${colors.text}',
+        secondaryColor: '${colors.primary}22',
+        tertiaryColor: '${colors.background}',
+        mainBkg: '${colors.primary}33',
+        nodeBorder: '${colors.border}',
+        clusterBkg: '${colors.background}',
+        titleColor: '${colors.text}',
+        edgeLabelBackground: '${colors.background}',
+        textColor: '${colors.text}',
+        nodeTextColor: '${colors.text}',
+      }
+    });
+    // Notify parent of height after render
+    setTimeout(function() {
+      var height = document.body.scrollHeight;
+      window.parent.postMessage({ type: 'mermaid-height', id: '${iframeId.current}', height: height }, '*');
+    }, 500);
+  <\/script>
+</body>
+</html>`;
+
+  // Listen for height messages from iframe
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'mermaid-height' && event.data.id === iframeId.current && event.data.height) {
+        setHeight(Math.min(event.data.height + 20, 600)); // Cap at 600px
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  return (
+    <div className="my-3 rounded-lg bg-zinc-900 overflow-hidden">
+      {/* Toggle header */}
+      <div className="flex items-center gap-1 px-3 py-2 bg-zinc-800 border-b border-zinc-700">
+        <span className="text-xs text-zinc-400 mr-2">Mermaid</span>
+        <button
+          onClick={() => setView('preview')}
+          className={`px-2 py-0.5 text-xs rounded transition-colors ${
+            view === 'preview' 
+              ? 'bg-[var(--color-primary)] text-white' 
+              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+          }`}
+        >
+          Preview
+        </button>
+        <button
+          onClick={() => setView('code')}
+          className={`px-2 py-0.5 text-xs rounded transition-colors ${
+            view === 'code' 
+              ? 'bg-[var(--color-primary)] text-white' 
+              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+          }`}
+        >
+          Code
+        </button>
+      </div>
+      
+      {/* Content */}
+      {view === 'preview' ? (
+        <div className="overflow-auto" style={{ maxHeight: '600px' }}>
+          <iframe
+            srcDoc={iframeContent}
+            className="w-full border-0"
+            style={{ height: `${height}px`, background: colors.background }}
+            sandbox="allow-scripts"
+            title="Mermaid diagram"
+          />
+        </div>
+      ) : (
+        <SyntaxHighlighter
+          style={oneDark}
+          language="mermaid"
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            fontSize: '0.8125rem',
+            maxHeight: '70vh',
+            overflow: 'auto',
+          }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      )}
+    </div>
+  );
+});
+
+// SVG Preview component with Preview/Code toggle
+// Uses iframe for consistent rendering (same as ArtifactsPanel)
+const SVGPreview = memo(({ code }: { code: string }) => {
+  const [view, setView] = useState<'preview' | 'code'>('preview');
+  const [height, setHeight] = useState(200);
+  const iframeId = useRef(`svg-iframe-${Math.random().toString(36).substr(2, 9)}`);
+  
+  // Get theme colors from CSS variables
+  const getThemeColors = () => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      background: style.getPropertyValue('--color-bg-primary').trim() || '#18181b',
+    };
+  };
+  
+  const colors = getThemeColors();
+
+  // Generate iframe content for SVG
+  const iframeContent = `<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { 
+      margin: 0; 
+      padding: 16px; 
+      background: ${colors.background}; 
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: fit-content;
+    }
+    svg {
+      max-width: 100%;
+      height: auto;
+    }
+  </style>
+</head>
+<body>
+  ${code}
+  <script>
+    // Notify parent of height after render
+    setTimeout(function() {
+      var height = document.body.scrollHeight;
+      window.parent.postMessage({ type: 'svg-height', id: '${iframeId.current}', height: height }, '*');
+    }, 100);
+  <\/script>
+</body>
+</html>`;
+
+  // Listen for height messages from iframe
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'svg-height' && event.data.id === iframeId.current && event.data.height) {
+        setHeight(Math.min(event.data.height + 20, 600)); // Cap at 600px
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  return (
+    <div className="my-3 rounded-lg bg-zinc-900 overflow-hidden">
+      {/* Toggle header */}
+      <div className="flex items-center gap-1 px-3 py-2 bg-zinc-800 border-b border-zinc-700">
+        <span className="text-xs text-zinc-400 mr-2">SVG</span>
+        <button
+          onClick={() => setView('preview')}
+          className={`px-2 py-0.5 text-xs rounded transition-colors ${
+            view === 'preview' 
+              ? 'bg-[var(--color-primary)] text-white' 
+              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+          }`}
+        >
+          Preview
+        </button>
+        <button
+          onClick={() => setView('code')}
+          className={`px-2 py-0.5 text-xs rounded transition-colors ${
+            view === 'code' 
+              ? 'bg-[var(--color-primary)] text-white' 
+              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+          }`}
+        >
+          Code
+        </button>
+      </div>
+      
+      {/* Content */}
+      {view === 'preview' ? (
+        <div className="overflow-auto" style={{ maxHeight: '600px' }}>
+          <iframe
+            srcDoc={iframeContent}
+            className="w-full border-0"
+            style={{ height: `${height}px`, background: colors.background }}
+            sandbox="allow-scripts"
+            title="SVG preview"
+          />
+        </div>
+      ) : (
+        <SyntaxHighlighter
+          style={oneDark}
+          language="xml"
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            fontSize: '0.8125rem',
+            maxHeight: '70vh',
+            overflow: 'auto',
+          }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      )}
+    </div>
+  );
+});
+
+// LaTeX block component with Preview/Code toggle
+const LaTeXBlock = memo(({ code }: { code: string }) => {
+  const [view, setView] = useState<'preview' | 'code'>('preview');
+
+  return (
+    <div className="my-3 rounded-lg bg-zinc-900 overflow-hidden">
+      {/* Toggle header */}
+      <div className="flex items-center gap-1 px-3 py-2 bg-zinc-800 border-b border-zinc-700">
+        <span className="text-xs text-zinc-400 mr-2">LaTeX</span>
+        <button
+          onClick={() => setView('preview')}
+          className={`px-2 py-0.5 text-xs rounded transition-colors ${
+            view === 'preview' 
+              ? 'bg-[var(--color-primary)] text-white' 
+              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+          }`}
+        >
+          Preview
+        </button>
+        <button
+          onClick={() => setView('code')}
+          className={`px-2 py-0.5 text-xs rounded transition-colors ${
+            view === 'code' 
+              ? 'bg-[var(--color-primary)] text-white' 
+              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+          }`}
+        >
+          Code
+        </button>
+      </div>
+      
+      {/* Content */}
+      {view === 'preview' ? (
+        <div className="p-4 overflow-x-auto">
+          <ReactMarkdown
+            remarkPlugins={[remarkMath]}
+            rehypePlugins={[rehypeKatex]}
+          >
+            {`$$${code}$$`}
+          </ReactMarkdown>
+        </div>
+      ) : (
+        <SyntaxHighlighter
+          style={oneDark}
+          language="latex"
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            fontSize: '0.8125rem',
+            maxHeight: '70vh',
+            overflow: 'auto',
+          }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      )}
+    </div>
+  );
+});
+
+// Pyodide loader - singleton pattern with installed packages tracking
+let pyodidePromise: Promise<any> | null = null;
+let installedPackages: Set<string> = new Set(['numpy', 'micropip']);
+
+const loadPyodide = async () => {
+  if (!pyodidePromise) {
+    pyodidePromise = (async () => {
+      // @ts-ignore - Pyodide loaded from CDN
+      const pyodide = await window.loadPyodide({
+        indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.24.1/full/',
+      });
+      // Pre-load common packages
+      await pyodide.loadPackage(['numpy', 'micropip']);
+      return pyodide;
+    })();
+  }
+  return pyodidePromise;
+};
+
+// Install a package via micropip
+const installPackage = async (packageName: string): Promise<{ success: boolean; message: string }> => {
+  if (installedPackages.has(packageName.toLowerCase())) {
+    return { success: true, message: `${packageName} is already installed` };
+  }
+  
+  try {
+    const pyodide = await loadPyodide();
+    await pyodide.runPythonAsync(`
+import micropip
+await micropip.install('${packageName}')
+    `);
+    installedPackages.add(packageName.toLowerCase());
+    return { success: true, message: `Successfully installed ${packageName}` };
+  } catch (e: any) {
+    return { success: false, message: e.message || `Failed to install ${packageName}` };
+  }
+};
+
+// Python runner component with Code/Output/Args tabs, pip install, and error reporting
+const PythonRunner = memo(({ code: initialCode, onError }: { code: string; onError?: (error: string, code: string) => void }) => {
+  const [view, setView] = useState<'code' | 'output' | 'args' | 'packages'>('code');
+  const [code, setCode] = useState(initialCode);
+  const [args, setArgs] = useState<string>('');
+  const [output, setOutput] = useState<string>('');
+  const [error, setError] = useState<string | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [pyodideReady, setPyodideReady] = useState(false);
+  const [informModel, setInformModel] = useState(false);
+  const [hasReportedError, setHasReportedError] = useState(false);
+  const lastReportedErrorRef = useRef<string>('');
+  
+  // Package management
+  const [packageInput, setPackageInput] = useState('');
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [packageStatus, setPackageStatus] = useState<string | null>(null);
+  const [sessionPackages, setSessionPackages] = useState<string[]>([...installedPackages]);
+
+  // Check if Pyodide script is loaded
+  useEffect(() => {
+    const checkPyodide = () => {
+      // @ts-ignore
+      if (window.loadPyodide) {
+        setPyodideReady(true);
+      }
+    };
+    
+    checkPyodide();
+    
+    // @ts-ignore
+    if (!window.loadPyodide) {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js';
+      script.onload = checkPyodide;
+      document.head.appendChild(script);
+    }
+  }, []);
+
+  const handleInstallPackage = async () => {
+    if (!packageInput.trim() || isInstalling) return;
+    
+    setIsInstalling(true);
+    setPackageStatus(null);
+    
+    const result = await installPackage(packageInput.trim());
+    setPackageStatus(result.message);
+    
+    if (result.success) {
+      setSessionPackages([...installedPackages]);
+      setPackageInput('');
+    }
+    
+    setIsInstalling(false);
+  };
+
+  const runCode = async () => {
+    if (!pyodideReady) {
+      setError('Pyodide is still loading...');
+      return;
+    }
+    
+    setIsRunning(true);
+    setIsLoading(true);
+    setError(null);
+    setOutput('');
+    setView('output');
+    setHasReportedError(false);
+
+    try {
+      const pyodide = await loadPyodide();
+      setIsLoading(false);
+      
+      // Parse args into sys.argv
+      const argsList = args.trim() ? args.trim().split(/\s+/) : [];
+      
+      // Set up sys.argv
+      await pyodide.runPythonAsync(`
+import sys
+sys.argv = ['script.py'] + ${JSON.stringify(argsList)}
+      `);
+      
+      // Capture stdout
+      let stdout = '';
+      pyodide.setStdout({
+        batched: (text: string) => {
+          stdout += text + '\n';
+          setOutput(stdout);
+        }
+      });
+      
+      // Run the code
+      const result = await pyodide.runPythonAsync(code);
+      
+      // If there's a return value, add it to output
+      if (result !== undefined && result !== null) {
+        const resultStr = String(result);
+        if (resultStr && resultStr !== 'None') {
+          stdout += resultStr;
+          setOutput(stdout);
+        }
+      }
+      
+      if (!stdout.trim()) {
+        setOutput('(No output)');
+      }
+    } catch (e: any) {
+      setIsLoading(false);
+      const errorMsg = e.message || 'Execution failed';
+      setError(errorMsg);
+      
+      // Report error to LLM if checkbox is checked (only once per unique error)
+      const errorKey = `${code}:${errorMsg}`;
+      if (informModel && onError && !hasReportedError && lastReportedErrorRef.current !== errorKey) {
+        setHasReportedError(true);
+        lastReportedErrorRef.current = errorKey;
+        onError(errorMsg, code);
+      }
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  return (
+    <div className="my-3 rounded-lg bg-zinc-900 overflow-hidden">
+      {/* Header with tabs and run button */}
+      <div className="flex items-center justify-between px-3 py-2 bg-zinc-800 border-b border-zinc-700 flex-wrap gap-2">
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-zinc-400 mr-2">Python</span>
+          {(['code', 'args', 'packages', 'output'] as const).map(tab => (
+            <button
+              key={tab}
+              onClick={() => setView(tab)}
+              className={`px-2 py-0.5 text-xs rounded transition-colors ${
+                view === tab 
+                  ? 'bg-[var(--color-primary)] text-white' 
+                  : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+              }`}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          {onError && (
+            <label className="flex items-center gap-1 text-xs text-zinc-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={informModel}
+                onChange={(e) => setInformModel(e.target.checked)}
+                className="w-3 h-3 rounded border-zinc-600 bg-zinc-700 text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
+              />
+              Inform model of errors
+            </label>
+          )}
+          <button
+            onClick={runCode}
+            disabled={isRunning || !pyodideReady}
+            className="flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-green-600 text-white hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {isRunning ? (
+              <>
+                <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+                Running...
+              </>
+            ) : (
+              <>
+                <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                </svg>
+                Run
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+      
+      {/* Content */}
+      {view === 'code' ? (
+        <div className="relative">
+          <textarea
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            className="w-full p-4 bg-zinc-900 text-zinc-100 font-mono text-sm resize-y min-h-[100px] max-h-[50vh] focus:outline-none"
+            spellCheck={false}
+            placeholder="# Enter Python code here..."
+          />
+        </div>
+      ) : view === 'args' ? (
+        <div className="p-4">
+          <label className="block text-xs text-zinc-400 mb-2">
+            Command-line arguments (space-separated, available as sys.argv[1:])
+          </label>
+          <input
+            type="text"
+            value={args}
+            onChange={(e) => setArgs(e.target.value)}
+            className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-zinc-100 font-mono text-sm focus:outline-none focus:border-[var(--color-primary)]"
+            placeholder="arg1 arg2 --flag value"
+          />
+          <div className="mt-3 text-xs text-zinc-500">
+            Example: If you enter "hello world --count 5", your code can access:
+            <pre className="mt-1 p-2 bg-zinc-800 rounded">
+              {`import sys
+print(sys.argv)  # ['script.py', 'hello', 'world', '--count', '5']`}
+            </pre>
+          </div>
+        </div>
+      ) : view === 'packages' ? (
+        <div className="p-4">
+          <label className="block text-xs text-zinc-400 mb-2">
+            Install packages (via micropip - PyPI packages that support Pyodide)
+          </label>
+          <div className="flex gap-2 mb-3">
+            <input
+              type="text"
+              value={packageInput}
+              onChange={(e) => setPackageInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleInstallPackage()}
+              className="flex-1 px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-zinc-100 font-mono text-sm focus:outline-none focus:border-[var(--color-primary)]"
+              placeholder="package-name"
+              disabled={isInstalling}
+            />
+            <button
+              onClick={handleInstallPackage}
+              disabled={isInstalling || !packageInput.trim()}
+              className="px-3 py-2 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {isInstalling ? 'Installing...' : 'Install'}
+            </button>
+          </div>
+          {packageStatus && (
+            <div className={`text-xs mb-3 ${packageStatus.includes('Success') ? 'text-green-400' : 'text-red-400'}`}>
+              {packageStatus}
+            </div>
+          )}
+          <div className="text-xs text-zinc-400 mb-2">Installed packages (this session):</div>
+          <div className="flex flex-wrap gap-1">
+            {sessionPackages.map(pkg => (
+              <span key={pkg} className="px-2 py-0.5 bg-zinc-700 rounded text-xs text-zinc-300">
+                {pkg}
+              </span>
+            ))}
+          </div>
+          <div className="mt-3 text-xs text-zinc-500">
+            Note: Not all PyPI packages work with Pyodide. Pure Python packages and those with Pyodide wheels are supported.
+            <a href="https://pyodide.org/en/stable/usage/packages-in-pyodide.html" target="_blank" rel="noopener" className="text-blue-400 ml-1 hover:underline">
+              See supported packages →
+            </a>
+          </div>
+        </div>
+      ) : (
+        <div className="p-4 font-mono text-sm min-h-[100px] max-h-[50vh] overflow-auto">
+          {isLoading ? (
+            <div className="flex items-center gap-2 text-zinc-400">
+              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+              Loading Python environment...
+            </div>
+          ) : error ? (
+            <div className="text-red-400 whitespace-pre-wrap">{error}</div>
+          ) : output ? (
+            <div className="text-green-400 whitespace-pre-wrap">{output}</div>
+          ) : (
+            <div className="text-zinc-500">Click "Run" to execute the code</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
 
 // Tool citation data
 interface ToolCitation {
@@ -395,6 +1035,7 @@ interface MessageProps {
   onReadAloud?: (content: string) => void;
   onImageRetry?: (prompt: string, width?: number, height?: number, seed?: number) => void;
   onImageEdit?: (prompt: string) => void;
+  onPythonError?: (messageId: string, error: string, code: string) => void;
   isReadingAloud?: boolean;
   isLastAssistant?: boolean;
   onArtifactClick?: (artifact: Artifact) => void;
@@ -459,6 +1100,7 @@ function MessageBubbleInner({
   onReadAloud,
   onImageRetry,
   onImageEdit,
+  onPythonError,
   isReadingAloud,
   isLastAssistant,
   onArtifactClick,
@@ -771,6 +1413,43 @@ function MessageBubbleInner({
                   code({ node, inline, className, children, ...props }: any) {
                     const match = /language-(\w+)/.exec(className || '');
                     const code = String(children).replace(/\n$/, '');
+                    const language = match ? match[1].toLowerCase() : '';
+                    
+                    // Render mermaid diagrams
+                    // Errors are shown to user but NOT auto-reported to LLM
+                    // User can manually ask for fixes if needed
+                    if (!inline && language === 'mermaid') {
+                      return (
+                        <MermaidDiagram 
+                          code={code} 
+                        />
+                      );
+                    }
+                    
+                    // Render SVG with preview
+                    if (!inline && language === 'svg') {
+                      return (
+                        <SVGPreview 
+                          code={code} 
+                        />
+                      );
+                    }
+                    
+                    // Render Python with runner
+                    // User can check "Inform model of errors" to report errors
+                    if (!inline && (language === 'python' || language === 'py')) {
+                      return (
+                        <PythonRunner 
+                          code={code}
+                          onError={!isStreaming && onPythonError ? (error, pythonCode) => onPythonError(message.id, error, pythonCode) : undefined}
+                        />
+                      );
+                    }
+                    
+                    // Render LaTeX blocks
+                    if (!inline && (language === 'latex' || language === 'tex' || language === 'math')) {
+                      return <LaTeXBlock code={code} />;
+                    }
                     
                     // Extract filename from meta or first line comment
                     // Pattern: ```lang::/path/to/file or ```lang filename="/path/to/file"

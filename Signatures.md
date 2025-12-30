@@ -64,6 +64,10 @@ backend/app/
 ```
 frontend/src/
 ├── components/          # React components
+│   ├── MessageBubble.tsx  # Message display with:
+│   │   ├── MermaidDiagram   # Mermaid rendering with Preview/Code toggle
+│   │   ├── LaTeXBlock       # LaTeX rendering with Preview/Code toggle
+│   │   └── PythonRunner     # Browser Python with Args/Packages/Output tabs
 ├── hooks/
 │   ├── useMobile.ts
 │   ├── useVoice.ts
@@ -95,7 +99,7 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.6.90"  # Current database schema version
+SCHEMA_VERSION = "NC-0.7.01"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
@@ -1229,7 +1233,7 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 **NC-0.7.01**
 
 Changes:
-- NC-0.7.01: **Sidebar Accordion Fix + OAuth Fix + Chat Knowledge Default** - Fixed accordion loading (triggers fetchChats on expand), fixed OAuth feature flags (wrong endpoint `/api/admin/public/branding` → `/api/branding/config`), auto-create chat knowledge store for new users
+- NC-0.7.01: **Sidebar Accordion Fix + OAuth Fix + Chat Knowledge Default + Mermaid + LaTeX + Python Runner** - Fixed accordion loading, fixed OAuth feature flags, auto-create chat knowledge store for new users, inline Mermaid/LaTeX rendering with Preview/Code toggle, browser-based Python execution via Pyodide
 - NC-0.7.00: **Agent Flows + Claude Import + PDF Fix** - Visual agent workflow builder with persistence (AgentFlow model, /api/agent-flows CRUD), Claude.ai chat import support (thinking blocks, tool use, citations), PDF export fix (save_bytes API), artifact detection for `<artifact= filename>` with spaces
 - NC-0.6.99: **Lazy loading date groups + timezone fix** - Added date_group parameter to /chats endpoint, DELETE /chats/group/{group} for bulk delete, UTC timezone handling in frontend date grouping, enhanced search_replace error messages with line counts and diagnostics
 - NC-0.6.98: **Tool continuation single-leaf fix** - continue_message_id for proper branching, case-insensitive tool detection, null timestamp handling
