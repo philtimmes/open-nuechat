@@ -2023,13 +2023,13 @@ async def update_debug_settings(
 class SecuritySettingsResponse(BaseModel):
     """Response for security settings"""
     secret_key: str  # Masked or actual
-    debug_level: str
+    logging_level: str
 
 
 class SecuritySettingsUpdate(BaseModel):
     """Update security settings"""
     secret_key: Optional[str] = None
-    debug_level: Optional[str] = None
+    logging_level: Optional[str] = None
 
 
 @router.get("/security-settings", response_model=SecuritySettingsResponse)
@@ -2052,12 +2052,12 @@ async def get_security_settings(
         # Using env/default - show indicator
         masked = "(using environment variable or default)"
     
-    # Get debug level
-    debug_level = await get_system_setting(db, "debug_level") or "INFO"
+    # Get logging level
+    logging_level = await get_system_setting(db, "logging_level") or "INFO"
     
     return SecuritySettingsResponse(
         secret_key=masked,
-        debug_level=debug_level,
+        logging_level=logging_level,
     )
 
 
@@ -2079,23 +2079,23 @@ async def update_security_settings(
         await set_setting(db, "secret_key", data.secret_key)
         logger.info("SECRET_KEY updated via admin panel - restart required for changes to take effect")
     
-    if data.debug_level is not None:
+    if data.logging_level is not None:
         valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
-        if data.debug_level not in valid_levels:
+        if data.logging_level not in valid_levels:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid debug level. Must be one of: {', '.join(valid_levels)}"
+                detail=f"Invalid logging level. Must be one of: {', '.join(valid_levels)}"
             )
-        await set_setting(db, "debug_level", data.debug_level)
+        await set_setting(db, "logging_level", data.logging_level)
         
-        # Apply debug level immediately
-        log_level = getattr(logging, data.debug_level)
+        # Apply logging level immediately
+        log_level = getattr(logging, data.logging_level)
         logging.getLogger().setLevel(log_level)
         # Also update specific loggers
         for name in ['app', 'uvicorn', 'uvicorn.access', 'uvicorn.error']:
             logging.getLogger(name).setLevel(log_level)
         
-        logger.info(f"Debug level changed to {data.debug_level}")
+        logger.info(f"Logging level changed to {data.logging_level}")
     
     await db.commit()
     

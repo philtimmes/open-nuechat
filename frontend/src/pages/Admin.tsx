@@ -554,7 +554,7 @@ export default function Admin() {
   // Security settings (stored in backend)
   const [secretKey, setSecretKey] = useState<string>('');
   const [secretKeyMasked, setSecretKeyMasked] = useState(true);
-  const [debugLevel, setDebugLevel] = useState<string>('INFO');
+  const [loggingLevel, setLoggingLevel] = useState<string>('INFO');
   const [securitySettingsLoading, setSecuritySettingsLoading] = useState(false);
   
   // UI state
@@ -923,7 +923,7 @@ export default function Admin() {
     try {
       const res = await api.get('/admin/security-settings');
       setSecretKey(res.data.secret_key || '');
-      setDebugLevel(res.data.debug_level || 'INFO');
+      setLoggingLevel(res.data.logging_level || 'INFO');
     } catch (err: any) {
       console.error('Failed to load security settings:', err);
     } finally {
@@ -954,14 +954,14 @@ export default function Admin() {
     setSecretKeyMasked(false);
   };
   
-  const saveDebugLevel = async (level: string) => {
+  const saveLoggingLevel = async (level: string) => {
     try {
-      await api.put('/admin/security-settings', { debug_level: level });
-      setDebugLevel(level);
-      setSuccess('Debug level saved');
+      await api.put('/admin/security-settings', { logging_level: level });
+      setLoggingLevel(level);
+      setSuccess('Logging level saved');
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to save debug level');
+      setError(err.response?.data?.detail || 'Failed to save logging level');
     }
   };
   
@@ -5065,7 +5065,7 @@ export default function Admin() {
                         </p>
                       </div>
                       
-                      {/* Debug Level */}
+                      {/* Logging Level */}
                       <div>
                         <label className="block text-sm font-medium text-[var(--color-text)] mb-2">
                           Log Level
@@ -5074,8 +5074,8 @@ export default function Admin() {
                           Controls the verbosity of server logs. DEBUG includes sensitive information and should only be used for development.
                         </p>
                         <select
-                          value={debugLevel}
-                          onChange={(e) => saveDebugLevel(e.target.value)}
+                          value={loggingLevel}
+                          onChange={(e) => saveLoggingLevel(e.target.value)}
                           className="w-full max-w-xs px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
                         >
                           <option value="DEBUG">DEBUG (verbose, includes sensitive data)</option>

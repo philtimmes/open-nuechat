@@ -479,10 +479,11 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await ensure_persistent_secret_key(conn)
     
-    # Apply stored debug level if set
+    # Apply stored logging level if set
     async with engine.begin() as conn:
+        from sqlalchemy import text as sql_text
         result = await conn.execute(
-            text("SELECT value FROM system_settings WHERE key = 'debug_level'")
+            sql_text("SELECT value FROM system_settings WHERE key = 'logging_level'")
         )
         row = result.fetchone()
         if row and row[0]:
@@ -491,7 +492,7 @@ async def lifespan(app: FastAPI):
             logging.getLogger().setLevel(level)
             for name in ['app', 'uvicorn', 'uvicorn.access', 'uvicorn.error']:
                 logging.getLogger(name).setLevel(level)
-            logger.info(f"Applied stored debug level: {row[0]}")
+            logger.info(f"Applied stored logging level: {row[0]}")
     
     # Initialize RAG service (loads embedding model)
     try:
