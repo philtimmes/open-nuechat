@@ -45,13 +45,16 @@ async def convert_markdown_to_pdf(
     user: User = Depends(get_current_user),
 ):
     """Convert markdown content to PDF"""
+    import io
     try:
         # Create PDF from markdown
         pdf = MarkdownPdf(toc_level=2)
         pdf.add_section(Section(request.content))
         
         # Generate PDF bytes
-        pdf_bytes = pdf.out_pdf
+        buffer = io.BytesIO()
+        pdf.save_bytes(buffer)
+        pdf_bytes = buffer.getvalue()
         
         # Determine filename
         filename = request.filename or request.title or "document"

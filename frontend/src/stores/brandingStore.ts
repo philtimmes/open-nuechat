@@ -117,8 +117,8 @@ export const useBrandingStore = create<BrandingState>()(
         set({ isLoading: true, error: null });
         
         try {
-          // Try the admin public branding endpoint first
-          const response = await fetch('/api/admin/public/branding');
+          // Use the branding config endpoint that includes feature flags
+          const response = await fetch('/api/branding/config');
           
           if (!response.ok) {
             throw new Error('Failed to load branding config');
@@ -130,7 +130,11 @@ export const useBrandingStore = create<BrandingState>()(
           let customThemes: CustomTheme[] = [];
           try {
             if (data.custom_themes) {
-              customThemes = JSON.parse(data.custom_themes);
+              if (typeof data.custom_themes === 'string') {
+                customThemes = JSON.parse(data.custom_themes);
+              } else {
+                customThemes = data.custom_themes;
+              }
             }
           } catch (e) {
             console.warn('Failed to parse custom themes:', e);
@@ -140,12 +144,21 @@ export const useBrandingStore = create<BrandingState>()(
             ...defaultConfig,
             app_name: data.app_name || defaultConfig.app_name,
             app_tagline: data.app_tagline || defaultConfig.app_tagline,
+            app_version: data.app_version || defaultConfig.app_version,
+            app_description: data.app_description || defaultConfig.app_description,
             favicon_url: data.favicon_url || defaultConfig.favicon_url,
             logo_url: data.logo_url || defaultConfig.logo_url,
             logo_text: data.app_name || defaultConfig.logo_text,
+            default_theme: data.default_theme || defaultConfig.default_theme,
             custom_css: data.custom_css || '',
             custom_themes: customThemes,
-            welcome: {
+            brand_colors: data.brand_colors || defaultConfig.brand_colors,
+            footer_text: data.footer_text || defaultConfig.footer_text,
+            privacy_url: data.privacy_url || defaultConfig.privacy_url,
+            terms_url: data.terms_url || defaultConfig.terms_url,
+            support_email: data.support_email || defaultConfig.support_email,
+            features: data.features || defaultConfig.features,
+            welcome: data.welcome || {
               title: `Welcome to ${data.app_name || 'Open-NueChat'}!`,
               message: data.app_tagline || 'Start a conversation with AI.',
             },

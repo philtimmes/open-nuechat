@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type { Artifact } from '../types';
 import { groupArtifactsByFilename, buildFileTree, type ArtifactGroup, type FileTreeNode } from '../lib/artifacts';
 import { formatFileSize, formatMessageTime } from '../lib/formatters';
+import api from '../lib/api';
 
 interface ArtifactsPanelProps {
   artifacts: Artifact[];
@@ -147,25 +148,16 @@ export default function ArtifactsPanel({
         : `${selectedArtifact.title.replace(/\s+/g, '_')}.pdf`;
       
       // Call backend API to convert markdown to PDF
-      const response = await fetch('/api/utils/markdown-to-pdf', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('nexus-auth') ? JSON.parse(localStorage.getItem('nexus-auth')!).state?.token : ''}`
-        },
-        body: JSON.stringify({
-          content: selectedArtifact.content,
-          filename: filename,
-          title: selectedArtifact.title
-        })
+      const response = await api.post('/utils/markdown-to-pdf', {
+        content: selectedArtifact.content,
+        filename: filename,
+        title: selectedArtifact.title
+      }, {
+        responseType: 'blob'
       });
       
-      if (!response.ok) {
-        throw new Error('Failed to generate PDF');
-      }
-      
       // Download the PDF
-      const blob = await response.blob();
+      const blob = new Blob([response.data], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -866,8 +858,8 @@ export default function ArtifactsPanel({
                     </svg>
                   </button>
                 )}
-                {/* PDF download for markdown */}
-                {isMarkdown && (
+                {/* PDF download for markdown - show when preview tab or always for markdown */}
+                {isMarkdown && activeTab === 'preview' && (
                   <button
                     onClick={downloadPdf}
                     disabled={isGeneratingPdf}

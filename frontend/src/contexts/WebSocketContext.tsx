@@ -49,10 +49,13 @@ const FIND_LINE_PATTERNS = [
 ];
 
 // <find path="optional/path" search="regex or text"/>
+// <find search="regex or text" path="optional/path"/>
 // <find search="regex or text"/>
 const FIND_PATTERNS = [
   /<find\s+path=["']([^"']+)["']\s+search=["']([^"']+)["']\s*\/?>/gi,
   /<find\s+path=([^\s>\/]+)\s+search=["']([^"']+)["']\s*\/?>/gi,
+  /<find\s+search=["']([^"']+)["']\s+path=["']([^"']+)["']\s*\/?>/gi,  // Reversed order
+  /<find\s+search=["']([^"']+)["']\s+path=([^\s>\/]+)\s*\/?>/gi,  // Reversed, unquoted path
   /<find\s+search=["']([^"']+)["']\s*\/?>/gi,  // No path - search all
 ];
 
@@ -65,6 +68,7 @@ const SEARCH_REPLACE_REGEX = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s
 // Single-line tool tags - match on closing > or /> (the /? handles self-closing tags)
 const STREAM_FIND_LINE_PATTERN = /<find_line\s+path=["']([^"']+)["']\s+contains=["']([^"']+)["']\s*\/?>/i;
 const STREAM_FIND_PATTERN_WITH_PATH = /<find\s+path=["']([^"']+)["']\s+search=["']([^"']+)["']\s*\/?>/i;
+const STREAM_FIND_PATTERN_WITH_PATH_REV = /<find\s+search=["']([^"']+)["']\s+path=["']([^"']+)["']\s*\/?>/i;  // Reversed
 const STREAM_FIND_PATTERN_NO_PATH = /<find\s+search=["']([^"']+)["']\s*\/?>/i;
 const STREAM_REQUEST_FILE_PATTERN = /<request_file\s+path=["']([^"']+)["']\s*\/?>/i;
 const STREAM_KB_SEARCH_PATTERN = /<kb_search\s+query=["']([^"']+)["']\s*\/?>/i;
@@ -88,8 +92,8 @@ const INCOMPLETE_REPLACE_BLOCK_PATTERN = /<replace_block\s+path=["']?([^"'>\s]+)
 // Artifact detection patterns for streaming notification
 // Pattern: <artifact title="..." type="...">...</artifact>
 const STREAM_ARTIFACT_XML_PATTERN = /<artifact\s+[^>]*title=["']([^"']+)["'][^>]*>([\s\S]*?)<\/artifact>/gi;
-// Pattern: <artifact=filename>...</artifact>
-const STREAM_ARTIFACT_EQUALS_PATTERN = /<artifact=([^>]+)>([\s\S]*?)<\/artifact>/gi;
+// Pattern: <artifact=filename>...</artifact> or <artifact= filename>...</artifact>
+const STREAM_ARTIFACT_EQUALS_PATTERN = /<artifact=\s*([^>]+?)>([\s\S]*?)<\/artifact>/gi;
 // Pattern: Filename tags like <Menu.cpp>...</Menu.cpp>
 const STREAM_ARTIFACT_FILENAME_PATTERN = /<([A-Za-z_][A-Za-z0-9_]*\.[a-zA-Z]{1,10})>([\s\S]*?)<\/\1>/gi;
 // Pattern: Code fence with filename on preceding line (most common LLM pattern)
@@ -388,8 +392,24 @@ function extractFindOperations(content: string): FindOp[] {
     while ((match = regex.exec(content)) !== null) {
       // Check if this pattern has path (2 groups) or not (1 group)
       const hasPath = match.length > 2 && regex.source.includes('path=');
-      const path = hasPath ? match[1].trim() : null;
-      const search = hasPath ? match[2] : match[1];
+      
+      let path: string | null = null;
+      let search: string;
+      
+      if (hasPath) {
+        // Check if pattern has search before path (reversed order)
+        const isReversed = regex.source.indexOf('search=') < regex.source.indexOf('path=');
+        if (isReversed) {
+          search = match[1];  // search is first group
+          path = match[2].trim();  // path is second group
+        } else {
+          path = match[1].trim();  // path is first group
+          search = match[2];  // search is second group
+        }
+      } else {
+        search = match[1];
+      }
+      
       const key = `${path || '*'}:${search}`;
       
       if (!seen.has(key)) {
@@ -651,26 +671,33 @@ function executeSearchReplaceOperations(
   const results: string[] = [];
   const modifiedFiles: string[] = [];
   
+  // Get list of available files for error messages
+  const availableFiles = artifacts.map(a => a.filename || a.title || 'untitled').filter(Boolean);
+  
   for (const op of ops) {
     const artifact = findArtifactByPath(artifacts, op.path);
     
     if (!artifact) {
-      results.push(`[SEARCH_REPLACE_ERROR: File not found: ${op.path}]`);
+      // File not found - show available files to help LLM correct the path
+      const suggestion = availableFiles.length > 0 
+        ? `\nAvailable files: ${availableFiles.slice(0, 10).join(', ')}${availableFiles.length > 10 ? ` (and ${availableFiles.length - 10} more)` : ''}`
+        : '\nNo files currently available.';
+      results.push(`[SEARCH_REPLACE_ERROR: File "${op.path}" not found.${suggestion}]`);
       continue;
     }
     
     const artName = artifact.filename || artifact.title || op.path;
     const searchText = op.search.trim();
     const replaceText = op.replace.trimEnd(); // Preserve leading whitespace in replacement
+    const searchLineCount = searchText.split('\n').length;
     
     // Try exact match first
     if (artifact.content.includes(searchText)) {
       artifact.content = artifact.content.replace(searchText, replaceText);
       modifiedFiles.push(artName);
       
-      const searchLines = searchText.split('\n').length;
-      const replaceLines = replaceText.split('\n').length;
-      results.push(`[SEARCH_REPLACE: Successfully replaced in ${artName} (${searchLines} lines → ${replaceLines} lines)]`);
+      const replaceLineCount = replaceText.split('\n').length;
+      results.push(`[SEARCH_REPLACE: ✓ Replaced ${searchLineCount} lines with ${replaceLineCount} lines in "${artName}"]`);
       continue;
     }
     
@@ -696,15 +723,43 @@ function executeSearchReplaceOperations(
         artifact.content = [...before, ...replaceLines, ...after].join('\n');
         modifiedFiles.push(artName);
         found = true;
-        results.push(`[SEARCH_REPLACE: Successfully replaced in ${artName} (${searchLines.length} lines → ${replaceLines.length} lines, whitespace-normalized match)]`);
+        results.push(`[SEARCH_REPLACE: ✓ Replaced ${searchLines.length} lines with ${replaceLines.length} lines in "${artName}" (whitespace-normalized match at line ${i + 1})]`);
         break;
       }
     }
     
     if (!found) {
-      // Provide helpful error with context
-      const searchPreview = searchText.length > 100 ? searchText.substring(0, 100) + '...' : searchText;
-      results.push(`[SEARCH_REPLACE_ERROR: Search text not found in ${artName}. Search was:\n${searchPreview}]`);
+      // Provide detailed error to help LLM understand what went wrong
+      const searchFirstLine = searchText.split('\n')[0].trim();
+      const searchLastLine = searchText.split('\n').slice(-1)[0].trim();
+      
+      // Try to find similar content to show what might be the issue
+      let hint = '';
+      
+      // Check if first line exists anywhere
+      const firstLineIdx = contentLines.findIndex(line => line.trim() === searchFirstLine);
+      if (firstLineIdx >= 0) {
+        // First line found - maybe the rest doesn't match
+        const contextStart = Math.max(0, firstLineIdx - 1);
+        const contextEnd = Math.min(contentLines.length, firstLineIdx + searchLineCount + 1);
+        const actualContent = contentLines.slice(contextStart, contextEnd).map((l, i) => `  ${contextStart + i + 1}: ${l}`).join('\n');
+        hint = `\nFirst line found at line ${firstLineIdx + 1}, but subsequent lines don't match.\nActual content around that area:\n${actualContent}`;
+      } else if (searchFirstLine.length > 10) {
+        // First line not found - try partial match
+        const partialMatch = contentLines.findIndex(line => 
+          line.includes(searchFirstLine.substring(0, 20)) || 
+          searchFirstLine.includes(line.trim().substring(0, 20))
+        );
+        if (partialMatch >= 0) {
+          hint = `\nNo exact match. Similar content found at line ${partialMatch + 1}:\n  "${contentLines[partialMatch].trim()}"`;
+        } else {
+          // Show file structure to help
+          const totalLines = contentLines.length;
+          hint = `\nFile "${artName}" has ${totalLines} lines. First line: "${contentLines[0]?.trim().substring(0, 50) || '(empty)'}..."`;
+        }
+      }
+      
+      results.push(`[SEARCH_REPLACE_ERROR: Content not found in "${artName}". Searched for ${searchLineCount} lines starting with:\n  "${searchFirstLine.substring(0, 60)}${searchFirstLine.length > 60 ? '...' : ''}"${hint}]`);
     }
   }
   
@@ -725,21 +780,60 @@ class StreamingBuffer {
   private flushInterval: number = 100; // 100ms - match backend
   private maxBufferSize: number = 500; // characters - larger buffer
   private onFlush: (content: string) => void;
+  private onToolDetected: ((toolTag: string, beforeContent: string) => void) | null = null;
   private paused: boolean = false; // Stop accepting content after tool interrupt
   
-  constructor(onFlush: (content: string) => void) {
+  // Tool tag patterns to watch for
+  private static TOOL_STARTS = ['<tool_call', '<find', '<find_line', '<request_file', '<search_replace', '<replace_block', '<kb_search'];
+  
+  constructor(onFlush: (content: string) => void, onToolDetected?: (toolTag: string, beforeContent: string) => void) {
     this.onFlush = onFlush;
+    this.onToolDetected = onToolDetected || null;
   }
   
   append(chunk: string) {
     // Don't accept new content if paused (tool was detected)
     if (this.paused) {
+      console.log('[BUFFER] Paused - ignoring chunk:', chunk.substring(0, 50));
       return;
     }
     
     this.buffer += chunk;
     
-    // Flush immediately if buffer is very large
+    // Debug: Log buffer state when it contains tool tags
+    if (this.buffer.includes('<search_replace') || this.buffer.includes('</search_replace')) {
+      console.log('[BUFFER] Contains search_replace, buffer length:', this.buffer.length);
+    }
+    
+    // Check for complete tool tags FIRST
+    if (this.onToolDetected) {
+      const toolResult = this.extractCompleteToolTag();
+      if (toolResult) {
+        console.log('[BUFFER] Found complete tool tag:', toolResult.tag.substring(0, 100));
+        // Found complete tool tag - flush content before it, then trigger callback
+        if (toolResult.before) {
+          this.onFlush(toolResult.before);
+        }
+        this.buffer = toolResult.after;
+        this.onToolDetected(toolResult.tag, toolResult.before);
+        return; // Don't continue - tool handler will manage flow
+      }
+    }
+    
+    // Check if buffer contains a partial tool tag at the end
+    const partialToolPos = this.findPartialToolTag();
+    if (partialToolPos >= 0) {
+      // Flush everything before the partial tag, keep the rest
+      if (partialToolPos > 0) {
+        const toFlush = this.buffer.substring(0, partialToolPos);
+        this.buffer = this.buffer.substring(partialToolPos);
+        this.onFlush(toFlush);
+      }
+      // Don't flush the partial tag yet - wait for more content
+      return;
+    }
+    
+    // No tool tags - normal flush behavior
     if (this.buffer.length >= this.maxBufferSize) {
       this.flushNow();
       return;
@@ -754,8 +848,129 @@ class StreamingBuffer {
     }
   }
   
+  private findPartialToolTag(): number {
+    // Look for any tool start that doesn't have its closing
+    const bufferLower = this.buffer.toLowerCase();
+    
+    for (const toolStart of StreamingBuffer.TOOL_STARTS) {
+      const pos = bufferLower.lastIndexOf(toolStart);
+      if (pos >= 0) {
+        const afterStart = bufferLower.substring(pos);
+        
+        // Tags that need closing tags (not self-closing)
+        if (toolStart === '<tool_call') {
+          if (!afterStart.includes('</tool_call>')) {
+            return pos; // Partial - waiting for closing tag
+          }
+        } else if (toolStart === '<search_replace') {
+          if (!afterStart.includes('</search_replace>')) {
+            return pos; // Partial - waiting for closing tag
+          }
+        } else if (toolStart === '<replace_block') {
+          if (!afterStart.includes('</replace_block>')) {
+            return pos; // Partial - waiting for closing tag
+          }
+        } else {
+          // Other tags just need closing >
+          if (!afterStart.includes('>')) {
+            return pos; // Partial tag found
+          }
+        }
+      }
+    }
+    return -1; // No partial tag
+  }
+  
+  private extractCompleteToolTag(): { tag: string; before: string; after: string } | null {
+    const bufferLower = this.buffer.toLowerCase();
+    
+    // First check for <tool_call>...</tool_call> (wraps other tools)
+    const toolCallStart = bufferLower.indexOf('<tool_call');
+    if (toolCallStart >= 0) {
+      const afterStart = bufferLower.substring(toolCallStart);
+      const closePos = afterStart.indexOf('</tool_call>');
+      if (closePos >= 0) {
+        // Use original buffer for actual content, but positions from lowercase
+        const tag = this.buffer.substring(toolCallStart, toolCallStart + closePos + '</tool_call>'.length);
+        return {
+          tag,
+          before: this.buffer.substring(0, toolCallStart),
+          after: this.buffer.substring(toolCallStart + closePos + '</tool_call>'.length),
+        };
+      }
+      return null; // Incomplete tool_call
+    }
+    
+    // Check for <search_replace>...</search_replace> (multi-line)
+    const searchReplaceStart = bufferLower.indexOf('<search_replace');
+    if (searchReplaceStart >= 0) {
+      const afterStart = bufferLower.substring(searchReplaceStart);
+      const closePos = afterStart.indexOf('</search_replace>');
+      if (closePos >= 0) {
+        const tag = this.buffer.substring(searchReplaceStart, searchReplaceStart + closePos + '</search_replace>'.length);
+        return {
+          tag,
+          before: this.buffer.substring(0, searchReplaceStart),
+          after: this.buffer.substring(searchReplaceStart + closePos + '</search_replace>'.length),
+        };
+      }
+      return null; // Incomplete search_replace
+    }
+    
+    // Check for <replace_block>...</replace_block> (multi-line, legacy)
+    const replaceBlockStart = bufferLower.indexOf('<replace_block');
+    if (replaceBlockStart >= 0) {
+      const afterStart = bufferLower.substring(replaceBlockStart);
+      const closePos = afterStart.indexOf('</replace_block>');
+      if (closePos >= 0) {
+        const tag = this.buffer.substring(replaceBlockStart, replaceBlockStart + closePos + '</replace_block>'.length);
+        return {
+          tag,
+          before: this.buffer.substring(0, replaceBlockStart),
+          after: this.buffer.substring(replaceBlockStart + closePos + '</replace_block>'.length),
+        };
+      }
+      return null; // Incomplete replace_block
+    }
+    
+    // Look for other complete tool tags (self-closing with >)
+    for (const toolStart of StreamingBuffer.TOOL_STARTS) {
+      // Skip tags already handled above
+      if (toolStart === '<tool_call' || toolStart === '<search_replace' || toolStart === '<replace_block') continue;
+      
+      const startPos = bufferLower.indexOf(toolStart);
+      if (startPos >= 0) {
+        const afterStart = bufferLower.substring(startPos);
+        const closePos = afterStart.indexOf('>');
+        if (closePos >= 0) {
+          // Use original buffer for actual content
+          const tag = this.buffer.substring(startPos, startPos + closePos + 1);
+          return {
+            tag,
+            before: this.buffer.substring(0, startPos),
+            after: this.buffer.substring(startPos + closePos + 1),
+          };
+        }
+      }
+    }
+    return null;
+  }
+  
   flushNow() {
     if (this.buffer.length > 0 && !this.paused) {
+      // Before flushing, check one more time for tool tags
+      if (this.onToolDetected) {
+        const toolResult = this.extractCompleteToolTag();
+        if (toolResult) {
+          if (toolResult.before) {
+            this.onFlush(toolResult.before);
+          }
+          this.buffer = toolResult.after;
+          this.onToolDetected(toolResult.tag, toolResult.before);
+          return;
+        }
+      }
+      
       this.onFlush(this.buffer);
       this.buffer = '';
       this.lastFlush = performance.now();
@@ -866,39 +1081,42 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     }
   }, [currentChat?.id]);
   
+  // Tool detection callback ref - will be set up in useEffect
+  const toolDetectedCallbackRef = useRef<((toolTag: string, beforeContent: string) => void) | null>(null);
+  
   if (!streamingBufferRef.current) {
-    streamingBufferRef.current = new StreamingBuffer((content) => {
-      // Only append content if we're still streaming for the same chat
-      const streamingChatId = currentStreamingChatIdRef.current;
-      const { currentChat } = useChatStore.getState();
-      
-      // If user switched to a different chat, ignore this content
-      if (streamingChatId && currentChat?.id && streamingChatId !== currentChat.id) {
-        console.log('[BUFFER_FLUSH] Ignoring content for different chat:', streamingChatId, 'vs', currentChat.id);
-        return;
+    streamingBufferRef.current = new StreamingBuffer(
+      // onFlush callback
+      (content) => {
+        // Only append content if we're still streaming for the same chat
+        const streamingChatId = currentStreamingChatIdRef.current;
+        const { currentChat } = useChatStore.getState();
+        
+        // If user switched to a different chat, ignore this content
+        if (streamingChatId && currentChat?.id && streamingChatId !== currentChat.id) {
+          console.log('[BUFFER_FLUSH] Ignoring content for different chat:', streamingChatId, 'vs', currentChat.id);
+          return;
+        }
+        
+        const store = useChatStore.getState();
+        store.appendStreamingContent(content);
+        
+        // Check for artifacts periodically (every 500ms)
+        const now = performance.now();
+        if (now - lastArtifactCheckRef.current > 500) {
+          lastArtifactCheckRef.current = now;
+          const { streamingContent } = useChatStore.getState();
+          store.updateStreamingArtifacts(streamingContent);
+        }
+      },
+      // onToolDetected callback
+      (toolTag, beforeContent) => {
+        console.log('[TOOL_DETECTED] Tag:', toolTag.substring(0, 100));
+        if (toolDetectedCallbackRef.current) {
+          toolDetectedCallbackRef.current(toolTag, beforeContent);
+        }
       }
-      
-      const store = useChatStore.getState();
-      store.appendStreamingContent(content);
-      
-      // Check for artifacts periodically (every 500ms)
-      const now = performance.now();
-      if (now - lastArtifactCheckRef.current > 500) {
-        lastArtifactCheckRef.current = now;
-        const { streamingContent } = useChatStore.getState();
-        store.updateStreamingArtifacts(streamingContent);
-      }
-      
-      // Check for tool tags that need immediate execution
-      // Get fresh state AFTER appendStreamingContent
-      const { streamingContent } = useChatStore.getState();
-      console.warn(`[BUFFER_FLUSH] Content len=${streamingContent.length}, callback=${!!toolInterruptCallbackRef.current}`);
-      if (toolInterruptCallbackRef.current) {
-        toolInterruptCallbackRef.current(streamingContent);
-      } else {
-        console.warn('[BUFFER_FLUSH] toolInterruptCallbackRef.current is NULL!');
-      }
-    });
+    );
   }
   
   // Handle file requests detected in LLM responses - fetch files and auto-continue
@@ -1214,6 +1432,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         
         if (chunk.content) {
+          // Debug: Log incoming chunks
+          if (chunk.content.includes('<search_replace') || chunk.content.includes('</search_replace')) {
+            console.log('[STREAM_CHUNK] Contains search_replace tag:', chunk.content.substring(0, 200));
+          }
           // Use buffered append for performance
           streamingBufferRef.current?.append(chunk.content);
         }
@@ -1624,19 +1846,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             break;
           }
           
-          if (streamingContent) {
-            const assistantMessage: Message = {
-              id: chunk.message_id,
-              chat_id: chunk.chat_id || currentChat?.id || '',
-              role: 'assistant',
-              content: streamingContent + '\n\n*[Generation stopped]*',
-              parent_id: chunk.parent_id,
-              input_tokens: chunk.usage?.input_tokens,
-              output_tokens: chunk.usage?.output_tokens,
-              created_at: new Date().toISOString(),
-            };
-            addMessage(assistantMessage);
-          }
+          // Don't add message here - the content is already being saved by backend
+          // The "[Generation stopped]" marker will be in the database but not shown to user
+          // This prevents duplicate messages when tools interrupt generation
         }
         clearStreaming();
         setIsSending(false);
@@ -1737,6 +1949,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         return;
       }
       
+      // Capture parent ID at the START before any stop_generation clears it
+      const capturedParentId = currentStreamingMessageIdRef.current;
+      
       // ======== TRACK COMPLETED ARTIFACTS ========
       // Track artifacts as they complete during streaming (for notification in tool results)
       // We DON'T interrupt for artifacts - only track them to include in tool result messages
@@ -1806,6 +2021,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       };
       
       // Helper to send tool results without creating new messages
+      // Uses capturedParentId to ensure proper conversation tree linkage
       // Includes notifications about artifacts that were saved during streaming
       // Large results are chunked into hidden agent files to prevent context overflow
       const sendToolResult = (toolName: string, results: string) => {
@@ -1833,17 +2049,17 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           console.log(`[TOOL_RESULT] Created ${chunkedFiles.length} agent files: ${chunkedFiles.join(', ')}`);
         }
         
-        // Use current streaming message ID as parent for linear conversation flow
+        // Use captured streaming message ID as parent for linear conversation flow
         // This prevents tool continuations from creating branches
-        const parentId = currentStreamingMessageIdRef.current;
-        console.log(`[TOOL_RESULT] Sending ${toolName} results (${finalResults.length} chars), parent_id: ${parentId}, savedArtifacts: ${savedArtifactsDuringStreamRef.current.length}`);
+        console.log(`[TOOL_RESULT] Sending ${toolName} results (${finalResults.length} chars), parent_id: ${capturedParentId}, savedArtifacts: ${savedArtifactsDuringStreamRef.current.length}`);
         
         wsRef.current!.send(JSON.stringify({
           type: 'chat_message',
           payload: {
             chat_id: currentChat.id,
             content: `[SYSTEM TOOL RESULT - ${toolName}]\nThe following results were generated by the system, not typed by the user.\n\n${finalResults}${artifactNotification}\n\n[END TOOL RESULT]`,
-            parent_id: parentId,  // Link to current streaming message for linear conversation
+            parent_id: capturedParentId,  // Link to current streaming message for linear conversation
+            continue_message_id: capturedParentId,  // Append to this existing message instead of creating new
             zip_context: zipContext,
             save_user_message: false,
             is_tool_continuation: true,
@@ -1886,8 +2102,19 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
       }
       
-      // Check for find tag (with path)
-      const findWithPathMatch = streamingContent.match(STREAM_FIND_PATTERN_WITH_PATH);
+      // Check for find tag (with path) - try both attribute orders
+      let findWithPathMatch = streamingContent.match(STREAM_FIND_PATTERN_WITH_PATH);
+      let pathGroup = 1, searchGroup = 2;  // Default: path first, search second
+      
+      if (!findWithPathMatch) {
+        // Try reversed order: search first, path second
+        findWithPathMatch = streamingContent.match(STREAM_FIND_PATTERN_WITH_PATH_REV);
+        if (findWithPathMatch) {
+          pathGroup = 2;  // Path is second group in reversed pattern
+          searchGroup = 1;  // Search is first group
+        }
+      }
+      
       if (findWithPathMatch) {
         console.log('[TOOL_INTERRUPT] MATCHED find (with path):', findWithPathMatch[0].substring(0, 100));
         const tagKey = getTagKey('find_path', findWithPathMatch[0]);
@@ -1909,7 +2136,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
           streamingBufferRef.current?.pause();
           
-          const ops: FindOp[] = [{ path: findWithPathMatch[1], search: findWithPathMatch[2] }];
+          const ops: FindOp[] = [{ path: findWithPathMatch[pathGroup], search: findWithPathMatch[searchGroup] }];
           const results = executeFindOperations(getAllArtifacts(), ops);
           sendToolResult('find', results.join('\n\n'));
           return;
@@ -2114,6 +2341,195 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       toolInterruptCallbackRef.current = null;
     };
   }, []); // No dependencies - uses refs and getState()
+  
+  // Set up tool detected callback - handles complete tool tags found in buffer BEFORE they're displayed
+  useEffect(() => {
+    console.log('[TOOL_DETECTED_SETUP] Setting up tool detected callback');
+    toolDetectedCallbackRef.current = (toolTag: string, _beforeContent: string) => {
+      const { currentChat, artifacts, uploadedArtifacts } = useChatStore.getState();
+      if (!currentChat?.id || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        console.warn('[TOOL_DETECTED] Skipped - no chat or WS not connected');
+        return;
+      }
+      
+      console.log('[TOOL_DETECTED] Processing tag:', toolTag.substring(0, 100));
+      
+      // If this is a <tool_call>...</tool_call> wrapper, extract inner content
+      let tagToProcess = toolTag;
+      const toolCallMatch = toolTag.match(/<tool_call[^>]*>([\s\S]*?)<\/tool_call>/i);
+      if (toolCallMatch) {
+        // Extract inner content - might contain <find> or other tags
+        const innerContent = toolCallMatch[1].trim();
+        console.log('[TOOL_DETECTED] Extracted from tool_call wrapper:', innerContent.substring(0, 100));
+        
+        // Look for inner tool tag
+        const innerTagMatch = innerContent.match(/<(find|find_line|request_file|search_replace|kb_search)[^>]*>/i);
+        if (innerTagMatch) {
+          tagToProcess = innerTagMatch[0];
+          console.log('[TOOL_DETECTED] Found inner tag:', tagToProcess);
+        } else {
+          // Maybe it's JSON format: {"tool": "find", "query": "..."}
+          try {
+            const jsonMatch = innerContent.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              const toolName = parsed.tool || parsed.name;
+              if (toolName === 'find') {
+                tagToProcess = `<find search="${parsed.query || parsed.search || ''}" ${parsed.path ? `path="${parsed.path}"` : ''}>`;
+              }
+            }
+          } catch (e) {
+            console.warn('[TOOL_DETECTED] Could not parse tool_call JSON:', innerContent.substring(0, 100));
+          }
+        }
+      }
+      
+      // Capture parent ID BEFORE stopping - stream_end will clear it
+      const capturedParentId = currentStreamingMessageIdRef.current;
+      
+      // Pause the buffer to stop further content
+      streamingBufferRef.current?.pause();
+      
+      // Stop the LLM generation
+      wsRef.current.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
+      
+      // Combine artifacts for searching
+      const allArtifacts = [...artifacts, ...uploadedArtifacts];
+      
+      // Helper to send tool result - uses captured parentId
+      const sendResult = (toolName: string, result: string) => {
+        const { zipContext } = useChatStore.getState();
+        
+        console.log(`[TOOL_DETECTED] Sending ${toolName} result, parent_id: ${capturedParentId}, continue_message_id: ${capturedParentId}`);
+        
+        wsRef.current!.send(JSON.stringify({
+          type: 'chat_message',
+          payload: {
+            chat_id: currentChat.id,
+            content: `[SYSTEM TOOL RESULT - ${toolName}]\nThe following results were generated by the system, not typed by the user.\n\n${result}\n\n[END TOOL RESULT]`,
+            parent_id: capturedParentId,
+            continue_message_id: capturedParentId,  // Append to this existing message instead of creating new
+            zip_context: zipContext,
+            save_user_message: false,
+            is_tool_continuation: true,
+          },
+        }));
+      };
+      
+      // Parse and execute the tool tag
+      // <find search="..." path="..."> or <find path="..." search="...">
+      const findMatch = tagToProcess.match(/<find\s+(?:search=["']([^"']+)["']\s+path=["']([^"']+)["']|path=["']([^"']+)["']\s+search=["']([^"']+)["']|search=["']([^"']+)["'])\s*\/?>/i);
+      if (findMatch) {
+        // Extract search and path from whichever groups matched
+        const search = findMatch[1] || findMatch[4] || findMatch[5];
+        const path = findMatch[2] || findMatch[3] || null;
+        
+        console.log(`[TOOL_DETECTED] find: search="${search}", path="${path}"`);
+        
+        const ops: FindOp[] = [{ path, search }];
+        const results = executeFindOperations(allArtifacts, ops);
+        sendResult('find', results.join('\n\n'));
+        return;
+      }
+      
+      // <find_line path="..." contains="...">
+      const findLineMatch = tagToProcess.match(/<find_line\s+path=["']([^"']+)["']\s+contains=["']([^"']+)["']\s*\/?>/i);
+      if (findLineMatch) {
+        const path = findLineMatch[1];
+        const contains = findLineMatch[2];
+        
+        console.log(`[TOOL_DETECTED] find_line: path="${path}", contains="${contains}"`);
+        
+        const ops: FindLineOp[] = [{ path, contains }];
+        const results = executeFindLineOperations(allArtifacts, ops);
+        sendResult('find_line', results.join('\n\n'));
+        return;
+      }
+      
+      // <request_file path="...">
+      const requestFileMatch = tagToProcess.match(/<request_file\s+path=["']([^"']+)["']\s*\/?>/i);
+      if (requestFileMatch) {
+        const path = requestFileMatch[1];
+        console.log(`[TOOL_DETECTED] request_file: path="${path}"`);
+        
+        // Try to find the artifact
+        const artifact = findArtifactByPath(allArtifacts, path);
+        if (artifact) {
+          sendResult('request_file', `[FILE: ${path}]\n\`\`\`\n${artifact.content}\n\`\`\``);
+        } else {
+          const availableFiles = allArtifacts.map(a => a.filename || a.title || 'unnamed').slice(0, 20);
+          sendResult('request_file', `[FILE_ERROR: Could not find "${path}"]\nAvailable files: ${availableFiles.join(', ')}`);
+        }
+        return;
+      }
+      
+      // <search_replace path="...">===== SEARCH...===== Replace...</search_replace>
+      const searchReplaceMatch = tagToProcess.match(/<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*?)<\/search_replace>/i);
+      if (searchReplaceMatch) {
+        const path = searchReplaceMatch[1];
+        const searchText = searchReplaceMatch[2];
+        const replaceText = searchReplaceMatch[3];
+        
+        console.log(`[TOOL_DETECTED] search_replace: path="${path}", search=${searchText.length} chars, replace=${replaceText.length} chars`);
+        
+        const ops: SearchReplaceOp[] = [{ path, search: searchText, replace: replaceText }];
+        const { updateArtifact } = useChatStore.getState();
+        const { updatedArtifacts, results, modifiedFiles } = executeSearchReplaceOperations(allArtifacts, ops);
+        
+        // Update modified artifacts in store
+        for (const art of updatedArtifacts) {
+          const key = art.filename || art.title || '';
+          if (key && modifiedFiles.includes(key)) {
+            updateArtifact(key, art);
+          }
+        }
+        
+        sendResult('search_replace', results.join('\n\n'));
+        return;
+      }
+      
+      // <replace_block path="...">===== SEARCH...===== Replace...</replace_block> (legacy)
+      const replaceBlockMatch = tagToProcess.match(/<replace_block\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*?)<\/replace_block>/i);
+      if (replaceBlockMatch) {
+        const path = replaceBlockMatch[1];
+        const searchText = replaceBlockMatch[2];
+        const replaceText = replaceBlockMatch[3];
+        
+        console.log(`[TOOL_DETECTED] replace_block: path="${path}", search=${searchText.length} chars, replace=${replaceText.length} chars`);
+        
+        const ops: SearchReplaceOp[] = [{ path, search: searchText, replace: replaceText }];
+        const { updateArtifact } = useChatStore.getState();
+        const { updatedArtifacts, results, modifiedFiles } = executeSearchReplaceOperations(allArtifacts, ops);
+        
+        // Update modified artifacts in store
+        for (const art of updatedArtifacts) {
+          const key = art.filename || art.title || '';
+          if (key && modifiedFiles.includes(key)) {
+            updateArtifact(key, art);
+          }
+        }
+        
+        sendResult('replace_block', results.join('\n\n'));
+        return;
+      }
+      
+      // <kb_search query="...">
+      const kbSearchMatch = tagToProcess.match(/<kb_search\s+query=["']([^"']+)["']\s*\/?>/i);
+      if (kbSearchMatch) {
+        const query = kbSearchMatch[1];
+        console.log(`[TOOL_DETECTED] kb_search: query="${query}"`);
+        // KB search needs async API call - for now just acknowledge
+        sendResult('kb_search', `[KB_SEARCH: Searching for "${query}"... (async operation)]`);
+        return;
+      }
+      
+      console.warn('[TOOL_DETECTED] Unrecognized tool tag:', tagToProcess);
+    };
+    
+    return () => {
+      toolDetectedCallbackRef.current = null;
+    };
+  }, []);
   
   const connect = useCallback(() => {
     if (!accessToken || wsRef.current?.readyState === WebSocket.OPEN) {

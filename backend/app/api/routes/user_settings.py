@@ -583,7 +583,11 @@ def index_user_chats_sync(user_id: str):
                 ).order_by(Message.created_at).all()
                 
                 if not messages:
-                    chat.is_knowledge_indexed = True
+                    # Use raw SQL to avoid triggering updated_at onupdate
+                    db.execute(
+                        text("UPDATE chats SET is_knowledge_indexed = 1 WHERE id = :chat_id"),
+                        {"chat_id": chat.id}
+                    )
                     db.commit()
                     continue
                 
@@ -763,7 +767,11 @@ def index_single_chat_sync(user_id: str, chat_id: str):
         ).order_by(Message.created_at).all()
         
         if not messages:
-            chat.is_knowledge_indexed = True
+            # Use raw SQL to avoid triggering updated_at onupdate
+            db.execute(
+                text("UPDATE chats SET is_knowledge_indexed = 1 WHERE id = :chat_id"),
+                {"chat_id": chat_id}
+            )
             db.commit()
             return
         
@@ -886,3 +894,33 @@ def index_single_chat_sync(user_id: str, chat_id: str):
     finally:
         db.close()
     
+
+@router.post("/repair-chat-timestamps")
+async def repair_chat_timestamps(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Repair chat updated_at timestamps.
+    Sets updated_at to the timestamp of the most recent message in each chat.
+    This fixes chats whose timestamps were corrupted by other operations.
+    """
+    logger.info(f"[REPAIR] Repairing chat timestamps for user {user.id}")
+    
+    # Update all chats to have updated_at = MAX(message.created_at)
+    result = await db.execute(text("""
+        UPDATE chats 
+        SET updated_at = (
+            SELECT MAX(created_at) FROM messages WHERE messages.chat_id = chats.id
+        )
+        WHERE owner_id = :user_id
+        AND EXISTS (SELECT 1 FROM messages WHERE messages.chat_id = chats.id)
+    """), {"user_id": user.id})
+    
+    await db.commit()
+    
+    # Get count of affected rows (SQLite doesn't return rowcount reliably, so just report success)
+    logger.info(f"[REPAIR] Repaired chat timestamps for user {user.id}")
+    
+    return {"status": "success", "message": "Chat timestamps repaired. Please refresh the page."}
+

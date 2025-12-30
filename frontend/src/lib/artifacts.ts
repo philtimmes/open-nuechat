@@ -291,14 +291,16 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
       
       // Pattern 4b: <artifact=filename> or <file:filename> etc
       // Can have text before the tag (e.g., "File main.cpp // comment <artifact=src/main.cpp>")
-      const xmlAttrTagMatch = line.match(/^(.*?)<(artifact|file|code)[=:]([A-Za-z_][\w\-./]*\.\w+)>\s*$/i);
+      // Also handles spaces after = and in filenames: <artifact= Trial Docs.md>
+      const xmlAttrTagMatch = line.match(/^(.*?)<(artifact|file|code)[=:]\s*([^>]+?)>\s*$/i);
       if (xmlAttrTagMatch) {
         const prefixText = xmlAttrTagMatch[1].trim();
+        const rawFilename = xmlAttrTagMatch[3].trim();
         activeMethod = 4;
         metadata = {
           tagName: xmlAttrTagMatch[2].toLowerCase(),
-          filepath: xmlAttrTagMatch[3],
-          filename: xmlAttrTagMatch[3].split('/').pop() || xmlAttrTagMatch[3],
+          filepath: rawFilename,
+          filename: rawFilename.split('/').pop() || rawFilename,
           startLine: i,
           prefixText: prefixText, // Store prefix to output later
         };
@@ -320,8 +322,8 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
         continue;
       }
       
-      // Pattern 3: <artifact title="..." type="...">
-      const xmlArtifactMatch = line.match(/^<artifact\s+(?:title="([^"]*)")?\s*(?:type="([^"]*)")?\s*(?:language="([^"]*)")?\s*(?:filename="([^"]*)")?[^>]*>\s*$/i);
+      // Pattern 3: <artifact title="..." type="..."> or <xaiArtifact ...>
+      const xmlArtifactMatch = line.match(/^<(?:artifact|xaiArtifact)\s+(?:title="([^"]*)")?\s*(?:type="([^"]*)")?\s*(?:language="([^"]*)")?\s*(?:filename="([^"]*)")?[^>]*>\s*$/i);
       if (xmlArtifactMatch) {
         activeMethod = 3;
         metadata = {
@@ -469,14 +471,16 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
       continue;
     }
     
-    // Pattern 3: <artifact> tags
+    // Pattern 3: <artifact> or <xaiArtifact> tags
     if (activeMethod === 3) {
-      // Check if line contains </artifact> (may not be alone on line)
-      const closeMatch = line.match(/<\/artifact>/i);
+      // Check if line contains </artifact> or </xaiArtifact> (may not be alone on line)
+      const closeMatch = line.match(/<\/(?:artifact|xaiArtifact)>/i);
       if (closeMatch) {
-        const closeIndex = line.search(/<\/artifact>/i);
+        const closeIndex = line.search(/<\/(?:artifact|xaiArtifact)>/i);
+        const closeTagMatch = line.match(/<\/(?:artifact|xaiArtifact)>/i);
+        const closeTagLength = closeTagMatch ? closeTagMatch[0].length : 11;
         const beforeClose = line.substring(0, closeIndex);
-        const afterClose = line.substring(closeIndex + '</artifact>'.length).trim();
+        const afterClose = line.substring(closeIndex + closeTagLength).trim();
         
         // Add any content before the closing tag to buffer
         if (beforeClose.trim()) {

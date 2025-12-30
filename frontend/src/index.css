@@ -432,3 +432,73 @@ code:not(pre code) {
     transform: scale(1.02);
   }
 }
+
+/* ===== Message Content Isolation ===== */
+/* Prevent LLM-generated content from affecting page layout */
+
+/* Message content container - strict containment */
+.message-content-container {
+  contain: content;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+/* Code blocks must not exceed container */
+pre, code {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Syntax highlighter specific fixes */
+.message-content-container pre {
+  max-height: 70vh;
+  overflow: auto !important;
+}
+
+/* Tables must not exceed container */
+table {
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+
+/* Images must not exceed container */
+.message-content-container img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Prevent any element from breaking layout */
+.message-content-container * {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Ensure flex/grid children can't grow unbounded */
+.message-content-container [class*="flex"],
+.message-content-container [class*="grid"] {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Chat layout protection - these classes have immutable containment */
+.chat-layout-root {
+  contain: strict;
+  overflow: hidden;
+  display: flex;
+  height: 100%;
+}
+
+.chat-messages-scroll {
+  contain: strict;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-input-fixed {
+  contain: layout;
+  flex-shrink: 0;
+  z-index: 10;
+}

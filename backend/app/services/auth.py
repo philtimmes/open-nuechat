@@ -99,6 +99,19 @@ class AuthService:
         full_name: Optional[str] = None,
         avatar_url: Optional[str] = None,
     ) -> User:
+        from app.models import KnowledgeStore
+        import uuid
+        
+        # Create user's chat knowledge store
+        store_id = str(uuid.uuid4())
+        store = KnowledgeStore(
+            id=store_id,
+            owner_id=None,  # Will be updated after user is created
+            name="My Chat History",
+            description="Automatically indexed knowledge from all your conversations",
+            is_public=False,
+        )
+        
         user = User(
             email=email,
             username=username,
@@ -107,9 +120,16 @@ class AuthService:
             avatar_url=avatar_url,
             tier=UserTier.FREE,
             tokens_limit=settings.FREE_TIER_TOKENS,
+            chat_knowledge_store_id=store_id,
         )
         db.add(user)
         await db.flush()
+        
+        # Now set the owner_id on the store
+        store.owner_id = user.id
+        db.add(store)
+        await db.flush()
+        
         return user
     
     @staticmethod

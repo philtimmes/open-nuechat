@@ -617,8 +617,8 @@ function MessageBubbleInner({
   const processedContent = preprocessContent(contentAfterThinking);
   
   return (
-    <div className={`group py-4 md:py-4 ${isUser && !isFileContent ? 'bg-[var(--color-surface)]/30' : ''} ${isFileContent ? 'bg-blue-500/5 border-l-2 border-blue-500/50' : ''}`}>
-      <div className="max-w-3xl mx-auto px-3 md:px-4">
+    <div className={`group py-4 md:py-4 overflow-hidden ${isUser && !isFileContent ? 'bg-[var(--color-surface)]/30' : ''} ${isFileContent ? 'bg-blue-500/5 border-l-2 border-blue-500/50' : ''}`}>
+      <div className="max-w-3xl mx-auto px-3 md:px-4 overflow-hidden">
         {/* Role label with branch navigation */}
         <div className="flex items-center gap-2 mb-2">
           <span className={`flex items-center gap-1.5 text-sm md:text-xs font-medium uppercase tracking-wide ${
@@ -752,18 +752,18 @@ function MessageBubbleInner({
             
             {isStreaming ? (
               // During streaming: plain text for performance (skip expensive markdown parsing)
-              <div className="max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
+              <div className="message-content-container max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
                 {processedContent}
                 <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
               </div>
             ) : isUser ? (
               // User messages: preserve whitespace/newlines exactly as typed
-              <div className="max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
+              <div className="message-content-container max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
                 {processedContent}
               </div>
             ) : (
-              // After streaming complete: full markdown rendering
-              <div className="max-w-none text-[var(--color-text)] leading-relaxed">
+              // After streaming complete: full markdown rendering with CSS containment
+              <div className="message-content-container max-w-none text-[var(--color-text)] leading-relaxed">
                 <ReactMarkdown
                 remarkPlugins={[remarkGfm, remarkMath]}
                 rehypePlugins={[rehypeKatex]}
@@ -782,7 +782,7 @@ function MessageBubbleInner({
                     
                     if (!inline && match) {
                       return (
-                        <div className="relative group/code my-3">
+                        <div className="relative group/code my-3 overflow-hidden">
                           {/* Filename header */}
                           {filename && (
                             <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800 border-b border-zinc-700 rounded-t-lg">
@@ -814,6 +814,8 @@ function MessageBubbleInner({
                               margin: 0,
                               borderRadius: filename ? '0 0 0.5rem 0.5rem' : '0.5rem',
                               fontSize: '0.8125rem',
+                              maxHeight: '70vh',
+                              overflow: 'auto',
                             }}
                             {...props}
                           >

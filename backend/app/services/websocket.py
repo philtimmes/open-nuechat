@@ -280,6 +280,16 @@ class StreamingHandler:
     TOOL_CALL_START_PATTERN = re.compile(r'<\$([a-zA-Z_][a-zA-Z0-9_]*)(?::([^>]+))?>')
     TOOL_CALL_END_PATTERN = re.compile(r'</\$([a-zA-Z_][a-zA-Z0-9_]*)>')
     
+    # XML tool_call pattern (some LLMs output this instead of using function calling):
+    # <tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
+    # or <tool_call name="tool_name">{"arguments": {...}}</tool_call>
+    XML_TOOL_CALL_PATTERN = re.compile(
+        r'<tool_call(?:\s+name=["\']([^"\']+)["\'])?\s*>'
+        r'(.*?)'
+        r'</tool_call>',
+        re.DOTALL
+    )
+    
     def __init__(self, manager: WebSocketManager, connection: Connection):
         self.manager = manager
         self.connection = connection
@@ -478,7 +488,83 @@ class StreamingHandler:
     async def _process_tool_detection_buffer(self):
         """Process the tool detection buffer, extracting and executing tool calls."""
         while self._tool_detection_buffer:
-            # Look for tool call start pattern
+            # First check for XML <tool_call> pattern (some LLMs use this)
+            xml_match = self.XML_TOOL_CALL_PATTERN.search(self._tool_detection_buffer)
+            if xml_match:
+                # Found XML tool call - flush content before it
+                before_tool = self._tool_detection_buffer[:xml_match.start()]
+                if before_tool:
+                    self._buffer += before_tool
+                    await self._maybe_flush()
+                
+                # Parse the tool call
+                tool_name = xml_match.group(1)  # From name attribute
+                tool_content = xml_match.group(2).strip()
+                
+                # Try to parse content as JSON
+                tool_params = {}
+                json_valid = False
+                try:
+                    parsed = json.loads(tool_content)
+                    if isinstance(parsed, dict):
+                        json_valid = True
+                        # Support multiple conventions for tool name:
+                        # {"name": "...", "arguments": {...}}
+                        # {"tool": "...", "query": "..."}
+                        # {"tool": "...", "parameters": {...}}
+                        if not tool_name:
+                            tool_name = parsed.get('name') or parsed.get('tool')
+                        
+                        # Support multiple conventions for parameters:
+                        # {"arguments": {...}}
+                        # {"parameters": {...}}
+                        # {"query": "..."} - single param shorthand
+                        # or just the params directly
+                        if 'arguments' in parsed:
+                            tool_params = parsed['arguments']
+                        elif 'parameters' in parsed:
+                            tool_params = parsed['parameters']
+                        else:
+                            # Use the whole dict minus name/tool as params
+                            tool_params = {k: v for k, v in parsed.items() if k not in ('name', 'tool')}
+                except json.JSONDecodeError:
+                    logger.warning(f"[TOOL_CALL] Invalid JSON in tool_call, passing through as text: {tool_content[:100]}")
+                
+                if json_valid and tool_name:
+                    logger.info(f"[TOOL_CALL] Detected XML tool_call: {tool_name} with params: {tool_params}")
+                    
+                    if self._tool_executor:
+                        tool_id = str(uuid.uuid4())[:8]
+                        await self.send_tool_call(tool_name, tool_id, tool_params)
+                        
+                        try:
+                            result = await self._tool_executor(tool_name, tool_params)
+                            await self.send_tool_result(tool_id, result)
+                            logger.info(f"[TOOL_CALL] Tool {tool_name} completed: {str(result)[:200]}")
+                        except Exception as e:
+                            logger.error(f"[TOOL_CALL] Tool {tool_name} failed: {e}")
+                            await self.send_tool_result(tool_id, {"error": str(e)})
+                    else:
+                        logger.warning(f"[TOOL_CALL] No tool executor configured for {tool_name}")
+                    
+                    # Successfully processed - remove from buffer
+                    self._tool_detection_buffer = self._tool_detection_buffer[xml_match.end():]
+                else:
+                    # Invalid tool call - provide feedback to help LLM understand correct format
+                    error_msg = "\n\n[SYSTEM: Invalid tool_call format. "
+                    if not json_valid:
+                        error_msg += "The content inside <tool_call> must be valid JSON. "
+                    if not tool_name:
+                        error_msg += "Missing tool name - JSON must include 'tool' or 'name' field. "
+                    error_msg += "Correct format: <tool_call>{\"tool\": \"find\", \"query\": \"search terms\"}</tool_call>]\n\n"
+                    
+                    # Flush error message to user/LLM
+                    self._buffer += error_msg
+                    self._tool_detection_buffer = self._tool_detection_buffer[xml_match.end():]
+                    await self._maybe_flush()
+                continue
+            
+            # Look for <$tool_name> pattern
             match = self.TOOL_CALL_START_PATTERN.search(self._tool_detection_buffer)
             
             if match:
@@ -522,15 +608,21 @@ class StreamingHandler:
             else:
                 # No complete tool call found
                 # Check if we might have a partial pattern at the end
-                if '<$' in self._tool_detection_buffer:
-                    # Keep characters from last '<$' onwards for next iteration
-                    last_start = self._tool_detection_buffer.rfind('<$')
-                    if last_start > 0:
-                        # Flush everything before the potential tool call
-                        self._buffer += self._tool_detection_buffer[:last_start]
-                        self._tool_detection_buffer = self._tool_detection_buffer[last_start:]
-                        await self._maybe_flush()
-                    # If last_start == 0, keep the whole buffer
+                # Look for both <$ and <tool_call patterns
+                partial_pos = -1
+                for pattern in ['<$', '<tool_call']:
+                    pos = self._tool_detection_buffer.rfind(pattern)
+                    if pos > partial_pos:
+                        partial_pos = pos
+                
+                if partial_pos > 0:
+                    # Flush everything before the potential tool call
+                    self._buffer += self._tool_detection_buffer[:partial_pos]
+                    self._tool_detection_buffer = self._tool_detection_buffer[partial_pos:]
+                    await self._maybe_flush()
+                    break
+                elif partial_pos == 0:
+                    # Keep the whole buffer (partial at start)
                     break
                 else:
                     # No potential tool call, flush everything
@@ -600,10 +692,14 @@ class StreamingHandler:
     
     async def end_stream(self, input_tokens: int = 0, output_tokens: int = 0, parent_id: str = None):
         """End the streaming response"""
-        # Flush any remaining tool detection buffer content
+        # Process any remaining tool detection buffer content (may contain tool calls)
         if self._tool_detection_buffer:
-            self._buffer += self._tool_detection_buffer
-            self._tool_detection_buffer = ""
+            # Try to process any complete tool calls first
+            await self._process_tool_detection_buffer()
+            # Any remaining partial content gets flushed as text
+            if self._tool_detection_buffer:
+                self._buffer += self._tool_detection_buffer
+                self._tool_detection_buffer = ""
         
         # Flush any remaining buffered content
         await self._flush_buffer()

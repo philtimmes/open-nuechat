@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import json
 import asyncio
 import time
+import re
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -36,6 +37,34 @@ from app.filters import (
 
 # Structured logger for LLM service
 llm_logger = get_logger("llm_service")
+
+
+# Patterns for inline tool tags that should be stripped from saved content
+# These are processed by the frontend and shouldn't be saved in messages
+TOOL_TAG_PATTERNS = [
+    # Self-closing tool tags
+    re.compile(r'<find\s+[^>]*/?>', re.IGNORECASE),
+    re.compile(r'<find_line\s+[^>]*/?>', re.IGNORECASE),
+    re.compile(r'<request_file\s+[^>]*/?>', re.IGNORECASE),
+    re.compile(r'<kb_search\s+[^>]*/?>', re.IGNORECASE),
+    # Multi-line tool tags with closing tags
+    re.compile(r'<search_replace\s+[^>]*>[\s\S]*?</search_replace>', re.IGNORECASE),
+    re.compile(r'<replace_block\s+[^>]*>[\s\S]*?</replace_block>', re.IGNORECASE),
+    re.compile(r'<tool_call[^>]*>[\s\S]*?</tool_call>', re.IGNORECASE),
+]
+
+
+def strip_tool_tags(content: str) -> str:
+    """
+    Remove inline tool tags from LLM response content.
+    These tags are processed by the frontend and shouldn't be saved in messages.
+    """
+    result = content
+    for pattern in TOOL_TAG_PATTERNS:
+        result = pattern.sub('', result)
+    # Clean up any resulting double newlines
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result.strip()
 
 
 class LLMService:
@@ -521,6 +550,7 @@ class LLMService:
         cancel_check: Optional[Callable[[], bool]] = None,  # Returns True if generation should be cancelled
         stream_setter: Optional[Callable[[Any], None]] = None,  # Callback to set active stream for cancellation
         is_file_content: bool = False,  # True when content is user-uploaded file (skip injection filters)
+        is_continuation: bool = False,  # True when appending to existing message (tool continuations)
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a message response with prompt-based tool orchestration.
@@ -539,6 +569,7 @@ class LLMService:
                        proper parent_id tracking in tool continuations.
             cancel_check: Optional callback that returns True if generation should stop.
             stream_setter: Optional callback to pass the stream object for external cancellation.
+            is_continuation: If True, append to existing message instead of creating new.
         """
         import logging
         from app.models.models import CustomAssistant
@@ -622,24 +653,40 @@ class LLMService:
         # Build messages from chat history (using tree structure)
         messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id)
         
-        # Create placeholder assistant message with PRE-GENERATED ID
-        logger.info(f"[LLM_STREAM] Creating assistant message: id={message_id}, parent_id={parent_id}")
-        assistant_message = Message(
-            id=message_id,  # USE PRE-GENERATED ID
-            chat_id=chat.id,
-            role=MessageRole.ASSISTANT,
-            content="",
-            content_type=ContentType.TEXT,
-            is_streaming=True,
-            model=effective_model,
-            parent_id=parent_id,  # Link to user message for conversation branching
-        )
-        db.add(assistant_message)
-        # Flush to populate ID, then commit to persist
-        # Note: refresh() removed due to SQLAlchemy async/greenlet issues in rapid tool loops
-        await db.flush()
-        await db.commit()
-        logger.info(f"[LLM_STREAM] Assistant message committed: id={assistant_message.id}, parent_id={assistant_message.parent_id}")
+        # For continuations, load existing message and get its current content
+        existing_content = ""
+        if is_continuation:
+            existing_msg_result = await db.execute(
+                select(Message).where(Message.id == message_id)
+            )
+            existing_msg = existing_msg_result.scalar_one_or_none()
+            if existing_msg:
+                existing_content = existing_msg.content or ""
+                logger.info(f"[LLM_STREAM] Continuing message: id={message_id}, existing_len={len(existing_content)}")
+                assistant_message = existing_msg
+            else:
+                logger.warning(f"[LLM_STREAM] Continuation message {message_id} not found, creating new")
+                is_continuation = False
+        
+        if not is_continuation:
+            # Create placeholder assistant message with PRE-GENERATED ID
+            logger.info(f"[LLM_STREAM] Creating assistant message: id={message_id}, parent_id={parent_id}")
+            assistant_message = Message(
+                id=message_id,  # USE PRE-GENERATED ID
+                chat_id=chat.id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                content_type=ContentType.TEXT,
+                is_streaming=True,
+                model=effective_model,
+                parent_id=parent_id,  # Link to user message for conversation branching
+            )
+            db.add(assistant_message)
+            # Flush to populate ID, then commit to persist
+            # Note: refresh() removed due to SQLAlchemy async/greenlet issues in rapid tool loops
+            await db.flush()
+            await db.commit()
+            logger.info(f"[LLM_STREAM] Assistant message committed: id={assistant_message.id}, parent_id={assistant_message.parent_id}")
         
         # NOTE: message_start is sent by websocket.py BEFORE calling stream_message
         # with the pre-generated message_id. No need to yield it here.
@@ -936,13 +983,22 @@ class LLMService:
             message_id = str(assistant_message.id)
             chat_id = str(chat.id)
             
+            # Strip inline tool tags from content before saving
+            # These are processed by the frontend and shouldn't be in saved messages
+            clean_content = strip_tool_tags(filtered_content)
+            
+            # For continuations, prepend existing content
+            if existing_content:
+                clean_content = existing_content + "\n\n" + clean_content
+                logger.info(f"[LLM_STREAM] Appended to existing content, total len={len(clean_content)}")
+            
             try:
                 # Update message with final content using direct SQL
                 await db.execute(
                     update(Message)
                     .where(Message.id == message_id)
                     .values(
-                        content=filtered_content,
+                        content=clean_content,
                         input_tokens=total_input_tokens,
                         output_tokens=total_output_tokens,
                         time_to_first_token=time_to_first_token_ms,

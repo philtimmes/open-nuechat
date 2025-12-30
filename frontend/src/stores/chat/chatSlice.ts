@@ -37,8 +37,11 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
     const searchChanged = search !== undefined && search !== currentState.chatSearchQuery;
     const page = (loadMore && !searchChanged) ? currentState.chatPage : 1;
     
+    console.log(`[fetchChats] loadMore=${loadMore}, page=${page}, hasMoreChats=${currentState.hasMoreChats}, isLoading=${currentState.isLoadingChats}`);
+    
     // Don't fetch if already loading or no more chats (when loading more without search change)
     if (currentState.isLoadingChats || (loadMore && !searchChanged && !currentState.hasMoreChats)) {
+      console.log(`[fetchChats] Skipping - isLoading=${currentState.isLoadingChats}, hasMore=${currentState.hasMoreChats}`);
       return;
     }
     
@@ -64,6 +67,8 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
       
       // Calculate if there are more chats to load
       const hasMore = page * pageSize < total;
+      
+      console.log(`[fetchChats] Got ${newChats.length} chats, total=${total}, page=${page}, pageSize=${pageSize}, hasMore=${hasMore}`);
       
       set((state) => ({ 
         chats: (loadMore && !searchChanged) ? [...state.chats, ...newChats] : newChats,

@@ -287,6 +287,21 @@ Also use this to search large project summaries that were too big to fit in cont
             },
             handler=self._search_agent_files_handler,
         )
+        
+        # Alias: "find" -> search_archived_context (some LLMs use this name)
+        self.register(
+            name="find",
+            description="""Search through project files and archived context. Use this to find specific code, functions, or content.
+Alias for search_archived_context.""",
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "Search terms to find",
+                    "required": True,
+                },
+            },
+            handler=self._search_agent_files_handler,
+        )
     
     async def _search_agent_files_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Search agent memory files"""

@@ -1711,9 +1711,9 @@ export default function ChatPage() {
         </div>
       )}
       
-      <div className="flex h-full">
+      <div className="chat-layout-root">
       {/* Main chat area */}
-      <div className="flex flex-col flex-1 min-w-0 min-h-0">
+      <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
         {/* Header with actions */}
         <div className="flex items-center justify-between px-3 md:px-4 py-2 border-b border-[var(--color-border)]">
           <div className="flex items-center gap-3 min-w-0">
@@ -1913,10 +1913,10 @@ export default function ChatPage() {
           </div>
         </div>
         
-        {/* Messages container */}
+        {/* Messages container - CSS containment prevents content from affecting layout */}
         <div
           ref={containerRef}
-          className="flex-1 overflow-y-auto"
+          className="chat-messages-scroll flex-1 min-h-0"
         >
           {isLoadingMessages ? (
             <div className="flex items-center justify-center h-32">
@@ -1998,8 +1998,8 @@ export default function ChatPage() {
           </button>
         )}
         
-        {/* Input area */}
-        <div className="border-t border-[var(--color-border)] p-3 md:p-4">
+        {/* Input area - fixed at bottom, never affected by content above */}
+        <div className="chat-input-fixed border-t border-[var(--color-border)] p-3 md:p-4 bg-[var(--color-background)]">
           {/* Voice mode indicator */}
           {isVoiceMode && (
             <div className="mb-3 flex items-center justify-between px-3 py-2 rounded-lg bg-[var(--color-primary)]/10 border border-[var(--color-primary)]/30">

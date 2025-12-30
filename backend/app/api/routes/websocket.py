@@ -3,7 +3,9 @@ WebSocket endpoint for real-time features
 """
 import asyncio
 import uuid
-from datetime import datetime, timezone, timezone
+import hashlib
+from datetime import datetime, timezone
+from collections import OrderedDict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, text
@@ -36,6 +38,52 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter(tags=["WebSocket"])
+
+# Message deduplication - prevent processing same message twice
+# Uses LRU-style dict with max size to prevent memory growth
+class MessageDeduplicator:
+    def __init__(self, max_size: int = 100, ttl_seconds: float = 5.0):
+        self._seen: OrderedDict[str, float] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+    
+    def _hash_message(self, msg_type: str, payload: dict) -> str:
+        """Generate hash for message deduplication"""
+        # Include type and key payload fields
+        key_parts = [msg_type]
+        if 'chat_id' in payload:
+            key_parts.append(payload['chat_id'])
+        if 'content' in payload:
+            # Hash content to keep key short
+            content_hash = hashlib.md5(payload['content'].encode()).hexdigest()[:8]
+            key_parts.append(content_hash)
+        if 'parent_id' in payload:
+            key_parts.append(str(payload.get('parent_id', ''))[:8])
+        return ':'.join(key_parts)
+    
+    def is_duplicate(self, msg_type: str, payload: dict) -> bool:
+        """Check if message was recently processed"""
+        now = datetime.now().timestamp()
+        msg_hash = self._hash_message(msg_type, payload)
+        
+        # Clean expired entries
+        expired = [k for k, v in self._seen.items() if now - v > self._ttl]
+        for k in expired:
+            del self._seen[k]
+        
+        # Check if seen
+        if msg_hash in self._seen:
+            logger.warning(f"[DEDUP] Duplicate message detected: {msg_type} hash={msg_hash}")
+            return True
+        
+        # Mark as seen
+        self._seen[msg_hash] = now
+        
+        # Enforce max size
+        while len(self._seen) > self._max_size:
+            self._seen.popitem(last=False)
+        
+        return False
 
 
 @router.websocket("/ws")
@@ -80,6 +128,9 @@ async def websocket_endpoint(
     connection = await ws_manager.connect(websocket, user_id, already_accepted=True)
     streaming_handler = StreamingHandler(ws_manager, connection)
     
+    # Message deduplicator for this connection
+    deduplicator = MessageDeduplicator()
+    
     # Log connection
     log_websocket_event("connect", user_id)
     
@@ -99,6 +150,10 @@ async def websocket_endpoint(
             
             msg_type = message.get("type")
             payload = message.get("payload", {})
+            
+            # Check for duplicate messages (prevents double-processing from React StrictMode etc)
+            if msg_type in ("chat_message", "regenerate_message") and deduplicator.is_duplicate(msg_type, payload):
+                continue  # Skip duplicate
             
             # Only log important message types (not ping)
             if msg_type != "ping":
@@ -1325,15 +1380,35 @@ The following is relevant information from your previous conversations:
             return result
         
         # ============================================================
-        # PRE-GENERATE ASSISTANT MESSAGE ID
+        # PRE-GENERATE ASSISTANT MESSAGE ID (or use existing for continuations)
         # This ID is generated BEFORE streaming starts.
         # Frontend receives it BEFORE any content.
         # Tool continuations use this as parent_id.
+        # If continue_message_id is provided, APPEND to that message instead.
         # ============================================================
         import uuid
-        assistant_message_id = str(uuid.uuid4())
         
-        logger.info(f"[PRE_STREAM] Generated assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}")
+        continue_message_id = payload.get("continue_message_id")
+        is_continuation = bool(continue_message_id and is_tool_result)
+        
+        if is_continuation:
+            # Validate the message exists and belongs to this chat
+            existing_msg = await db.execute(
+                select(Message).where(Message.id == continue_message_id, Message.chat_id == chat_id)
+            )
+            existing_message = existing_msg.scalar_one_or_none()
+            
+            if existing_message:
+                assistant_message_id = continue_message_id
+                logger.info(f"[TOOL_CONTINUATION] Appending to existing message: {assistant_message_id[:8]}")
+            else:
+                logger.warning(f"[TOOL_CONTINUATION] continue_message_id {continue_message_id[:8]} not found, creating new")
+                assistant_message_id = str(uuid.uuid4())
+                is_continuation = False
+        else:
+            assistant_message_id = str(uuid.uuid4())
+        
+        logger.info(f"[PRE_STREAM] Generated assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}, is_continuation={is_continuation}")
         
         # Notify frontend of the message ID BEFORE streaming starts
         # Pass execute_tool for inline tool call detection (e.g., <$web_search>)
@@ -1341,7 +1416,7 @@ The following is relevant information from your previous conversations:
         
         try:
             # Log content being sent to LLM
-            logger.info(f"[LLM_CALL] Sending to LLM: content_len={len(content)}, chat={chat_id}, assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}")
+            logger.info(f"[LLM_CALL] Sending to LLM: content_len={len(content)}, chat={chat_id}, assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}, is_continuation={is_continuation}")
             if len(content) > 200:
                 logger.debug(f"[LLM_CALL] Content head: {content[:100]}")
                 logger.debug(f"[LLM_CALL] Content tail: {content[-100:]}")
@@ -1359,6 +1434,7 @@ The following is relevant information from your previous conversations:
                 cancel_check=streaming_handler.is_stop_requested,  # Allow LLM to check cancellation
                 stream_setter=streaming_handler.set_active_stream,  # Allow direct stream cancellation
                 is_file_content=not save_user_message,  # Skip injection filter for user-uploaded files
+                is_continuation=is_continuation,  # Append to existing message for tool continuations
             ):
                 # Check if stop was requested (backup check)
                 if streaming_handler.is_stop_requested():

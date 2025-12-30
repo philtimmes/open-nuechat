@@ -10,7 +10,198 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.6.96
+**Current Version:** NC-0.7.01
+
+---
+
+## Recent Changes (NC-0.7.01)
+
+### Sidebar Accordion UI (with fixed loading)
+
+**Problem:** Accordion infinite scroll was broken - groups showed counts but expanding showed only a few chats, scroll didn't load more.
+
+**Solution:** Kept accordion UI but fixed the loading logic:
+- `expandedSections` (Set) tracks which accordions are expanded
+- Auto-expands first group with chats on load  
+- When accordion expands, triggers `fetchChats()` if not enough chats loaded
+- Click header toggles expand/collapse with rotating chevron
+
+**Files Changed:**
+- `frontend/src/components/Sidebar.tsx`: Fixed accordion loading trigger
+
+### OAuth Feature Flags Fix
+
+**Problem:** OAuth buttons showed for disabled providers (GitHub showing when only Google enabled).
+
+**Root Cause:** `loadConfig()` was calling `/api/admin/public/branding` which doesn't return the `features` object. The correct endpoint `/api/branding/config` includes OAuth feature flags.
+
+**Solution:** Changed `loadConfig()` to use `/api/branding/config` and properly map all fields including `features.oauth_google` and `features.oauth_github`.
+
+**Files Changed:**
+- `frontend/src/stores/brandingStore.ts`: Changed endpoint from `/api/admin/public/branding` to `/api/branding/config`, added proper feature flags mapping
+
+### Chat Knowledge Enabled by Default
+
+**Problem:** New users didn't have Chat Knowledge enabled by default, so green dots for indexed chats weren't showing.
+
+**Solution:** Auto-create chat knowledge store when creating new users in `AuthService.create_user()`.
+
+**Files Changed:**
+- `backend/app/services/auth.py`: Create KnowledgeStore and set `chat_knowledge_store_id` during user creation
+
+---
+
+## Recent Changes (NC-0.7.00)
+
+### Visual Agent Workflow Builder
+
+Added n8n-style visual agent flow builder with persistence:
+
+**Backend:**
+- New `AgentFlow` model in `app/models/agent_flow.py`
+- CRUD API at `/api/agent-flows`:
+  - `GET /agent-flows` - List all flows
+  - `POST /agent-flows` - Create new flow
+  - `GET /agent-flows/{id}` - Get flow
+  - `PUT /agent-flows/{id}` - Update flow (nodes, connections, name)
+  - `DELETE /agent-flows/{id}` - Delete flow
+  - `POST /agent-flows/{id}/duplicate` - Duplicate flow
+
+**Frontend:**
+- `AgentFlows.tsx` now uses API for persistence
+- Loading states for initial load and save operations
+- Visual node editor with drag-and-drop, connections, node configuration
+
+### Claude.ai Chat Import
+
+Added full support for importing Claude.ai conversation exports:
+
+**Detection:**
+- Recognizes Claude.ai exports by `chat_messages`, `uuid`, and `account` fields
+- Works with both single chat and array of chats
+
+**Content parsing:**
+- Handles content array with typed blocks:
+  - `text` blocks → plain text
+  - `thinking` blocks → wrapped in `<thinking>` tags
+  - `tool_use` blocks → `[Tool: name] message`
+  - `tool_result` blocks → `[Result: name] message`
+  - `knowledge` blocks → `[Knowledge: title] text...`
+- Extracts timestamps from `created_at` fields
+- Prefixes titles with "Claude: " for source identification
+
+**Source grouping:**
+- Added "Claude" to sidebar source groups (Sort by Source)
+- Backend counts endpoint groups by `Claude:%` prefix
+- Order: Local, ChatGPT, Grok, Claude
+
+### PDF Export Fix
+
+Fixed PDF generation for markdown artifacts:
+
+**Problem:** PDF button clicked but nothing happened (401 auth error, then 500 server error)
+
+**Fixes:**
+1. Auth: Changed from raw `fetch` to `api` client (handles auth tokens automatically)
+2. Backend: Updated `markdown-pdf` library usage - now uses `save_bytes(buffer)` instead of deprecated `out_pdf`
+3. Button visibility: Added `activeTab === 'preview'` condition so PDF button shows when viewing rendered markdown
+
+### Artifact Detection Improvements
+
+Fixed artifact detection for formats with spaces:
+
+**Problem:** `<artifact= Trial Docs.md>` (space after `=`) wasn't being detected
+
+**Fixes:**
+- `WebSocketContext.tsx`: Updated `STREAM_ARTIFACT_EQUALS_PATTERN` to allow optional whitespace after `=`
+- `artifacts.ts`: Updated Pattern 4b regex to handle spaces in filenames, added `.trim()` to captured filename
+
+---
+
+## Recent Changes (NC-0.6.99)
+
+### Lazy Loading Date Groups
+
+**Problem:** "Today" showed 6 chats but expanding showed nothing, delete didn't work.
+
+**Root Cause:** `/chats/counts` correctly counted chats per group, but `/chats` list endpoint loaded globally by updated_at, not by date group.
+
+**Solution:**
+1. Added `date_group` parameter to `/chats` endpoint (filters by Today/This Week/Last 30 Days/Older)
+2. Added `DELETE /chats/group/{date_group}` for bulk delete by group
+3. Frontend `loadGroupChats()` fetches chats for specific date group when expanded
+4. `loadedGroups` Set tracks which groups have been loaded
+
+### UTC Timezone Handling
+
+**Problem:** New chats appeared in wrong date group (e.g., "This Week" instead of "Today")
+
+**Root Cause:** Backend returns timestamps without timezone indicator. JavaScript parsed as local time, not UTC.
+
+**Solution:** Frontend `getDateCategory()` now:
+- Appends `Z` to timestamps without timezone indicator
+- Uses `Date.UTC()` for comparisons instead of local time
+
+### Enhanced Search_Replace Errors
+
+Improved error messages for search_replace operations:
+- Success: `[SEARCH_REPLACE: ✓ Replaced 5 lines with 8 lines in "style.css"]`
+- File not found: Shows available files
+- Content not found: Shows diagnostic hints (first line location, actual content around match area)
+
+---
+
+## Recent Changes (NC-0.6.98)
+
+### Tool Continuation Single-Leaf Fix
+
+**Problem:** Tool continuations created extra branches instead of linear flow.
+
+**Solution:** Added `continue_message_id` to identify exact leaf message to continue from. Backend validates and uses this for proper parent_id assignment.
+
+### Case-Insensitive Tool Detection
+
+Tool tags like `<FIND>`, `<Search_Replace>` now detected regardless of case.
+
+### Null Timestamp Handling
+
+Fixed sidebar crash when chat has null `updated_at` by providing fallback to `created_at`.
+
+---
+
+## Recent Changes (NC-0.6.97)
+
+### Chat Timestamp Fix
+
+**Problem:** All chats were showing as "Today" in the sidebar because chat knowledge indexing was modifying the `is_knowledge_indexed` field via ORM, which triggered the `onupdate=func.now()` on `updated_at`.
+
+**Solution:**
+1. Changed ORM updates (`chat.is_knowledge_indexed = True`) to raw SQL to avoid triggering `onupdate`
+2. Added `/api/user-settings/repair-chat-timestamps` endpoint to manually repair corrupted timestamps
+3. The repair sets `updated_at` to the most recent message timestamp for each chat
+4. Added NC-0.6.97 migration to automatically repair timestamps on upgrade
+
+### Inline Tool Tag Handling (Complete)
+
+**Problem:** Tool tags like `<find>`, `<search_replace>`, `<request_file>` were appearing in saved messages and UI.
+
+**Solution - Frontend (StreamingBuffer):**
+1. Buffer watches for tool tag starts (`<find`, `<search_replace`, etc.)
+2. Multi-line tags (`<search_replace>`, `<replace_block>`, `<tool_call>`) wait for closing tag before processing
+3. Self-closing tags (`<find>`, `<find_line>`, `<request_file>`) wait for `>`
+4. Complete tags trigger execution callback - content before tag is flushed, tag is consumed (not displayed)
+5. Tool results sent back to continue conversation
+
+**Solution - Backend (strip_tool_tags):**
+1. Added `strip_tool_tags()` function with regex patterns for all inline tool tags
+2. Applied to `filtered_content` before saving to Message in database
+3. Ensures tool tags never appear in saved message content even if frontend doesn't catch them
+
+**Files Changed:**
+- `backend/app/api/routes/user_settings.py`: Fixed ORM updates to use raw SQL, added repair endpoint
+- `backend/app/main.py`: Added NC-0.6.97 migration for timestamp repair
+- `backend/app/services/llm.py`: Added `strip_tool_tags()` function, applied before saving message
+- `frontend/src/contexts/WebSocketContext.tsx`: StreamingBuffer multi-line tag support, toolDetectedCallback for search_replace/replace_block
 
 ---
 
@@ -18,26 +209,44 @@ Full-stack LLM chat application with:
 
 ### Context Overflow Fix - Agent Files & Search Tool
 
-**Problem:** Large code summaries (888KB) were being injected into system prompt, exceeding context window.
+**Problem:** Large code summaries (888KB) and zip manifests were being injected into system prompt, exceeding context window.
 
 **Solution:**
-1. Large code summaries (>12.8K tokens) are saved to `{AgentCodeSummary}.md` files
-2. Truncated preview injected with notice about agent file
-3. New `search_archived_context` tool lets LLM search agent files
-4. LLM informed it can search for specific functions/classes
-
-**New Tool:**
-- `search_archived_context` - Search through `{AgentNNNN}.md` files for archived conversation history and large code summaries
+1. Large code summaries (>12.8K tokens) are saved to `{Agent0001}.md` files
+2. Large zip manifests (>12.8K tokens) are saved to `{Agent0002}.md` files  
+3. Truncated preview injected with notice about agent file
+4. New `search_archived_context` tool lets LLM search agent files
+5. Added `find` as alias tool (some LLMs use this name)
 
 **Context Size Fix:**
 - `LLMService.context_size` now properly reads from `LLMProvider.context_size` in database
 - Previously was reading from wrong settings table (`model_context_size` key)
 - Added input validation - returns error if input tokens exceed context window
 
+**XML Tool Call Detection (Backend):**
+- Added detection for `<tool_call>{"tool": "...", "query": "..."}</tool_call>` format
+- Supports multiple JSON conventions: `name`/`tool` for tool name, `arguments`/`parameters`/direct fields for params
+- Invalid JSON in tool_call shows error message with correct format example
+- Partial tool tag detection in buffer
+
+**Inline Tool Detection (Frontend - Complete Rewrite):**
+- StreamingBuffer now watches for tool tags BEFORE flushing to UI
+- Partial tags held in buffer until complete
+- Complete tags trigger execution immediately - NEVER shown to user
+- Added support for both attribute orders: `<find path="..." search="...">` and `<find search="..." path="...">`
+- Fixed `extractFindOperations` to handle reversed attribute order
+
+**Message Deduplication:**
+- Added `MessageDeduplicator` class to prevent processing same WebSocket message twice
+- Uses hash of type + chat_id + content_hash + parent_id
+- 5-second TTL, max 100 entries with LRU cleanup
+
 **Files Changed:**
-- `backend/app/services/llm.py`: Added context_size to LLMService, fixed context limit reading
-- `backend/app/api/routes/websocket.py`: Code summary saves overflow to agent files, informs LLM
-- `backend/app/tools/registry.py`: Added search_archived_context tool
+- `backend/app/services/llm.py`: Added context_size to LLMService, fixed context limit reading, added tools instruction about search_archived_context
+- `backend/app/api/routes/websocket.py`: Zip/code summary saves overflow to agent files, added MessageDeduplicator
+- `backend/app/services/websocket.py`: Added XML tool_call pattern detection, error feedback for invalid format
+- `backend/app/tools/registry.py`: Added search_archived_context and find tools
+- `frontend/src/contexts/WebSocketContext.tsx`: Complete rewrite of StreamingBuffer with tool detection, added reversed attribute patterns
 
 ---
 
@@ -1676,6 +1885,14 @@ The editor uses React Flow and supports all step types with intuitive configurat
 | NC-0.6.66 | 2025-12-24 | Complete payment system: Stripe, PayPal, Google Pay integration |
 | NC-0.6.65 | 2025-12-24 | Fix artifact closing tag detection when not alone on line |
 | NC-0.6.64 | 2025-12-24 | Gzip file support, log error extraction with context, error summary in LLM |
+| NC-0.7.01 | 2025-12-30 | Sidebar breadcrumb navigation (replaces broken accordion), OAuth feature flags fix (wrong endpoint) |
+| NC-0.7.00 | 2025-12-29 | Agent Flows with persistence, Claude.ai import, PDF export fix, artifact detection for spaces |
+| NC-0.6.99 | 2025-12-29 | Lazy loading date groups, UTC timezone fix, bulk delete by group, enhanced search_replace errors |
+| NC-0.6.98 | 2025-12-29 | Tool continuation single-leaf fix, case-insensitive tool detection, null timestamp handling |
+| NC-0.6.97 | 2025-12-28 | Chat timestamp fix via raw SQL, strip_tool_tags backend, StreamingBuffer multi-line tags |
+| NC-0.6.96 | 2025-12-28 | Context overflow agent files, search_archived_context tool, XML tool_call detection, StreamingBuffer rewrite |
+| NC-0.6.95 | 2025-12-27 | Image detection fix (removed negative patterns), IMAGE_CONFIRM_WITH_LLM to admin panel |
+| NC-0.6.94 | 2025-12-27 | Global KB retry fix - is_tool_continuation flag for proper RAG search on regenerate |
 | NC-0.6.63 | 2025-12-23 | Shared chat images & formatting, preserve user newlines (whitespace-pre-wrap) |
 | NC-0.6.62 | 2025-12-23 | RAG embedding model auto-retry after 60s, background startup load with delay |
 | NC-0.6.61 | 2025-12-23 | Fix image display after upload (setCurrentChat race), fix markdown (remove prose classes) |
@@ -1773,11 +1990,13 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.6.90**
+Current: **NC-0.7.01**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 
 Key tables added/modified:
+- NC-0.7.01: No schema changes (frontend-only: sidebar breadcrumb nav, OAuth fix)
+- NC-0.7.00: `agent_flows` - User-created visual agent workflows with JSON definition
 - NC-0.6.50: No schema changes (RAG model loading fix, frontend streaming improvements)
 - NC-0.6.49: No schema changes (timeout/frontend fixes only)
 - `filter_chains` - Added skip_if_rag_hit flag (NC-0.6.46)

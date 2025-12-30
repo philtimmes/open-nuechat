@@ -1226,10 +1226,22 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.6.96**
+**NC-0.7.01**
 
 Changes:
-- NC-0.6.96: **Context overflow fix** - large code summaries saved to {AgentCodeSummary}.md, new search_archived_context tool, fixed context_size reading from LLMProvider
+- NC-0.7.01: **Sidebar Accordion Fix + OAuth Fix + Chat Knowledge Default** - Fixed accordion loading (triggers fetchChats on expand), fixed OAuth feature flags (wrong endpoint `/api/admin/public/branding` → `/api/branding/config`), auto-create chat knowledge store for new users
+- NC-0.7.00: **Agent Flows + Claude Import + PDF Fix** - Visual agent workflow builder with persistence (AgentFlow model, /api/agent-flows CRUD), Claude.ai chat import support (thinking blocks, tool use, citations), PDF export fix (save_bytes API), artifact detection for `<artifact= filename>` with spaces
+- NC-0.6.99: **Lazy loading date groups + timezone fix** - Added date_group parameter to /chats endpoint, DELETE /chats/group/{group} for bulk delete, UTC timezone handling in frontend date grouping, enhanced search_replace error messages with line counts and diagnostics
+- NC-0.6.98: **Tool continuation single-leaf fix** - continue_message_id for proper branching, case-insensitive tool detection, null timestamp handling
+- NC-0.6.97: **Chat timestamp fix + Tool tag stripping** - Fixed all chats showing as "Today" via raw SQL for is_knowledge_indexed. Added strip_tool_tags() to backend to remove <find>, <search_replace>, etc. from saved messages. Frontend StreamingBuffer now handles multi-line tool tags properly.
+- NC-0.6.96: **Context overflow + Tool detection overhaul**
+  - Large zip manifests/code summaries saved to {Agent0001}.md files
+  - Fixed context_size reading from LLMProvider.context_size
+  - Backend: Added XML `<tool_call>` detection, error feedback for invalid format
+  - Backend: Added search_archived_context and find tools
+  - Backend: MessageDeduplicator prevents duplicate WebSocket messages
+  - Frontend: Complete rewrite of StreamingBuffer - tool tags detected BEFORE flush, never shown to user
+  - Frontend: Support both attribute orders for find tags
 - NC-0.6.95: **Image detection fix + admin settings** - removed redundant negative regex patterns (caused false negatives when "the image" appeared in prompt), moved IMAGE_CONFIRM_WITH_LLM to admin panel, added image_classification_prompt and image_classification_true_response settings
 - NC-0.6.94: **Global KB retry fix** - regenerate/retry now triggers RAG search (was skipped due to is_tool_result flag), added explicit is_tool_continuation flag for tool results
 - NC-0.6.90: **Inline tool calls** - `<$ToolName>` syntax in streaming, `call_tool` primitive for filter chains

@@ -121,12 +121,44 @@ async def list_chats(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=1000),
     search: Optional[str] = None,
+    date_group: Optional[str] = Query(None, regex="^(Today|This Week|Last 30 Days|Older)$"),
+    sort_by: str = Query("modified", regex="^(modified|created)$"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """List user's chats with pagination. Search queries both title and message content."""
+    from datetime import datetime, timedelta
     
     base_filter = Chat.owner_id == user.id
+    filters = [base_filter]
+    
+    # Add date group filter if specified
+    if date_group:
+        now = datetime.utcnow()
+        today_start = datetime(now.year, now.month, now.day)
+        days_ago_7 = today_start - timedelta(days=6)
+        days_ago_30 = today_start - timedelta(days=29)
+        
+        date_field = Chat.created_at if sort_by == "created" else Chat.updated_at
+        
+        logger.info(f"[LIST_CHATS] date_group={date_group}, sort_by={sort_by}, today_start={today_start}")
+        
+        if date_group == "Today":
+            filters.append(date_field >= today_start)
+        elif date_group == "This Week":
+            filters.append(date_field >= days_ago_7)
+            filters.append(date_field < today_start)
+        elif date_group == "Last 30 Days":
+            filters.append(date_field >= days_ago_30)
+            filters.append(date_field < days_ago_7)
+        elif date_group == "Older":
+            filters.append(date_field < days_ago_30)
+        
+        # Debug: count how many match
+        debug_query = select(func.count(Chat.id)).where(*filters)
+        debug_result = await db.execute(debug_query)
+        debug_count = debug_result.scalar()
+        logger.info(f"[LIST_CHATS] Filter matches {debug_count} chats")
     
     if search:
         # Search in both title and message content
@@ -146,18 +178,18 @@ async def list_chats(
             Chat.title.ilike(f"%{search}%"),
             Chat.id.in_(matching_chat_ids) if matching_chat_ids else False
         )
-        query = select(Chat).where(base_filter, search_filter)
-        count_query = select(func.count(Chat.id)).where(base_filter, search_filter)
-    else:
-        query = select(Chat).where(base_filter)
-        count_query = select(func.count(Chat.id)).where(base_filter)
+        filters.append(search_filter)
+    
+    query = select(Chat).where(*filters)
+    count_query = select(func.count(Chat.id)).where(*filters)
     
     # Get total count
     total_result = await db.execute(count_query)
     total = total_result.scalar()
     
-    # Get paginated results
-    query = query.order_by(Chat.updated_at.desc())
+    # Get paginated results - use appropriate sort field
+    order_field = Chat.created_at if sort_by == "created" else Chat.updated_at
+    query = query.order_by(order_field.desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
     
     result = await db.execute(query)
@@ -181,19 +213,22 @@ async def get_chat_counts(
     from datetime import datetime, timedelta
     from sqlalchemy import case
     
+    # Use naive UTC for SQLite compatibility
     now = datetime.utcnow()
     today_start = datetime(now.year, now.month, now.day)
-    week_start = today_start - timedelta(days=today_start.weekday())  # Start of this week
     days_ago_7 = today_start - timedelta(days=6)  # 6 days ago (This Week = 1-6 days)
     days_ago_30 = today_start - timedelta(days=29)  # 29 days ago (Last 30 = 7-29 days)
+    
+    logger.debug(f"[COUNTS] now={now}, today_start={today_start}, days_ago_7={days_ago_7}")
     
     base_filter = Chat.owner_id == user.id
     
     if sort_by == "source":
-        # Group by title prefix (ChatGPT:, Grok:, or Local)
+        # Group by title prefix (ChatGPT:, Grok:, Claude:, or Local)
         source_case = case(
             (Chat.title.like("ChatGPT:%"), "ChatGPT"),
             (Chat.title.like("Grok:%"), "Grok"),
+            (Chat.title.like("Claude:%"), "Claude"),
             else_="Local"
         )
         
@@ -207,13 +242,13 @@ async def get_chat_counts(
         rows = result.all()
         
         # Ensure all groups exist
-        counts = {"Local": 0, "ChatGPT": 0, "Grok": 0}
+        counts = {"Local": 0, "ChatGPT": 0, "Grok": 0, "Claude": 0}
         for row in rows:
             counts[row.group_name] = row.count
         
         return {
             "sort_by": sort_by,
-            "groups": ["Local", "ChatGPT", "Grok"],
+            "groups": ["Local", "ChatGPT", "Grok", "Claude"],
             "counts": counts,
             "total": sum(counts.values())
         }
@@ -570,6 +605,65 @@ async def delete_all_chats(
     await db.commit()
     
     return {"status": "deleted", "message": "All chats deleted", "images_deleted": deleted_images}
+
+
+@router.delete("/group/{date_group}")
+async def delete_chats_by_group(
+    date_group: str,
+    sort_by: str = Query("modified", regex="^(modified|created)$"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete all chats in a specific date group (Today, This Week, Last 30 Days, Older)"""
+    from datetime import datetime, timedelta
+    
+    if date_group not in ['Today', 'This Week', 'Last 30 Days', 'Older']:
+        raise HTTPException(status_code=400, detail="Invalid date group")
+    
+    now = datetime.utcnow()
+    today_start = datetime(now.year, now.month, now.day)
+    days_ago_7 = today_start - timedelta(days=6)
+    days_ago_30 = today_start - timedelta(days=29)
+    
+    date_field = Chat.created_at if sort_by == "created" else Chat.updated_at
+    
+    # Build filter for the date group
+    filters = [Chat.owner_id == user.id]
+    
+    if date_group == "Today":
+        filters.append(date_field >= today_start)
+    elif date_group == "This Week":
+        filters.append(date_field >= days_ago_7)
+        filters.append(date_field < today_start)
+    elif date_group == "Last 30 Days":
+        filters.append(date_field >= days_ago_30)
+        filters.append(date_field < days_ago_7)
+    elif date_group == "Older":
+        filters.append(date_field < days_ago_30)
+    
+    # Get chat IDs to delete
+    result = await db.execute(select(Chat.id).where(*filters))
+    chat_ids = [row[0] for row in result.all()]
+    
+    if not chat_ids:
+        return {"status": "deleted", "count": 0, "message": f"No chats in {date_group}"}
+    
+    # Delete associated data
+    # 1. Delete messages
+    await db.execute(delete(Message).where(Message.chat_id.in_(chat_ids)))
+    
+    # 2. Delete uploaded files
+    from app.models.models import UploadedFile
+    await db.execute(delete(UploadedFile).where(UploadedFile.chat_id.in_(chat_ids)))
+    
+    # 3. Delete chats
+    await db.execute(delete(Chat).where(Chat.id.in_(chat_ids)))
+    
+    await db.commit()
+    
+    logger.info(f"Deleted {len(chat_ids)} chats in group '{date_group}' for user {user.id}")
+    
+    return {"status": "deleted", "count": len(chat_ids), "message": f"Deleted {len(chat_ids)} chats in {date_group}"}
 
 
 # ============ Messages ============
@@ -1836,7 +1930,7 @@ def parse_grok_export(data: dict) -> List[ImportedChat]:
 
 
 def parse_claude_export(data: dict) -> List[ImportedChat]:
-    """Parse Claude/Anthropic export format"""
+    """Parse Claude/Anthropic export format including Claude.ai exports"""
     chats = []
     
     conversations = data if isinstance(data, list) else [data]
@@ -1845,18 +1939,75 @@ def parse_claude_export(data: dict) -> List[ImportedChat]:
         title = conv.get("title", conv.get("name", "Imported from Claude"))
         messages = []
         
+        # Get chat creation time
+        chat_created = None
+        if conv.get("created_at"):
+            try:
+                chat_created = datetime.fromisoformat(conv["created_at"].replace("Z", "+00:00"))
+            except:
+                pass
+        
         msg_list = conv.get("messages", conv.get("chat_messages", []))
         
         for msg in msg_list:
             role = msg.get("role", msg.get("sender", "")).lower()
+            
+            # Get content - handle multiple formats
             content = msg.get("content", msg.get("text", ""))
             
-            # Handle content that might be a list of content blocks
+            # Handle Claude.ai format where content is array of content blocks
             if isinstance(content, list):
-                content = "\n".join(
-                    c.get("text", str(c)) if isinstance(c, dict) else str(c) 
-                    for c in content
-                )
+                content_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        block_type = block.get("type", "")
+                        
+                        # Text content
+                        if block_type == "text" or "text" in block:
+                            text = block.get("text", "")
+                            if text:
+                                content_parts.append(text)
+                        
+                        # Thinking blocks - include with markers
+                        elif block_type == "thinking":
+                            thinking = block.get("thinking", "")
+                            if thinking:
+                                content_parts.append(f"<thinking>\n{thinking}\n</thinking>")
+                        
+                        # Tool use blocks
+                        elif block_type == "tool_use":
+                            tool_name = block.get("name", "unknown")
+                            tool_input = block.get("input", {})
+                            tool_msg = block.get("message", "")
+                            if tool_msg:
+                                content_parts.append(f"[Tool: {tool_name}] {tool_msg}")
+                        
+                        # Tool result blocks
+                        elif block_type == "tool_result":
+                            tool_name = block.get("name", "")
+                            result_msg = block.get("message", "")
+                            if result_msg:
+                                content_parts.append(f"[Result: {tool_name}] {result_msg}")
+                        
+                        # Knowledge/citation blocks
+                        elif block_type == "knowledge":
+                            kb_title = block.get("title", "")
+                            kb_text = block.get("text", "")
+                            if kb_title or kb_text:
+                                content_parts.append(f"[Knowledge: {kb_title}]\n{kb_text[:500]}...")
+                        
+                        # Fallback for unknown block types
+                        else:
+                            if "text" in block:
+                                content_parts.append(block["text"])
+                    else:
+                        content_parts.append(str(block))
+                
+                content = "\n\n".join(content_parts)
+            
+            # Also check for 'text' field directly (some Claude exports)
+            if not content and msg.get("text"):
+                content = msg.get("text")
             
             if role in ["human", "user"]:
                 role = "user"
@@ -1883,8 +2034,9 @@ def parse_claude_export(data: dict) -> List[ImportedChat]:
         
         if messages:
             chats.append(ImportedChat(
-                title=title,
-                messages=messages
+                title=f"Claude: {title}" if not title.startswith("Claude:") else title,
+                messages=messages,
+                created_at=chat_created
             ))
     
     return chats
@@ -2000,10 +2152,20 @@ def detect_and_parse_export(data: dict) -> tuple[List[ImportedChat], str]:
         if "grok" in data_str or "xai_user_id" in data_str or '"sender": "human"' in str(data)[:5000]:
             return parse_grok_export(data), "Grok"
     
-    # Check for Claude format
+    # Check for Claude format - Claude.ai exports have specific structure
+    if isinstance(data, list) and data:
+        first_item = data[0]
+        if isinstance(first_item, dict):
+            # Claude.ai export has uuid, name, chat_messages, account fields
+            if "chat_messages" in first_item or ("uuid" in first_item and "account" in first_item):
+                return parse_claude_export(data), "Claude"
+    
     if isinstance(data, dict):
         data_str = str(data).lower()[:1000]
         if "claude" in data_str or "anthropic" in data_str:
+            return parse_claude_export(data), "Claude"
+        # Check for single Claude.ai chat
+        if "chat_messages" in data or ("uuid" in data and "account" in data):
             return parse_claude_export(data), "Claude"
     
     # Fall back to generic parser

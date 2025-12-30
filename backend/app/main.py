@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.api.routes import (
     auth, chats, billing, documents, themes, websocket, filters,
     api_keys, knowledge_stores, assistants, branding, admin, tools, utils, tts, stt, images,
-    filter_chains, vibe, procedural_memory, user_settings
+    filter_chains, vibe, procedural_memory, user_settings, agent_flows
 )
 from app.api.routes.v1 import router as v1_router
 from app.services.rag import RAGService
@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.6.96"
+SCHEMA_VERSION = "NC-0.7.01"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -321,6 +321,13 @@ async def run_migrations(conn):
             # Message timing metrics
             ("ALTER TABLE messages ADD COLUMN time_to_first_token INTEGER", "messages.time_to_first_token"),
             ("ALTER TABLE messages ADD COLUMN time_to_complete INTEGER", "messages.time_to_complete"),
+        ],
+        "NC-0.6.97": [
+            # Repair chat timestamps - set updated_at to latest message timestamp
+            # This fixes chats whose timestamps were corrupted by is_knowledge_indexed ORM updates
+            ("""UPDATE chats SET updated_at = (
+                SELECT MAX(created_at) FROM messages WHERE messages.chat_id = chats.id
+            ) WHERE EXISTS (SELECT 1 FROM messages WHERE messages.chat_id = chats.id)""", "chats.updated_at repair"),
         ],
     }
     
@@ -665,6 +672,7 @@ app.include_router(images.router, prefix="/api", tags=["Images"])  # Routes /api
 app.include_router(filter_chains.router, prefix="/api/admin", tags=["Filter Chains"])  # Routes /api/admin/filter-chains/*
 app.include_router(vibe.router, prefix="/api/vibe", tags=["VibeCode"])  # AI code editor endpoints
 app.include_router(procedural_memory.router, prefix="/api", tags=["Procedural Memory"])  # Skill learning endpoints
+app.include_router(agent_flows.router, prefix="/api", tags=["Agent Flows"])  # Visual agent workflow builder
 app.include_router(user_settings.router, prefix="/api/user", tags=["User Settings"])  # User settings endpoints
 
 # OpenAI-compatible API (v1)
