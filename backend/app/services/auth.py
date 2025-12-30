@@ -174,8 +174,8 @@ class OAuth2Service:
         )
     
     @staticmethod
-    async def get_google_auth_url(redirect_uri: str, state: str, db: AsyncSession = None) -> str:
-        """Get Google authorization URL. Reads credentials from DB if available."""
+    async def get_google_auth_url(redirect_uri: str, state: str, db: AsyncSession = None, code_challenge: str = None) -> str:
+        """Get Google authorization URL with PKCE support. Reads credentials from DB if available."""
         from app.services.settings_service import SettingsService
         
         client_id = None
@@ -188,9 +188,16 @@ class OAuth2Service:
                 client_secret = oauth_settings["client_secret"]
         
         client = OAuth2Service.get_google_client(redirect_uri, client_id, client_secret)
+        
+        # Build authorization URL with optional PKCE
+        auth_params = {"state": state}
+        if code_challenge:
+            auth_params["code_challenge"] = code_challenge
+            auth_params["code_challenge_method"] = "S256"
+        
         url, _ = client.create_authorization_url(
             OAuth2Service.GOOGLE_AUTHORIZE_URL,
-            state=state,
+            **auth_params,
         )
         return url
     
@@ -219,9 +226,10 @@ class OAuth2Service:
     async def handle_google_callback(
         db: AsyncSession, 
         code: str, 
-        redirect_uri: str
+        redirect_uri: str,
+        code_verifier: str = None
     ) -> Tuple[User, str, str]:
-        """Handle Google OAuth callback, return user and tokens"""
+        """Handle Google OAuth callback with PKCE, return user and tokens"""
         from app.services.settings_service import SettingsService
         
         # Get OAuth settings from database
@@ -232,10 +240,14 @@ class OAuth2Service:
         
         client = OAuth2Service.get_google_client(redirect_uri, client_id, client_secret)
         
-        # Exchange code for token
+        # Exchange code for token with PKCE verifier
+        token_params = {"code": code}
+        if code_verifier:
+            token_params["code_verifier"] = code_verifier
+        
         token = await client.fetch_token(
             OAuth2Service.GOOGLE_TOKEN_URL,
-            code=code,
+            **token_params,
         )
         
         # Get user info

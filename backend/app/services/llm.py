@@ -850,16 +850,18 @@ class LLMService:
                 content = msg.get("content", "")
                 if isinstance(content, str):
                     content_len = len(content)
-                    # For user messages, log more detail
-                    if msg.get("role") == "user" and content_len > 500:
-                        logger.info(f"[LLM_REQUEST] msg[{i}] role=user len={content_len} head={content[:150]!r} tail={content[-150:]!r}")
+                    # Only log content details in DEBUG mode to avoid leaking user data
+                    if settings.DEBUG:
+                        if msg.get("role") == "user" and content_len > 500:
+                            logger.debug(f"[LLM_REQUEST] msg[{i}] role=user len={content_len} head={content[:150]!r} tail={content[-150:]!r}")
+                        else:
+                            preview = content[:100] + "..." if len(content) > 100 else content
+                            logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} preview={preview}")
                     else:
-                        preview = content[:100] + "..." if len(content) > 100 else content
-                        logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} preview={preview}")
+                        logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len}")
                 else:
                     content_len = sum(len(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text")
-                    text_parts = [p.get("text", "")[:50] for p in content if isinstance(p, dict) and p.get("type") == "text"]
-                    logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} multimodal_parts={text_parts}")
+                    logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} (multimodal)")
             
             stream = await self.client.chat.completions.create(**api_params)
             
@@ -906,11 +908,11 @@ class LLMService:
                         
                         filtered_content += delta.content
                         
-                        # Log first 500 chars of response
-                        if len(first_content) < 500:
+                        # Only log response content in DEBUG mode
+                        if settings.DEBUG and len(first_content) < 500:
                             first_content += delta.content
                             if len(first_content) >= 500:
-                                logger.info(f"[LLM_RESPONSE] First 500 chars: {first_content[:500]!r}")
+                                logger.debug(f"[LLM_RESPONSE] First 500 chars: {first_content[:500]!r}")
                         
                         yield {
                             "type": "text_delta",

@@ -21,6 +21,57 @@ from app.core.config import settings
 
 router = APIRouter(tags=["Documents"])
 
+# Magic bytes for common file types (server-side validation)
+MAGIC_BYTES = {
+    b'%PDF': 'application/pdf',
+    b'PK\x03\x04': 'application/zip',  # Also covers DOCX, XLSX, PPTX
+    b'\xd0\xcf\x11\xe0': 'application/msword',  # DOC, XLS, PPT (OLE)
+    b'{\rtf': 'application/rtf',
+    b'\x89PNG': 'image/png',
+    b'\xff\xd8\xff': 'image/jpeg',
+    b'GIF8': 'image/gif',
+    b'RIFF': 'audio/wav',  # Check next bytes for WAVE
+}
+
+def detect_file_type(content: bytes) -> Optional[str]:
+    """Detect file type from magic bytes"""
+    for magic, mime in MAGIC_BYTES.items():
+        if content[:len(magic)] == magic:
+            return mime
+    
+    # Check if it looks like text
+    try:
+        content[:1000].decode('utf-8')
+        return 'text/plain'
+    except UnicodeDecodeError:
+        pass
+    
+    return None
+
+
+def validate_file_type(content: bytes, claimed_mime: str, filename: str) -> bool:
+    """
+    Validate file type using both magic bytes and extension.
+    Returns True if file appears legitimate.
+    """
+    detected = detect_file_type(content)
+    file_ext = Path(filename).suffix.lower() if filename else ""
+    
+    # For binary files, verify magic bytes match claimed type
+    if claimed_mime.startswith(('application/pdf', 'image/')):
+        if detected and detected != claimed_mime:
+            # Allow zip-based formats (docx, xlsx) with application/zip detection
+            if detected == 'application/zip' and file_ext in ['.docx', '.xlsx', '.pptx', '.odt', '.ods']:
+                return True
+            return False
+    
+    # For text-based files, allow if detected as text
+    if claimed_mime.startswith('text/') or file_ext in ['.txt', '.md', '.json', '.csv', '.py', '.js']:
+        if detected == 'text/plain' or detected is None:
+            return True
+    
+    return True  # Default allow for unknown types
+
 
 @router.get("", response_model=List[DocumentResponse])
 async def list_documents(
@@ -79,6 +130,13 @@ async def upload_document(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File too large. Max size: {max_upload_size_mb}MB",
+        )
+    
+    # Server-side file type validation using magic bytes
+    if not validate_file_type(contents, file.content_type or '', file.filename or ''):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File content does not match declared file type",
         )
     
     # Save file with UUID name (prevents path traversal)

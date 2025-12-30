@@ -396,8 +396,11 @@ async def ensure_persistent_secret_key(conn):
     """
     Ensure SECRET_KEY is persistent across server restarts.
     
-    If SECRET_KEY is set in environment, use that.
-    Otherwise, check database for stored key or generate and store a new one.
+    Priority:
+    1. Environment variable SECRET_KEY (if set)
+    2. Admin-set secret_key (from system_settings)
+    3. Auto-generated jwt_secret_key (stored in database)
+    
     This prevents users from being logged out when the server restarts.
     """
     import os
@@ -409,7 +412,19 @@ async def ensure_persistent_secret_key(conn):
         logger.info("Using SECRET_KEY from environment")
         return
     
-    # Check if we have a stored secret key in the database
+    # Check for admin-set secret_key first
+    result = await conn.execute(
+        text("SELECT value FROM system_settings WHERE key = 'secret_key'")
+    )
+    row = result.fetchone()
+    
+    if row and row[0]:
+        # Use admin-set key
+        settings.SECRET_KEY = row[0]
+        logger.info("Loaded SECRET_KEY from admin settings")
+        return
+    
+    # Fall back to auto-generated jwt_secret_key
     result = await conn.execute(
         text("SELECT value FROM system_settings WHERE key = 'jwt_secret_key'")
     )
@@ -437,6 +452,9 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting Open-NueChat v{settings.APP_VERSION} (schema {SCHEMA_VERSION})...")
     
+    # Validate SECRET_KEY configuration
+    settings.validate_secret_key()
+    
     # Import all models to ensure they're registered with Base.metadata
     # This must happen BEFORE create_all
     from app.models import (
@@ -460,6 +478,20 @@ async def lifespan(app: FastAPI):
     # This prevents users from being logged out when server restarts
     async with engine.begin() as conn:
         await ensure_persistent_secret_key(conn)
+    
+    # Apply stored debug level if set
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            text("SELECT value FROM system_settings WHERE key = 'debug_level'")
+        )
+        row = result.fetchone()
+        if row and row[0]:
+            import logging
+            level = getattr(logging, row[0], logging.INFO)
+            logging.getLogger().setLevel(level)
+            for name in ['app', 'uvicorn', 'uvicorn.access', 'uvicorn.error']:
+                logging.getLogger(name).setLevel(level)
+            logger.info(f"Applied stored debug level: {row[0]}")
     
     # Initialize RAG service (loads embedding model)
     try:

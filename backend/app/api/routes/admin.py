@@ -2017,6 +2017,92 @@ async def update_debug_settings(
 
 
 # ============================================================
+# SECURITY SETTINGS
+# ============================================================
+
+class SecuritySettingsResponse(BaseModel):
+    """Response for security settings"""
+    secret_key: str  # Masked or actual
+    debug_level: str
+
+
+class SecuritySettingsUpdate(BaseModel):
+    """Update security settings"""
+    secret_key: Optional[str] = None
+    debug_level: Optional[str] = None
+
+
+@router.get("/security-settings", response_model=SecuritySettingsResponse)
+async def get_security_settings(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get security settings for the Site Dev tab."""
+    import logging
+    
+    # Get stored SECRET_KEY (or show current from settings)
+    stored_key = await get_system_setting(db, "secret_key")
+    if stored_key:
+        # Show first 8 and last 4 chars, mask the rest
+        if len(stored_key) > 16:
+            masked = stored_key[:8] + "..." + stored_key[-4:]
+        else:
+            masked = stored_key
+    else:
+        # Using env/default - show indicator
+        masked = "(using environment variable or default)"
+    
+    # Get debug level
+    debug_level = await get_system_setting(db, "debug_level") or "INFO"
+    
+    return SecuritySettingsResponse(
+        secret_key=masked,
+        debug_level=debug_level,
+    )
+
+
+@router.put("/security-settings")
+async def update_security_settings(
+    data: SecuritySettingsUpdate,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update security settings. SECRET_KEY changes require restart."""
+    import logging
+    
+    if data.secret_key is not None:
+        if len(data.secret_key) < 32:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="SECRET_KEY must be at least 32 characters"
+            )
+        await set_setting(db, "secret_key", data.secret_key)
+        logger.info("SECRET_KEY updated via admin panel - restart required for changes to take effect")
+    
+    if data.debug_level is not None:
+        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
+        if data.debug_level not in valid_levels:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid debug level. Must be one of: {', '.join(valid_levels)}"
+            )
+        await set_setting(db, "debug_level", data.debug_level)
+        
+        # Apply debug level immediately
+        log_level = getattr(logging, data.debug_level)
+        logging.getLogger().setLevel(log_level)
+        # Also update specific loggers
+        for name in ['app', 'uvicorn', 'uvicorn.access', 'uvicorn.error']:
+            logging.getLogger(name).setLevel(log_level)
+        
+        logger.info(f"Debug level changed to {data.debug_level}")
+    
+    await db.commit()
+    
+    return {"status": "ok"}
+
+
+# ============================================================
 # LLM PROVIDERS
 # ============================================================
 

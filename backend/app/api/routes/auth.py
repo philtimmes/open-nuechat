@@ -4,8 +4,11 @@ Authentication API routes
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime, timezone, timezone
+from datetime import datetime, timezone, timedelta
 import secrets
+import hashlib
+import base64
+import time
 
 from app.db.database import get_db
 from app.services.auth import AuthService, OAuth2Service
@@ -19,8 +22,47 @@ from app.api.dependencies import get_current_user
 from app.models.models import User
 from app.core.config import settings
 
-
 router = APIRouter(tags=["Authentication"])
+
+# In-memory OAuth state store (use Redis in production for multi-instance)
+# Format: {state: {"code_verifier": str, "created_at": float}}
+_oauth_state_store: dict[str, dict] = {}
+OAUTH_STATE_TTL = 600  # 10 minutes
+
+
+def _cleanup_expired_states():
+    """Remove expired OAuth states"""
+    now = time.time()
+    expired = [k for k, v in _oauth_state_store.items() if now - v["created_at"] > OAUTH_STATE_TTL]
+    for k in expired:
+        del _oauth_state_store[k]
+
+
+def _generate_pkce() -> tuple[str, str]:
+    """Generate PKCE code verifier and challenge"""
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).decode().rstrip("=")
+    return code_verifier, code_challenge
+
+
+def _store_oauth_state(state: str, code_verifier: str):
+    """Store OAuth state with PKCE verifier"""
+    _cleanup_expired_states()
+    _oauth_state_store[state] = {
+        "code_verifier": code_verifier,
+        "created_at": time.time()
+    }
+
+
+def _validate_oauth_state(state: str) -> str | None:
+    """Validate OAuth state and return code_verifier, or None if invalid"""
+    _cleanup_expired_states()
+    if state not in _oauth_state_store:
+        return None
+    data = _oauth_state_store.pop(state)  # One-time use
+    return data["code_verifier"]
 
 
 def get_oauth_callback_url(request: Request, route_name: str) -> str:
@@ -307,7 +349,7 @@ async def google_login(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Initiate Google OAuth flow"""
+    """Initiate Google OAuth flow with PKCE"""
     from app.services.settings_service import SettingsService
     
     # Check database settings first, fall back to config
@@ -324,9 +366,12 @@ async def google_login(
     
     redirect_uri = get_oauth_callback_url(request, "google_callback")
     state = secrets.token_urlsafe(32)
+    code_verifier, code_challenge = _generate_pkce()
     
-    # Store state in session/cookie in production
-    url = await OAuth2Service.get_google_auth_url(redirect_uri, state, db)
+    # Store state with PKCE verifier for validation in callback
+    _store_oauth_state(state, code_verifier)
+    
+    url = await OAuth2Service.get_google_auth_url(redirect_uri, state, db, code_challenge)
     
     return RedirectResponse(url=url)
 
@@ -338,7 +383,13 @@ async def google_callback(
     state: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Handle Google OAuth callback"""
+    """Handle Google OAuth callback with state validation"""
+    # Validate state to prevent CSRF
+    code_verifier = _validate_oauth_state(state)
+    if code_verifier is None:
+        base_url = settings.PUBLIC_URL or str(request.base_url).rstrip("/")
+        return RedirectResponse(url=f"{base_url}/login?error=Invalid+or+expired+OAuth+state")
+    
     redirect_uri = get_oauth_callback_url(request, "google_callback")
     
     try:
@@ -346,6 +397,7 @@ async def google_callback(
             db=db,
             code=code,
             redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
         )
         
         await db.commit()
@@ -387,6 +439,9 @@ async def github_login(
     redirect_uri = get_oauth_callback_url(request, "github_callback")
     state = secrets.token_urlsafe(32)
     
+    # Store state for validation (GitHub doesn't support PKCE)
+    _store_oauth_state(state, "")
+    
     url = await OAuth2Service.get_github_auth_url(redirect_uri, state, db)
     
     return RedirectResponse(url=url)
@@ -399,7 +454,12 @@ async def github_callback(
     state: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Handle GitHub OAuth callback"""
+    """Handle GitHub OAuth callback with state validation"""
+    # Validate state to prevent CSRF
+    if _validate_oauth_state(state) is None:
+        base_url = settings.PUBLIC_URL or str(request.base_url).rstrip("/")
+        return RedirectResponse(url=f"{base_url}/login?error=Invalid+or+expired+OAuth+state")
+    
     redirect_uri = get_oauth_callback_url(request, "github_callback")
     
     try:

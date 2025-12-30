@@ -86,6 +86,29 @@ class MessageDeduplicator:
         return False
 
 
+def _get_allowed_origins() -> list[str]:
+    """Get list of allowed WebSocket origins from settings"""
+    origins = []
+    
+    # Add PUBLIC_URL if configured
+    if settings.PUBLIC_URL:
+        host = settings.PUBLIC_URL.replace("https://", "").replace("http://", "").split("/")[0]
+        origins.append(host)
+    
+    # Add localhost variants for development
+    if settings.DEBUG or not settings.PUBLIC_URL:
+        origins.extend(["localhost", "127.0.0.1", "localhost:8000", "127.0.0.1:8000", "localhost:5173", "127.0.0.1:5173"])
+    
+    # Add any additional origins from CORS settings
+    if hasattr(settings, 'CORS_ORIGINS'):
+        for origin in settings.CORS_ORIGINS:
+            host = origin.replace("https://", "").replace("http://", "").split("/")[0]
+            if host not in origins:
+                origins.append(host)
+    
+    return origins
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -94,7 +117,12 @@ async def websocket_endpoint(
     """
     WebSocket endpoint for real-time features.
     
+    Authentication:
+    - Option 1: Token in query string (?token=xxx) - for backwards compatibility
+    - Option 2: Send {"type": "auth", "token": "xxx"} as first message (preferred)
+    
     Message types:
+    - auth: Authenticate with token (if not provided in query)
     - subscribe: Subscribe to a chat room
     - unsubscribe: Unsubscribe from a chat room
     - chat_message: Send a message to AI
@@ -102,20 +130,51 @@ async def websocket_endpoint(
     - ping: Keep-alive ping
     """
     
+    # Validate Origin header to prevent cross-site WebSocket hijacking
+    origin = websocket.headers.get("origin", "")
+    allowed_origins = _get_allowed_origins()
+    
+    if allowed_origins and origin:
+        origin_host = origin.replace("https://", "").replace("http://", "").split("/")[0]
+        if not any(origin_host == allowed or origin_host.endswith(f".{allowed}") for allowed in allowed_origins):
+            logger.warning(f"WebSocket connection rejected: invalid origin {origin}")
+            await websocket.close(code=4003, reason="Origin not allowed")
+            return
+    
     # Accept the connection first so we can send proper close codes
     await websocket.accept()
     
-    # Authenticate after accepting
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
+    # Try to authenticate with query token first
+    user_id = None
+    if token:
+        payload = AuthService.decode_token(token)
+        if payload and payload.get("type") == "access":
+            user_id = payload.get("sub")
     
-    payload = AuthService.decode_token(token)
-    if not payload or payload.get("type") != "access":
-        await websocket.close(code=4001, reason="Invalid token")
-        return
-    
-    user_id = payload.get("sub")
+    # If no query token, wait for auth message
+    if not user_id:
+        try:
+            # Wait for auth message with timeout
+            auth_data = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+            auth_msg = json.loads(auth_data)
+            
+            if auth_msg.get("type") != "auth" or not auth_msg.get("token"):
+                await websocket.close(code=4001, reason="Authentication required - send auth message")
+                return
+            
+            payload = AuthService.decode_token(auth_msg["token"])
+            if not payload or payload.get("type") != "access":
+                await websocket.close(code=4001, reason="Invalid token")
+                return
+            
+            user_id = payload.get("sub")
+            
+        except asyncio.TimeoutError:
+            await websocket.close(code=4001, reason="Authentication timeout")
+            return
+        except json.JSONDecodeError:
+            await websocket.close(code=4001, reason="Invalid auth message")
+            return
     
     # Get user from database
     async with async_session_maker() as db:
@@ -150,6 +209,10 @@ async def websocket_endpoint(
             
             msg_type = message.get("type")
             payload = message.get("payload", {})
+            
+            # Skip auth messages after initial auth
+            if msg_type == "auth":
+                continue
             
             # Check for duplicate messages (prevents double-processing from React StrictMode etc)
             if msg_type in ("chat_message", "regenerate_message") and deduplicator.is_duplicate(msg_type, payload):

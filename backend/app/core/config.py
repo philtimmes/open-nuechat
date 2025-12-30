@@ -99,6 +99,25 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     
+    # Flag to track if SECRET_KEY was auto-generated (insecure for production)
+    _secret_key_generated: bool = False
+    
+    def validate_secret_key(self) -> None:
+        """
+        Warn if SECRET_KEY appears to be auto-generated in production.
+        Auto-generated keys change on restart, invalidating all sessions.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Check if key looks auto-generated (same length as secrets.token_urlsafe(32))
+        if len(self.SECRET_KEY) == 43 and not self.DEBUG:  # 32 bytes base64 = 43 chars
+            logger.warning(
+                "⚠️  SECRET_KEY appears to be auto-generated. "
+                "Set a stable SECRET_KEY in production to prevent session invalidation on restart. "
+                "Generate one with: openssl rand -hex 32"
+            )
+    
     # Administrator Account (created on startup if set)
     ADMIN_EMAIL: str = "admin@localhost"
     ADMIN_PASS: Optional[str] = None  # If set, creates/updates admin account on startup

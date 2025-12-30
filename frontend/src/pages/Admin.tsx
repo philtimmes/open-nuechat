@@ -551,6 +551,12 @@ export default function Admin() {
   const [tokenRefillHours, setTokenRefillHours] = useState(720);
   const [debugSettingsLoading, setDebugSettingsLoading] = useState(false);
   
+  // Security settings (stored in backend)
+  const [secretKey, setSecretKey] = useState<string>('');
+  const [secretKeyMasked, setSecretKeyMasked] = useState(true);
+  const [debugLevel, setDebugLevel] = useState<string>('INFO');
+  const [securitySettingsLoading, setSecuritySettingsLoading] = useState(false);
+  
   // UI state
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -910,6 +916,61 @@ export default function Admin() {
       setError(err.response?.data?.detail || 'Failed to save debug setting');
     }
   };
+  
+  // Security settings functions
+  const fetchSecuritySettings = async () => {
+    setSecuritySettingsLoading(true);
+    try {
+      const res = await api.get('/admin/security-settings');
+      setSecretKey(res.data.secret_key || '');
+      setDebugLevel(res.data.debug_level || 'INFO');
+    } catch (err: any) {
+      console.error('Failed to load security settings:', err);
+    } finally {
+      setSecuritySettingsLoading(false);
+    }
+  };
+  
+  const saveSecretKey = async () => {
+    if (!secretKey.trim()) {
+      setError('SECRET_KEY cannot be empty');
+      return;
+    }
+    try {
+      await api.put('/admin/security-settings', { secret_key: secretKey });
+      setSuccess('SECRET_KEY saved. Restart required for changes to take effect.');
+      setTimeout(() => setSuccess(null), 5000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save SECRET_KEY');
+    }
+  };
+  
+  const generateSecretKey = () => {
+    // Generate a secure random key (64 hex characters = 32 bytes)
+    const array = new Uint8Array(32);
+    crypto.getRandomValues(array);
+    const key = Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
+    setSecretKey(key);
+    setSecretKeyMasked(false);
+  };
+  
+  const saveDebugLevel = async (level: string) => {
+    try {
+      await api.put('/admin/security-settings', { debug_level: level });
+      setDebugLevel(level);
+      setSuccess('Debug level saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save debug level');
+    }
+  };
+  
+  // Load security settings when dev tab is activated
+  useEffect(() => {
+    if (activeTab === 'dev') {
+      fetchSecuritySettings();
+    }
+  }, [activeTab]);
   
   const fetchData = async () => {
     try {
@@ -4933,6 +4994,95 @@ export default function Admin() {
                             </div>
                           )}
                         </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Security Settings */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Security Settings</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    Configure security-related settings. Changes may require a server restart.
+                  </p>
+                  
+                  {securitySettingsLoading ? (
+                    <div className="text-[var(--color-text-secondary)]">Loading...</div>
+                  ) : (
+                    <div className="space-y-6">
+                      {/* SECRET_KEY */}
+                      <div>
+                        <label className="block text-sm font-medium text-[var(--color-text)] mb-2">
+                          SECRET_KEY
+                        </label>
+                        <p className="text-xs text-[var(--color-text-secondary)] mb-2">
+                          Used for JWT token signing. Auto-generated keys change on restart, invalidating all sessions.
+                          Set a stable key for production.
+                        </p>
+                        <div className="flex gap-2">
+                          <div className="relative flex-1">
+                            <input
+                              type={secretKeyMasked ? "password" : "text"}
+                              value={secretKey}
+                              onChange={(e) => setSecretKey(e.target.value)}
+                              placeholder="Enter or generate a secret key"
+                              className="w-full px-3 py-2 pr-10 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] font-mono text-sm"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setSecretKeyMasked(!secretKeyMasked)}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                              title={secretKeyMasked ? "Show" : "Hide"}
+                            >
+                              {secretKeyMasked ? (
+                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                </svg>
+                              ) : (
+                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                                </svg>
+                              )}
+                            </button>
+                          </div>
+                          <button
+                            onClick={generateSecretKey}
+                            className="px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] hover:bg-[var(--color-surface)] text-sm"
+                            title="Generate new key"
+                          >
+                            Generate
+                          </button>
+                          <button
+                            onClick={saveSecretKey}
+                            className="px-4 py-2 bg-[var(--color-primary)] text-white rounded-lg hover:opacity-90 text-sm"
+                          >
+                            Save
+                          </button>
+                        </div>
+                        <p className="text-xs text-yellow-500 mt-2">
+                          ⚠️ Changing SECRET_KEY will invalidate all existing sessions. Users will need to log in again.
+                        </p>
+                      </div>
+                      
+                      {/* Debug Level */}
+                      <div>
+                        <label className="block text-sm font-medium text-[var(--color-text)] mb-2">
+                          Log Level
+                        </label>
+                        <p className="text-xs text-[var(--color-text-secondary)] mb-2">
+                          Controls the verbosity of server logs. DEBUG includes sensitive information and should only be used for development.
+                        </p>
+                        <select
+                          value={debugLevel}
+                          onChange={(e) => saveDebugLevel(e.target.value)}
+                          className="w-full max-w-xs px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
+                        >
+                          <option value="DEBUG">DEBUG (verbose, includes sensitive data)</option>
+                          <option value="INFO">INFO (standard)</option>
+                          <option value="WARNING">WARNING (warnings and errors only)</option>
+                          <option value="ERROR">ERROR (errors only)</option>
+                        </select>
                       </div>
                     </div>
                   )}
