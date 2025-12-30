@@ -1399,9 +1399,66 @@ function MessageBubbleInner({
                 <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
               </div>
             ) : isUser ? (
-              // User messages: preserve whitespace/newlines exactly as typed
-              <div className="message-content-container max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
-                {processedContent}
+              // User messages: render markdown for code blocks, mermaid, svg, latex
+              <div className="message-content-container max-w-none text-[var(--color-text)] leading-relaxed">
+                <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeKatex]}
+                components={{
+                  // Preserve paragraph whitespace
+                  p: ({ children }) => <p className="whitespace-pre-wrap">{children}</p>,
+                  code({ node, inline, className, children, ...props }: any) {
+                    const match = /language-(\w+)/.exec(className || '');
+                    const code = String(children).replace(/\n$/, '');
+                    const language = match ? match[1].toLowerCase() : '';
+                    
+                    // Render mermaid diagrams
+                    if (!inline && language === 'mermaid') {
+                      return <MermaidDiagram code={code} />;
+                    }
+                    
+                    // Render SVG with preview
+                    if (!inline && language === 'svg') {
+                      return <SVGPreview code={code} />;
+                    }
+                    
+                    // Render LaTeX blocks
+                    if (!inline && (language === 'latex' || language === 'tex' || language === 'math')) {
+                      return <LaTeXBlock code={code} />;
+                    }
+                    
+                    // Regular code blocks with syntax highlighting
+                    if (!inline && match) {
+                      return (
+                        <div className="relative group/code my-3 overflow-hidden">
+                          <SyntaxHighlighter
+                            style={oneDark}
+                            language={match[1]}
+                            PreTag="div"
+                            customStyle={{
+                              margin: 0,
+                              borderRadius: '0.5rem',
+                              fontSize: '0.8125rem',
+                            }}
+                            {...props}
+                          >
+                            {code}
+                          </SyntaxHighlighter>
+                        </div>
+                      );
+                    }
+                    
+                    // Inline code
+                    return (
+                      <code className="px-1.5 py-0.5 bg-zinc-800 rounded text-sm font-mono" {...props}>
+                        {children}
+                      </code>
+                    );
+                  },
+                }}
+                >
+                  {processedContent}
+                </ReactMarkdown>
               </div>
             ) : (
               // After streaming complete: full markdown rendering with CSS containment
