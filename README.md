@@ -89,13 +89,15 @@ flowchart TB
 | Category | Features |
 |----------|----------|
 | 🤖 **Custom GPTs** | Create AI assistants with custom prompts, attach knowledge bases, publish to marketplace |
-| 📚 **Knowledge Bases** | RAG with local embeddings, FAISS vector search, 50+ file types including DOCX/XLSX/RTF |
-| 💬 **Real-time Chat** | WebSocket streaming, conversation branching, retry/regenerate, zip file uploads |
+| 📚 **Knowledge Bases** | RAG with local embeddings, FAISS vector search, 50+ file types including DOCX/XLSX/RTF, **Chat Knowledge indexing** |
+| 💬 **Real-time Chat** | WebSocket streaming, conversation branching, retry/regenerate, zip file uploads, **chat import (ChatGPT, Grok, Claude.ai)** |
 | 🎙️ **Voice** | TTS (Kokoro), STT (Whisper), hands-free conversation mode |
 | 🖼️ **Image Gen** | Integrated diffusion model, queue-based generation |
 | 🔐 **Auth** | JWT tokens, OAuth2 (Google/GitHub), API keys with scopes |
 | 🔧 **Tools** | Calculator, web search, Python execution, document search, custom MCP tools |
 | 💰 **Billing** | Token tracking, tier limits (Free/Pro/Enterprise), admin bypass |
+| 📊 **Rich Rendering** | **Mermaid diagrams**, **LaTeX math**, **SVG preview**, **Python runner** with in-browser execution |
+| 🔄 **Agent Flows** | Visual workflow builder for multi-step AI pipelines |
 
 ---
 
@@ -150,6 +152,7 @@ flowchart TB
 - FAISS vector search with GPU acceleration (ROCm, CUDA, or CPU)
 - Configurable chunk size and overlap
 - Persistent document processing queue (survives restarts)
+- **Chat Knowledge**: Index all your chats into a searchable knowledge base
 
 ### 💬 Real-time Chat
 - Bidirectional WebSocket streaming
@@ -158,6 +161,23 @@ flowchart TB
 - Export and share chats
 - Upload zip files with full code context
 - Signature extraction for 15+ programming languages
+- **Chat Import**: Import from ChatGPT, Grok, and Claude.ai
+
+### 📊 Rich Content Rendering
+- **Mermaid Diagrams**: Inline flowcharts, sequence diagrams, etc. with Preview/Code toggle
+- **SVG Preview**: Render SVG graphics inline with Preview/Code toggle
+- **LaTeX Math**: Mathematical notation with KaTeX rendering
+- **Python Runner**: Execute Python code in-browser via Pyodide
+  - Command-line arguments support (sys.argv)
+  - Per-session pip install via micropip
+  - Output capture and error reporting
+- **Transparent PNG Export**: Export diagrams as transparent PNG from artifacts
+
+### 🔄 Agent Flows
+- Visual workflow builder for multi-step AI pipelines
+- Drag-and-drop node editor
+- Persistent flow storage
+- Connect multiple LLM calls with conditional logic
 
 ### 🎙️ Voice Features
 - **Text-to-Speech (TTS)**: Kokoro model with GPU acceleration
@@ -196,10 +216,12 @@ Built-in tools that the LLM can use:
 - **calculator**: Safe math evaluation
 - **get_current_time**: Current date/time with timezone
 - **search_documents**: RAG search within documents
-- **execute_python**: Sandboxed Python execution
+- **execute_python**: Sandboxed Python execution (server-side)
 - **format_json**: JSON validation and formatting
 - **analyze_text**: Readability metrics
 - **web_search**: Web search integration
+- **kb_search**: Knowledge base search
+- **find/search_replace**: File editing tools
 - Custom MCP/OpenAPI tools support
 
 ### 💰 Billing & Token Tracking
@@ -216,6 +238,7 @@ Built-in tools that the LLM can use:
 - Filter chains (no-code agentic flows)
 - Debug settings for monitoring (Token Resets, Document Queue)
 - Branding customization
+- LLM provider configuration with thinking tokens support
 
 ---
 
@@ -231,6 +254,9 @@ Built-in tools that the LLM can use:
 | **TTS** | Kokoro |
 | **STT** | OpenAI Whisper |
 | **Image Gen** | Diffusers (Z-Image-Turbo) |
+| **Diagrams** | Mermaid (CDN) |
+| **Math** | KaTeX |
+| **Python Runner** | Pyodide (WebAssembly) |
 
 ---
 
@@ -580,11 +606,44 @@ For detailed instructions on using Open-NueChat features, see **[USAGE.md](USAGE
 
 ## Schema Version
 
-**Current: NC-0.6.33**
+**Current: NC-0.7.01**
 
 The database schema is automatically migrated on startup.
 
-### Recent Changes (NC-0.6.33)
+### Recent Changes (NC-0.7.01)
+- **Mermaid Diagram Rendering**: Inline preview of Mermaid diagrams in chat with Preview/Code toggle, theme-aware colors
+- **SVG Preview**: Inline SVG rendering in chat messages with Preview/Code toggle
+- **LaTeX Rendering**: Mathematical notation support with Preview/Code toggle
+- **Browser Python Runner**: Execute Python code directly in browser via Pyodide
+  - Arguments form (sys.argv support)
+  - Per-session pip install via micropip
+  - "Inform model of errors" option for LLM feedback
+- **Transparent PNG Export**: Export Mermaid/SVG artifacts as transparent PNG images
+- **Chat Knowledge Default**: Auto-enabled for new users
+- **OAuth Feature Flags Fix**: Proper OAuth button visibility based on configuration
+
+### NC-0.7.00
+- **Agent Flows**: Visual workflow builder for multi-step AI pipelines with persistence
+- **Claude.ai Import**: Import chats from Claude.ai (thinking blocks, tool use, citations)
+- **PDF Export Fix**: Proper authentication for PDF generation
+- **Artifact Detection**: Support for `<artifact= filename>` syntax with spaces
+
+### NC-0.6.99
+- **Lazy Loading Date Groups**: Efficient chat list loading with date grouping
+- **Bulk Delete**: Delete all chats in a date group
+- **UTC Timezone**: Consistent timezone handling
+
+### NC-0.6.97-98
+- **Tool Continuation Fix**: Proper branching for tool results
+- **Timestamp Fix**: Correct date grouping in sidebar
+- **Tool Tag Stripping**: Clean saved messages
+
+### NC-0.6.95-96
+- **Context Overflow Protection**: Large tool results saved to hidden files
+- **Tool Detection Overhaul**: XML `<tool_call>` detection, better streaming handling
+- **Image Detection Fix**: Improved image request classification
+
+### Previous (NC-0.6.33)
 - **OpenAI-Compatible API**: Drop-in replacement for OpenAI API at `/v1/*`
   - `GET /v1/models` - List available models and Custom GPTs
   - `POST /v1/chat/completions` - Chat completions with streaming support
@@ -594,14 +653,6 @@ The database schema is automatically migrated on startup.
 - **Custom GPT via API**: Use your Custom GPTs programmatically with `model: "gpt:<assistant-id>"`
 - **Rate Limiting**: Configurable per-endpoint limits in Admin panel
 - **Knowledge Base Access**: RAG search available through API when using Custom GPTs
-- **Debug RAG**: Admin toggle to log all knowledge base queries, search results, and retrieved context
-
-### Previous (NC-0.6.32)
-- **History Compression**: Automatic summarization of long conversations to manage context
-- **Office Documents**: Support for DOCX, XLSX, XLS, RTF file ingestion
-- **Version Trees**: Fixed branch selection to persist across sessions
-- **TTS Controls**: Tap-to-stop overlay for speech playback
-- **Safety Filters**: Admin toggle for prompt injection/content moderation
 
 ---
 
