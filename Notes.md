@@ -10,7 +10,92 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.7.01
+**Current Version:** NC-0.7.02
+
+---
+
+## Branding System
+
+### Single Source of Truth: `/api/branding/config`
+
+All frontend branding is fetched from a single endpoint that merges database and config settings.
+
+**Priority Order:** Database (admin-set) > Environment (.env) > Default values
+
+**Endpoint:** `GET /api/branding/config` (public, no auth required)
+
+**Returns:**
+```json
+{
+  "app_name": "Open-NueChat",
+  "app_tagline": "AI-Powered Chat Platform",
+  "favicon_url": "/favicon.ico",
+  "logo_url": null,
+  "logo_text": "Open-NueChat",
+  "custom_css": "",
+  "features": {
+    "registration": true,
+    "oauth_google": true,
+    "oauth_github": false,
+    "billing": true
+  },
+  "welcome": { "title": "...", "message": "..." }
+}
+```
+
+**Admin Endpoints (require auth):**
+- `GET /api/admin/settings/branding` - Get current branding for admin panel
+- `POST /api/admin/settings/branding` - Update branding settings
+- `POST /api/admin/settings/branding/favicon` - Upload favicon
+- `POST /api/admin/settings/branding/logo` - Upload logo
+- `GET /api/admin/branding/{filename}` - Serve uploaded assets
+
+**Other Branding Endpoints:**
+- `GET /api/branding/manifest.json` - PWA manifest (uses merged branding)
+- `GET /api/branding/themes` - Available themes list
+
+**Files:**
+- `backend/app/api/routes/branding.py` - Public branding endpoints
+- `backend/app/api/routes/admin.py` - Admin branding management
+- `frontend/src/stores/brandingStore.ts` - Frontend branding state
+
+---
+
+## Recent Changes (NC-0.7.02)
+
+### Security Fixes
+
+1. **OAuth State Validation + PKCE**
+   - State stored with TTL (10 min), one-time use
+   - PKCE code_verifier/code_challenge for Google OAuth
+   - Rejects invalid/expired states
+
+2. **WebSocket Security**
+   - Origin header validation
+   - Token can be sent via first message instead of query string
+   - Allowed origins from PUBLIC_URL and CORS settings
+
+3. **Server-Side File Type Detection**
+   - Magic byte validation for uploads
+   - Rejects mismatched files (exe disguised as pdf)
+
+4. **SECRET_KEY & Logging**
+   - Warns on startup if key appears auto-generated
+   - Sensitive content only logged in DEBUG mode
+
+### Admin Panel: Security Settings
+
+Added to Site Dev tab:
+- **SECRET_KEY**: View (masked), generate, save with validation
+- **Logging Level**: DEBUG/INFO/WARNING/ERROR dropdown, applies immediately
+
+**Files Changed:**
+- `backend/app/api/routes/auth.py` - OAuth state/PKCE
+- `backend/app/api/routes/websocket.py` - Origin validation
+- `backend/app/api/routes/documents.py` - Magic byte detection
+- `backend/app/api/routes/admin.py` - Security settings endpoints
+- `backend/app/main.py` - Startup validation
+- `frontend/src/pages/Admin.tsx` - Security settings UI
 
 ---
 
@@ -33,12 +118,12 @@ Full-stack LLM chat application with:
 
 **Problem:** OAuth buttons showed for disabled providers (GitHub showing when only Google enabled).
 
-**Root Cause:** `loadConfig()` was calling `/api/admin/public/branding` which doesn't return the `features` object. The correct endpoint `/api/branding/config` includes OAuth feature flags.
+**Root Cause:** Frontend was calling wrong endpoint that didn't return features.
 
-**Solution:** Changed `loadConfig()` to use `/api/branding/config` and properly map all fields including `features.oauth_google` and `features.oauth_github`.
+**Solution:** Frontend uses `/api/branding/config` which includes `features.oauth_google` and `features.oauth_github` flags.
 
 **Files Changed:**
-- `frontend/src/stores/brandingStore.ts`: Changed endpoint from `/api/admin/public/branding` to `/api/branding/config`, added proper feature flags mapping
+- `frontend/src/stores/brandingStore.ts`: Uses `/api/branding/config` endpoint
 
 ### Chat Knowledge Enabled by Default
 

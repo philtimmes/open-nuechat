@@ -8,12 +8,23 @@ These endpoints do not require authentication.
 from fastapi import APIRouter, Depends
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.core.config import settings
 from app.db.database import get_db
 from app.services.settings_service import SettingsService
+from app.models.models import SystemSetting
 
 router = APIRouter()
+
+
+async def get_system_setting(db: AsyncSession, key: str) -> str | None:
+    """Get a system setting value by key"""
+    result = await db.execute(
+        select(SystemSetting.value).where(SystemSetting.key == key)
+    )
+    row = result.scalar_one_or_none()
+    return row if row else None
 
 
 @router.get("/config")
@@ -24,11 +35,30 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
     This endpoint exposes branding and feature flags that the frontend
     needs to render the UI correctly. No authentication required.
     
-    Returns all customizable branding settings, with OAuth and feature flags
-    read from the database (falling back to .env values).
+    Priority: Database settings > Config/Environment settings
+    This allows admin-set branding to override .env defaults.
     """
     # Get base branding from config
     branding = settings.get_branding()
+    
+    # Override with database branding settings if they exist
+    db_app_name = await get_system_setting(db, "app_name")
+    db_app_tagline = await get_system_setting(db, "app_tagline")
+    db_favicon_url = await get_system_setting(db, "favicon_url")
+    db_logo_url = await get_system_setting(db, "logo_url")
+    db_custom_css = await get_system_setting(db, "custom_css")
+    
+    if db_app_name:
+        branding["app_name"] = db_app_name
+        branding["logo_text"] = db_app_name  # Also update logo text
+    if db_app_tagline:
+        branding["app_tagline"] = db_app_tagline
+    if db_favicon_url:
+        branding["favicon_url"] = db_favicon_url
+    if db_logo_url:
+        branding["logo_url"] = db_logo_url
+    if db_custom_css:
+        branding["custom_css"] = db_custom_css
     
     # Override feature flags with database values
     google_settings = await SettingsService.get_google_oauth_settings(db)
@@ -55,15 +85,23 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/manifest.json")
-async def get_web_manifest():
+async def get_web_manifest(db: AsyncSession = Depends(get_db)):
     """
     Generate a dynamic web app manifest based on branding settings.
     
     This allows PWA support with customized app name and colors.
+    Priority: Database settings > Config settings
     """
+    # Get database overrides
+    db_app_name = await get_system_setting(db, "app_name")
+    db_favicon_url = await get_system_setting(db, "favicon_url")
+    
+    app_name = db_app_name or settings.APP_NAME
+    favicon_url = db_favicon_url or settings.FAVICON_URL
+    
     return {
-        "name": settings.APP_NAME,
-        "short_name": settings.APP_NAME[:12],
+        "name": app_name,
+        "short_name": app_name[:12],
         "description": settings.APP_DESCRIPTION,
         "start_url": "/",
         "display": "standalone",
@@ -71,7 +109,7 @@ async def get_web_manifest():
         "theme_color": settings.BRAND_PRIMARY_COLOR or "#6366f1",
         "icons": [
             {
-                "src": settings.FAVICON_URL,
+                "src": favicon_url,
                 "sizes": "any",
                 "type": "image/x-icon"
             }

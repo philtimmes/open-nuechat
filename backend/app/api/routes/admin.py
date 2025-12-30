@@ -10,12 +10,15 @@ from pathlib import Path
 import json
 import uuid
 import shutil
+import logging
 
 from app.api.dependencies import get_current_user, get_db
 from app.models.models import User, SystemSetting, UserTier, Chat, Message
 from app.core.config import settings
 from app.services.billing import BillingService
 from sqlalchemy import select, func, or_
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -502,14 +505,27 @@ async def get_branding_settings(
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get branding settings"""
+    """
+    Get branding settings for admin panel.
+    
+    Shows effective values: DB settings take priority over config defaults.
+    """
+    # Get database settings (may be None if not set)
+    db_app_name = await get_system_setting(db, "app_name")
+    db_app_tagline = await get_system_setting(db, "app_tagline")
+    db_favicon_url = await get_system_setting(db, "favicon_url")
+    db_logo_url = await get_system_setting(db, "logo_url")
+    db_custom_css = await get_system_setting(db, "custom_css")
+    db_custom_themes = await get_system_setting(db, "custom_themes")
+    
+    # Merge: DB settings take priority, fall back to config
     return BrandingSettingsSchema(
-        app_name=await get_system_setting(db, "app_name"),
-        app_tagline=await get_system_setting(db, "app_tagline"),
-        favicon_url=await get_system_setting(db, "favicon_url"),
-        logo_url=await get_system_setting(db, "logo_url"),
-        custom_css=await get_system_setting(db, "custom_css"),
-        custom_themes=await get_system_setting(db, "custom_themes"),
+        app_name=db_app_name if db_app_name else settings.APP_NAME,
+        app_tagline=db_app_tagline if db_app_tagline else settings.APP_TAGLINE,
+        favicon_url=db_favicon_url if db_favicon_url else settings.FAVICON_URL,
+        logo_url=db_logo_url if db_logo_url else settings.LOGO_URL,
+        custom_css=db_custom_css or "",
+        custom_themes=db_custom_themes or "[]",
     )
 
 
@@ -1053,19 +1069,8 @@ async def get_public_tiers(
     return TiersSchema(tiers=[TierConfig(**t) for t in tiers])
 
 
-@router.get("/public/branding", response_model=BrandingSettingsSchema)
-async def get_public_branding(
-    db: AsyncSession = Depends(get_db),
-):
-    """Get branding settings (public endpoint for frontend)"""
-    return BrandingSettingsSchema(
-        app_name=await get_system_setting(db, "app_name"),
-        app_tagline=await get_system_setting(db, "app_tagline"),
-        favicon_url=await get_system_setting(db, "favicon_url"),
-        logo_url=await get_system_setting(db, "logo_url"),
-        custom_css=await get_system_setting(db, "custom_css"),
-        custom_themes=await get_system_setting(db, "custom_themes"),
-    )
+# NOTE: Public branding is served via /api/branding/config endpoint in branding.py
+# That endpoint includes feature flags and is the single source of truth for frontend branding.
 
 
 # =============================================================================

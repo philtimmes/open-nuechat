@@ -99,12 +99,14 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.7.01"  # Current database schema version
+SCHEMA_VERSION = "NC-0.7.02"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
+async def ensure_persistent_secret_key(conn)  # Load/generate SECRET_KEY
 async def lifespan(app: FastAPI)
   # Startup: imports all models, create_all, run_migrations, load filters, warmup STT
+  # Loads: SECRET_KEY (env > admin-set > auto-generated), logging_level
   # Starts: token_reset_checker (hourly), document_queue.worker
   # Shutdown: stops workers
 async def health_check() -> { status, service, version, schema_version }
@@ -114,7 +116,43 @@ async def get_shared_chat(share_id: str) -> { id, title, model, created_at, mess
 async def serve_spa(request: Request, full_path: str)  # SPA catch-all
 ```
 
-### app/api/helpers.py (NEW)
+### app/api/routes/branding.py
+
+**Single source of truth for frontend branding configuration.**
+
+```python
+# Public endpoints (no auth required)
+GET /api/branding/config
+  # Returns merged branding: DB settings > .env > defaults
+  # Includes: app_name, app_tagline, favicon_url, logo_url, features, welcome
+  -> BrandingConfig
+
+GET /api/branding/manifest.json
+  # PWA manifest with merged branding
+  -> { name, short_name, icons, theme_color, ... }
+
+GET /api/branding/themes
+  # List available themes
+  -> [{ id, name, colors... }]
+```
+
+### app/api/routes/admin.py (Branding Section)
+
+```python
+# Admin branding management (require admin auth)
+GET  /api/admin/settings/branding -> BrandingSettingsSchema
+POST /api/admin/settings/branding -> BrandingSettingsSchema
+POST /api/admin/settings/branding/favicon -> { favicon_url }
+POST /api/admin/settings/branding/logo -> { logo_url }
+GET  /api/admin/branding/{filename}  # Serve uploaded assets
+
+# Security settings
+GET  /api/admin/security-settings -> { secret_key (masked), logging_level }
+PUT  /api/admin/security-settings -> { status: "ok" }
+  # Body: { secret_key?, logging_level? }
+```
+
+### app/api/helpers.py
 
 ```python
 class ResourceNotFoundError(HTTPException)
