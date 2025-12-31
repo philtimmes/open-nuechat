@@ -63,6 +63,42 @@ All frontend branding is fetched from a single endpoint that merges database and
 
 ## Recent Changes (NC-0.7.02)
 
+### Shared Chat Snapshots
+
+**Problem:** Previous implementation shared live chats, so:
+- Content changed when original chat was edited
+- Changing anonymity affected existing share links
+- Generated images weren't reliably included
+
+**Solution:** Created `SharedChat` model for snapshots:
+
+**How it works:**
+1. When sharing, creates a NEW SharedChat entry with snapshot of messages
+2. Each share gets a unique share_id (8 chars)
+3. Re-sharing creates a NEW link (doesn't modify existing shares)
+4. Anonymous and non-anonymous shares are separate entries
+5. Generated images included via message attachments
+
+**Model:** `SharedChat`
+```python
+- share_id: str (8 chars, unique, indexed)
+- original_chat_id: str (for reference)
+- owner_id: str (FK to users)
+- title, model, assistant_id, assistant_name
+- is_anonymous: bool
+- owner_name: str (null if anonymous)
+- messages_snapshot: JSON array
+- selected_versions: JSON
+- created_at: datetime
+```
+
+**Files Changed:**
+- `backend/app/models/chat.py`: Added SharedChat model
+- `backend/app/api/routes/chats.py`: Updated share endpoint to create snapshot
+- `backend/app/main.py`: Updated get_shared_chat and clone_shared_chat
+
+---
+
 ### Security Fixes
 
 1. **OAuth State Validation + PKCE**

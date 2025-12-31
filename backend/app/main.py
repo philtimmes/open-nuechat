@@ -458,7 +458,7 @@ async def lifespan(app: FastAPI):
     # Import all models to ensure they're registered with Base.metadata
     # This must happen BEFORE create_all
     from app.models import (
-        User, OAuthAccount, APIKey, Chat, Message, ChatParticipant,
+        User, OAuthAccount, APIKey, Chat, Message, ChatParticipant, SharedChat,
         Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare,
         CustomAssistant, AssistantConversation, TokenUsage, Tool, ToolUsage,
         ChatFilter, FilterChain, UploadedFile, UploadedArchive, SystemSetting, Theme
@@ -980,14 +980,99 @@ async def api_info():
 
 @app.get("/api/shared/{share_id}")
 async def get_shared_chat(share_id: str):
-    """Get a publicly shared chat (no authentication required)"""
+    """Get a publicly shared chat snapshot (no authentication required)"""
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
     from app.db.database import async_session_maker
+    from app.models import SharedChat
     from app.models.models import Chat, Message
     
     async with async_session_maker() as db:
-        # Find chat by share_id, include owner for name
+        # First try new SharedChat table
+        result = await db.execute(
+            select(SharedChat).where(SharedChat.share_id == share_id)
+        )
+        shared = result.scalar_one_or_none()
+        
+        if shared:
+            # New snapshot-based share
+            messages_snapshot = shared.messages_snapshot or []
+            
+            logger.info(f"[SHARED_CHAT] share_id={share_id}, message_count={len(messages_snapshot)}, owner={shared.owner_name}, anonymous={shared.is_anonymous}")
+            
+            sorted_messages = sorted(messages_snapshot, key=lambda m: m.get('created_at', ''))
+            
+            # Build children map for tree structure
+            children_by_parent = {}
+            for msg in sorted_messages:
+                parent_key = msg.get('parent_id') or 'root'
+                if parent_key not in children_by_parent:
+                    children_by_parent[parent_key] = []
+                children_by_parent[parent_key].append(msg)
+            
+            has_branches = any(len(children) > 1 for children in children_by_parent.values())
+            selected_versions = shared.selected_versions or {}
+            
+            # Walk the tree from root, following selected branches
+            path_messages = []
+            current_parent = 'root'
+            visited = set()
+            
+            while current_parent not in visited:
+                visited.add(current_parent)
+                children = children_by_parent.get(current_parent, [])
+                if not children:
+                    break
+                
+                children.sort(key=lambda m: m.get('created_at', ''))
+                selected = children[-1]
+                selected_id = selected_versions.get(current_parent)
+                if selected_id:
+                    found = next((c for c in children if c.get('id') == selected_id), None)
+                    if found:
+                        selected = found
+                
+                path_messages.append({
+                    "id": selected.get('id'),
+                    "role": selected.get('role'),
+                    "content": selected.get('content'),
+                    "parent_id": selected.get('parent_id'),
+                    "created_at": selected.get('created_at'),
+                    "input_tokens": selected.get('input_tokens'),
+                    "output_tokens": selected.get('output_tokens'),
+                    "sibling_count": len(children),
+                    "attachments": selected.get('attachments', []),
+                    "artifacts": selected.get('artifacts'),
+                })
+                
+                current_parent = selected.get('id')
+            
+            all_messages = [{
+                "id": msg.get('id'),
+                "role": msg.get('role'),
+                "content": msg.get('content'),
+                "parent_id": msg.get('parent_id'),
+                "created_at": msg.get('created_at'),
+                "input_tokens": msg.get('input_tokens'),
+                "output_tokens": msg.get('output_tokens'),
+                "attachments": msg.get('attachments', []),
+                "artifacts": msg.get('artifacts'),
+            } for msg in sorted_messages]
+            
+            return {
+                "id": shared.id,
+                "title": shared.title,
+                "model": shared.model,
+                "assistant_id": shared.assistant_id,
+                "assistant_name": shared.assistant_name,
+                "owner_name": shared.owner_name,
+                "created_at": shared.created_at.isoformat(),
+                "messages": path_messages,
+                "all_messages": all_messages,
+                "has_branches": has_branches,
+            }
+        
+        # Fall back to legacy Chat.share_id for backward compatibility
         result = await db.execute(
             select(Chat)
             .options(selectinload(Chat.messages), selectinload(Chat.owner))
@@ -999,22 +1084,15 @@ async def get_shared_chat(share_id: str):
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Shared chat not found")
         
-        # Get owner name (unless anonymous)
+        # Legacy share - serve live chat content
         owner_name = None
         if not chat.share_anonymous and chat.owner:
-            # Use full_name if set, otherwise username
             owner_name = chat.owner.full_name or chat.owner.username
         
-        # Debug logging
-        logger.info(f"[SHARED_CHAT] share_id={share_id}, chat_id={chat.id}, message_count={len(chat.messages)}, owner={owner_name}, anonymous={chat.share_anonymous}")
-        for msg in chat.messages:
-            content_preview = (msg.content[:50] + '...') if msg.content and len(msg.content) > 50 else msg.content
-            logger.info(f"[SHARED_CHAT]   msg_id={msg.id[:8]}..., role={msg.role}, parent={msg.parent_id[:8] if msg.parent_id else 'root'}, content={content_preview}")
+        logger.info(f"[SHARED_CHAT_LEGACY] share_id={share_id}, chat_id={chat.id}, message_count={len(chat.messages)}")
         
-        # Sort messages chronologically
         sorted_messages = sorted(chat.messages, key=lambda m: m.created_at)
         
-        # Build children map for tree structure
         children_by_parent = {}
         for msg in sorted_messages:
             parent_key = msg.parent_id or 'root'
@@ -1022,19 +1100,9 @@ async def get_shared_chat(share_id: str):
                 children_by_parent[parent_key] = []
             children_by_parent[parent_key].append(msg)
         
-        # Debug: log children map
-        logger.info(f"[SHARED_CHAT] Children map keys: {list(children_by_parent.keys())}")
-        for parent_key, children in children_by_parent.items():
-            logger.info(f"[SHARED_CHAT]   {parent_key}: {[c.id[:8] for c in children]}")
-        
-        # Check if there are branches (any parent has multiple children)
         has_branches = any(len(children) > 1 for children in children_by_parent.values())
-        
-        # Use selected_versions to determine which branch to follow
         selected_versions = chat.selected_versions or {}
-        logger.info(f"[SHARED_CHAT] selected_versions: {selected_versions}")
         
-        # Walk the tree from root, following selected branches
         path_messages = []
         current_parent = 'root'
         visited = set()
@@ -1042,14 +1110,10 @@ async def get_shared_chat(share_id: str):
         while current_parent not in visited:
             visited.add(current_parent)
             children = children_by_parent.get(current_parent, [])
-            logger.info(f"[SHARED_CHAT] Walking: parent={current_parent}, children_count={len(children)}")
             if not children:
                 break
             
-            # Sort children by created_at
             children.sort(key=lambda m: m.created_at)
-            
-            # Find selected child or default to newest
             selected = children[-1]
             selected_id = selected_versions.get(current_parent)
             if selected_id:
@@ -1066,12 +1130,11 @@ async def get_shared_chat(share_id: str):
                 "input_tokens": selected.input_tokens,
                 "output_tokens": selected.output_tokens,
                 "sibling_count": len(children),
-                "attachments": selected.attachments,  # Include image/file attachments
+                "attachments": selected.attachments,
             })
             
             current_parent = selected.id
         
-        # Also include all messages chronologically for "show all" view
         all_messages = [{
             "id": msg.id,
             "role": msg.role.value if hasattr(msg.role, 'value') else msg.role,
@@ -1080,11 +1143,8 @@ async def get_shared_chat(share_id: str):
             "created_at": msg.created_at.isoformat(),
             "input_tokens": msg.input_tokens,
             "output_tokens": msg.output_tokens,
-            "attachments": msg.attachments,  # Include image/file attachments
+            "attachments": msg.attachments,
         } for msg in sorted_messages]
-        
-        # Log final result
-        logger.info(f"[SHARED_CHAT] Returning: path_messages={len(path_messages)}, all_messages={len(all_messages)}, has_branches={has_branches}")
         
         return {
             "id": chat.id,
@@ -1092,7 +1152,7 @@ async def get_shared_chat(share_id: str):
             "model": chat.model,
             "assistant_id": chat.assistant_id,
             "assistant_name": chat.assistant_name,
-            "owner_name": owner_name,  # None if anonymous or no owner
+            "owner_name": owner_name,
             "created_at": chat.created_at.isoformat(),
             "messages": path_messages,
             "all_messages": all_messages,
@@ -1102,13 +1162,13 @@ async def get_shared_chat(share_id: str):
 
 @app.post("/api/shared/{share_id}/clone")
 async def clone_shared_chat(share_id: str, request: Request):
-    """Clone a shared chat for the authenticated user"""
+    """Clone a shared chat snapshot for the authenticated user"""
     from fastapi import HTTPException
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
     from app.api.dependencies import get_current_user
-    from app.models.chat import Chat
-    from app.models.models import Message
+    from app.models.chat import Chat, SharedChat
+    from app.models.models import Message, MessageRole
     from app.models.user import User
     from app.db.database import async_session_maker
     import uuid
@@ -1132,7 +1192,91 @@ async def clone_shared_chat(share_id: str, request: Request):
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         
-        # Find the shared chat
+        # Try new SharedChat table first
+        result = await db.execute(
+            select(SharedChat).where(SharedChat.share_id == share_id)
+        )
+        shared = result.scalar_one_or_none()
+        
+        if shared:
+            # Clone from new snapshot-based share
+            new_chat_id = str(uuid.uuid4())
+            new_chat = Chat(
+                id=new_chat_id,
+                owner_id=user.id,
+                title=f"{shared.title} (continued)",
+                model=shared.model,
+                assistant_id=shared.assistant_id,
+                assistant_name=shared.assistant_name,
+            )
+            db.add(new_chat)
+            await db.flush()
+            
+            messages_snapshot = shared.messages_snapshot or []
+            sorted_messages = sorted(messages_snapshot, key=lambda m: m.get('created_at', ''))
+            
+            # Build the message path following selected_versions
+            children_by_parent = {}
+            for msg in sorted_messages:
+                parent_key = msg.get('parent_id') or 'root'
+                if parent_key not in children_by_parent:
+                    children_by_parent[parent_key] = []
+                children_by_parent[parent_key].append(msg)
+            
+            selected_versions = shared.selected_versions or {}
+            
+            # Walk the tree to get the selected path
+            path_messages = []
+            current_parent = 'root'
+            visited = set()
+            while current_parent not in visited and current_parent in children_by_parent:
+                visited.add(current_parent)
+                children = children_by_parent[current_parent]
+                if not children:
+                    break
+                
+                if current_parent in selected_versions:
+                    selected_id = selected_versions[current_parent]
+                    selected = next((c for c in children if c.get('id') == selected_id), children[-1])
+                else:
+                    selected = children[-1]
+                
+                path_messages.append(selected)
+                current_parent = selected.get('id')
+            
+            # Clone messages with new IDs
+            old_to_new_id = {}
+            for old_msg in path_messages:
+                new_msg_id = str(uuid.uuid4())
+                old_to_new_id[old_msg.get('id')] = new_msg_id
+                
+                new_parent_id = None
+                old_parent = old_msg.get('parent_id')
+                if old_parent and old_parent in old_to_new_id:
+                    new_parent_id = old_to_new_id[old_parent]
+                
+                role_str = old_msg.get('role', 'user')
+                role = MessageRole(role_str) if role_str in [r.value for r in MessageRole] else MessageRole.USER
+                
+                new_message = Message(
+                    id=new_msg_id,
+                    chat_id=new_chat_id,
+                    sender_id=user.id if role == MessageRole.USER else None,
+                    role=role,
+                    content=old_msg.get('content'),
+                    parent_id=new_parent_id,
+                    attachments=old_msg.get('attachments', []),
+                    artifacts=old_msg.get('artifacts'),
+                    input_tokens=old_msg.get('input_tokens', 0),
+                    output_tokens=old_msg.get('output_tokens', 0),
+                )
+                db.add(new_message)
+            
+            await db.commit()
+            logger.info(f"[CLONE_CHAT] User {user.id} cloned shared chat {share_id} -> {new_chat_id} ({len(path_messages)} messages)")
+            return {"chat_id": new_chat_id, "message_count": len(path_messages)}
+        
+        # Fall back to legacy Chat.share_id
         result = await db.execute(
             select(Chat)
             .options(selectinload(Chat.messages))
@@ -1143,7 +1287,7 @@ async def clone_shared_chat(share_id: str, request: Request):
         if not original_chat:
             raise HTTPException(status_code=404, detail="Shared chat not found")
         
-        # Create new chat for the user
+        # Clone from legacy share
         new_chat_id = str(uuid.uuid4())
         new_chat = Chat(
             id=new_chat_id,
@@ -1157,10 +1301,8 @@ async def clone_shared_chat(share_id: str, request: Request):
         db.add(new_chat)
         await db.flush()
         
-        # Get messages in order (following the selected branch path)
         sorted_messages = sorted(original_chat.messages, key=lambda m: m.created_at)
         
-        # Build the message path following selected_versions
         children_by_parent = {}
         for msg in sorted_messages:
             parent_key = msg.parent_id or 'root'
@@ -1170,7 +1312,6 @@ async def clone_shared_chat(share_id: str, request: Request):
         
         selected_versions = original_chat.selected_versions or {}
         
-        # Walk the tree to get the selected path
         path_messages = []
         current_parent = 'root'
         while current_parent in children_by_parent:
@@ -1178,23 +1319,20 @@ async def clone_shared_chat(share_id: str, request: Request):
             if not children:
                 break
             
-            # Select the right child based on selected_versions
             if current_parent in selected_versions:
                 selected_id = selected_versions[current_parent]
                 selected = next((c for c in children if c.id == selected_id), children[-1])
             else:
-                selected = children[-1]  # Default to newest
+                selected = children[-1]
             
             path_messages.append(selected)
             current_parent = selected.id
         
-        # Clone messages with new IDs, maintaining parent relationships
         old_to_new_id = {}
         for old_msg in path_messages:
             new_msg_id = str(uuid.uuid4())
             old_to_new_id[old_msg.id] = new_msg_id
             
-            # Determine new parent_id
             new_parent_id = None
             if old_msg.parent_id and old_msg.parent_id in old_to_new_id:
                 new_parent_id = old_to_new_id[old_msg.parent_id]
@@ -1207,15 +1345,14 @@ async def clone_shared_chat(share_id: str, request: Request):
                 content=old_msg.content,
                 content_type=old_msg.content_type,
                 parent_id=new_parent_id,
+                attachments=old_msg.attachments,
                 input_tokens=old_msg.input_tokens,
                 output_tokens=old_msg.output_tokens,
             )
             db.add(new_message)
         
         await db.commit()
-        
-        logger.info(f"[CLONE_CHAT] User {user.id} cloned shared chat {share_id} -> {new_chat_id} ({len(path_messages)} messages)")
-        
+        logger.info(f"[CLONE_CHAT_LEGACY] User {user.id} cloned shared chat {share_id} -> {new_chat_id} ({len(path_messages)} messages)")
         return {"chat_id": new_chat_id, "message_count": len(path_messages)}
 
 

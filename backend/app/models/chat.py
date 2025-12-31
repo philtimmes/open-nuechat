@@ -5,6 +5,7 @@ Contains:
 - Chat: Conversation container
 - Message: Individual messages with branching support
 - ChatParticipant: Multi-user chat support
+- SharedChat: Snapshot of a shared conversation
 """
 from sqlalchemy import (
     Column, String, Integer, Boolean, DateTime, Text, 
@@ -14,6 +15,53 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from .base import Base, generate_uuid, MessageRole, ContentType
+
+
+class SharedChat(Base):
+    """
+    A snapshot of a shared conversation.
+    
+    When a chat is shared, a copy is created here with:
+    - All messages at the time of sharing
+    - Generated images and attachments
+    - Owner info (or anonymous)
+    
+    This ensures:
+    - Shared content doesn't change when original chat is edited
+    - Multiple shares can exist with different anonymity settings
+    - Re-sharing as non-anonymous doesn't de-anonymize existing shares
+    """
+    __tablename__ = "shared_chats"
+    
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    share_id = Column(String(8), unique=True, nullable=False, index=True)  # Short URL-friendly ID
+    
+    # Original chat reference (for tracking, not used for display)
+    original_chat_id = Column(String(36), nullable=False)
+    owner_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    
+    # Chat metadata at time of sharing
+    title = Column(String(255), nullable=False)
+    model = Column(String(100), nullable=True)
+    assistant_id = Column(String(36), nullable=True)
+    assistant_name = Column(String(255), nullable=True)
+    
+    # Privacy setting
+    is_anonymous = Column(Boolean, default=False)
+    owner_name = Column(String(255), nullable=True)  # Stored at share time (null if anonymous)
+    
+    # Snapshot of messages (JSON array)
+    # [{id, role, content, parent_id, created_at, attachments, input_tokens, output_tokens}]
+    messages_snapshot = Column(JSON, nullable=False, default=list)
+    
+    # Branch selection at time of sharing
+    selected_versions = Column(JSON, default=dict)
+    
+    # Timestamps
+    created_at = Column(DateTime, default=func.now())
+    
+    # Relationships
+    owner = relationship("User", foreign_keys=[owner_id])
 
 
 class Chat(Base):

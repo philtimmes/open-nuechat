@@ -40,7 +40,7 @@ from .base import (
 from .user import User, OAuthAccount, APIKey
 
 # Chat and message models
-from .chat import Chat, Message, ChatParticipant
+from .chat import Chat, Message, ChatParticipant, SharedChat
 
 # Document and knowledge store models
 from .document import Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare

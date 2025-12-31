@@ -494,20 +494,69 @@ async def share_chat(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a public share link for a chat"""
+    """
+    Create a public share link for a chat.
+    
+    Creates a snapshot of the current chat state. Each share creates a NEW link,
+    so re-sharing as non-anonymous won't de-anonymize existing shares.
+    
+    Generated images are included in the snapshot via message attachments.
+    """
+    from app.models import SharedChat
     
     chat = await _get_user_chat(db, user, chat_id)
     
-    # Generate share_id if not exists
-    if not chat.share_id:
-        import uuid
-        chat.share_id = str(uuid.uuid4())[:8]  # Short ID for URLs
+    # Load messages with eager loading
+    result = await db.execute(
+        select(Message)
+        .where(Message.chat_id == chat_id)
+        .order_by(Message.created_at)
+    )
+    messages = result.scalars().all()
     
-    # Update anonymous setting
-    chat.share_anonymous = request.anonymous
+    # Create message snapshot (includes attachments with generated images)
+    messages_snapshot = []
+    for msg in messages:
+        messages_snapshot.append({
+            "id": msg.id,
+            "role": msg.role.value if hasattr(msg.role, 'value') else msg.role,
+            "content": msg.content,
+            "parent_id": msg.parent_id,
+            "created_at": msg.created_at.isoformat(),
+            "attachments": msg.attachments or [],  # Includes generated images
+            "input_tokens": msg.input_tokens,
+            "output_tokens": msg.output_tokens,
+            "artifacts": msg.artifacts,
+        })
+    
+    # Generate short share ID
+    import uuid
+    share_id = str(uuid.uuid4())[:8]
+    
+    # Get owner name if not anonymous
+    owner_name = None
+    if not request.anonymous:
+        owner_name = user.full_name or user.username
+    
+    # Create shared chat snapshot
+    shared_chat = SharedChat(
+        share_id=share_id,
+        original_chat_id=chat_id,
+        owner_id=user.id,
+        title=chat.title,
+        model=chat.model,
+        assistant_id=chat.assistant_id,
+        assistant_name=chat.assistant_name,
+        is_anonymous=request.anonymous,
+        owner_name=owner_name,
+        messages_snapshot=messages_snapshot,
+        selected_versions=chat.selected_versions or {},
+    )
+    
+    db.add(shared_chat)
     await db.commit()
     
-    return {"share_id": chat.share_id, "anonymous": chat.share_anonymous}
+    return {"share_id": share_id, "anonymous": request.anonymous}
 
 
 @router.delete("/{chat_id}")

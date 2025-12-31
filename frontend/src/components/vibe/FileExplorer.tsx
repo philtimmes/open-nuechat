@@ -22,6 +22,7 @@ interface FileExplorerProps {
   onMoveFiles: (fileIds: string[], targetFolder: string) => void;
   onCopyFiles: (fileIds: string[], targetFolder: string) => void;
   onZipUpload: (file: File) => void;
+  onZipUploadAsNewProject?: (file: File) => void;
   onDownload: () => void;
   isUploadingZip: boolean;
   isDownloading?: boolean;
@@ -64,6 +65,7 @@ export default function FileExplorer({
   onMoveFiles,
   onCopyFiles,
   onZipUpload,
+  onZipUploadAsNewProject,
   onDownload,
   isUploadingZip,
   isDownloading = false,
@@ -454,6 +456,47 @@ export default function FileExplorer({
                   </svg>
                   Paste ({clipboard.files.length} {clipboard.mode === 'cut' ? 'cut' : 'copied'})
                   {currentFolder && <span className="text-xs text-[var(--color-text-secondary)]">to {currentFolder}</span>}
+                </button>
+              )}
+              
+              <div className="border-t border-[var(--color-border)]" />
+              
+              {/* Upload Zip options */}
+              <button
+                onClick={() => {
+                  fileInputRef.current?.click();
+                  closeMenu();
+                }}
+                disabled={isUploadingZip}
+                className="w-full flex items-center gap-2 px-4 py-2 text-sm text-[var(--color-text)] hover:bg-[var(--color-background)] disabled:opacity-50"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+                Upload Zip (Add to Project)
+              </button>
+              
+              {onZipUploadAsNewProject && (
+                <button
+                  onClick={() => {
+                    // Create a separate input for new project upload
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = '.zip';
+                    input.onchange = (e) => {
+                      const file = (e.target as HTMLInputElement).files?.[0];
+                      if (file) onZipUploadAsNewProject(file);
+                    };
+                    input.click();
+                    closeMenu();
+                  }}
+                  disabled={isUploadingZip}
+                  className="w-full flex items-center gap-2 px-4 py-2 text-sm text-[var(--color-primary)] hover:bg-[var(--color-background)] disabled:opacity-50"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Import Zip as New Project
                 </button>
               )}
               

@@ -4,6 +4,8 @@
  * Features:
  * - Monaco-based code editor with AI completion
  * - Zip file upload for project context
+ * - Named projects with localStorage persistence
+ * - Multiple projects support
  * - Agentic coding from prompts
  * - Linting and formatting
  * - Agents.md for tracking solutions
@@ -47,6 +49,7 @@ export interface VibeProject {
   files: VibeFile[];
   agentsMd: string;  // Tracks user feedback and solutions
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentTask {
@@ -71,10 +74,22 @@ type AgentState =
   | 'complete'
   | 'error';
 
+// Storage keys
+const STORAGE_KEY_PROJECTS = 'vibecode-projects';
+const STORAGE_KEY_ACTIVE_PROJECT = 'vibecode-active-project';
+
 export default function VibeCode() {
   const navigate = useNavigate();
   const { user, isAuthenticated } = useAuthStore();
   const { models, defaultModel, subscribedAssistants, fetchModels } = useModelsStore();
+  
+  // Project management state
+  const [projects, setProjects] = useState<VibeProject[]>([]);
+  const [showProjectSelector, setShowProjectSelector] = useState(false);
+  const [showNewProjectDialog, setShowNewProjectDialog] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [showRenameDialog, setShowRenameDialog] = useState(false);
+  const [renameProjectName, setRenameProjectName] = useState('');
   
   // Project state
   const [project, setProject] = useState<VibeProject | null>(null);
@@ -119,19 +134,76 @@ export default function VibeCode() {
   // WebSocket for real-time updates
   const wsRef = useRef<WebSocket | null>(null);
   
+  // Load projects from localStorage
   useEffect(() => {
     if (!isAuthenticated) {
       navigate('/login');
       return;
     }
     
-    // Initialize with a new project
-    initializeProject();
+    // Load saved projects
+    const savedProjects = localStorage.getItem(STORAGE_KEY_PROJECTS);
+    const savedActiveId = localStorage.getItem(STORAGE_KEY_ACTIVE_PROJECT);
+    
+    if (savedProjects) {
+      try {
+        const parsed = JSON.parse(savedProjects) as VibeProject[];
+        setProjects(parsed);
+        
+        // Load active project
+        if (savedActiveId) {
+          const active = parsed.find(p => p.id === savedActiveId);
+          if (active) {
+            loadProject(active);
+          } else if (parsed.length > 0) {
+            loadProject(parsed[0]);
+          } else {
+            createNewProject('New Project');
+          }
+        } else if (parsed.length > 0) {
+          loadProject(parsed[0]);
+        } else {
+          createNewProject('New Project');
+        }
+      } catch (e) {
+        console.error('Failed to parse saved projects:', e);
+        createNewProject('New Project');
+      }
+    } else {
+      createNewProject('New Project');
+    }
     
     // Load models and assistants
     fetchModels();
     loadMyAssistants();
   }, [isAuthenticated, navigate]);
+  
+  // Save projects to localStorage when they change
+  useEffect(() => {
+    if (projects.length > 0) {
+      localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(projects));
+    }
+  }, [projects]);
+  
+  // Save active project ID
+  useEffect(() => {
+    if (project) {
+      localStorage.setItem(STORAGE_KEY_ACTIVE_PROJECT, project.id);
+    }
+  }, [project?.id]);
+  
+  // Auto-save current project when files change
+  useEffect(() => {
+    if (project && files.length > 0) {
+      const updatedProject = {
+        ...project,
+        files,
+        agentsMd,
+        updatedAt: new Date().toISOString(),
+      };
+      setProjects(prev => prev.map(p => p.id === project.id ? updatedProject : p));
+    }
+  }, [files, agentsMd]);
   
   // Load owned assistants
   const loadMyAssistants = async () => {
@@ -172,22 +244,24 @@ export default function VibeCode() {
     return model?.name || selectedModel || 'Select Model';
   };
   
-  const initializeProject = () => {
+  // Create a new project
+  const createNewProject = (name: string, initialFiles?: VibeFile[]) => {
     const newProject: VibeProject = {
       id: `project-${Date.now()}`,
-      name: 'New Project',
-      files: [],
-      agentsMd: agentsMd,
+      name,
+      files: initialFiles || [],
+      agentsMd: '# Agents.md\n\nTracking user feedback, errors, and solutions.\n\n',
       createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
-    setProject(newProject);
     
-    // Create initial welcome file
-    const welcomeFile: VibeFile = {
-      id: `file-${Date.now()}`,
-      name: 'welcome.md',
-      path: 'welcome.md',
-      content: `# Welcome to VibeCode! 🚀
+    // Create welcome file if no initial files
+    if (!initialFiles || initialFiles.length === 0) {
+      const welcomeFile: VibeFile = {
+        id: `file-${Date.now()}`,
+        name: 'welcome.md',
+        path: 'welcome.md',
+        content: `# Welcome to ${name}! 🚀
 
 An AI-powered code editor that helps you write better code faster.
 
@@ -198,6 +272,7 @@ An AI-powered code editor that helps you write better code faster.
 - **Smart Linting**: Catch errors before they happen
 - **Code Formatting**: Keep your code beautiful
 - **Project Context**: Upload zip files for full project understanding
+- **Multiple Projects**: Create and switch between projects
 
 ## Getting Started
 
@@ -208,14 +283,66 @@ An AI-powered code editor that helps you write better code faster.
 
 Happy coding! 🎉
 `,
-      language: 'markdown',
-      isModified: false,
-    };
+        language: 'markdown',
+        isModified: false,
+      };
+      newProject.files = [welcomeFile];
+    }
     
-    setFiles([welcomeFile]);
-    setActiveFile(welcomeFile);
-    setOpenTabs([welcomeFile]);
-    setEditorContent(welcomeFile.content);
+    setProjects(prev => [...prev, newProject]);
+    loadProject(newProject);
+    setShowNewProjectDialog(false);
+    setNewProjectName('');
+  };
+  
+  // Load a project
+  const loadProject = (proj: VibeProject) => {
+    setProject(proj);
+    setFiles(proj.files);
+    setAgentsMd(proj.agentsMd);
+    setChatMessages([]);
+    setOpenTabs([]);
+    
+    // Open first file
+    if (proj.files.length > 0) {
+      handleFileSelect(proj.files[0]);
+    } else {
+      setActiveFile(null);
+      setEditorContent('');
+    }
+    
+    setShowProjectSelector(false);
+  };
+  
+  // Delete a project
+  const deleteProject = (projectId: string) => {
+    const remaining = projects.filter(p => p.id !== projectId);
+    setProjects(remaining);
+    
+    // If deleting current project, switch to another or create new
+    if (project?.id === projectId) {
+      if (remaining.length > 0) {
+        loadProject(remaining[0]);
+      } else {
+        createNewProject('New Project');
+      }
+    }
+  };
+  
+  // Rename current project
+  const renameProject = () => {
+    if (!project || !renameProjectName.trim()) return;
+    
+    const updated = { ...project, name: renameProjectName.trim(), updatedAt: new Date().toISOString() };
+    setProject(updated);
+    setProjects(prev => prev.map(p => p.id === project.id ? updated : p));
+    setShowRenameDialog(false);
+    setRenameProjectName('');
+  };
+  
+  const initializeProject = () => {
+    // This is now handled by createNewProject
+    createNewProject('New Project');
   };
   
   // Handle file selection
@@ -528,8 +655,8 @@ Happy coding! 🎉
     }
   };
   
-  // Handle zip upload
-  const handleZipUpload = async (file: File) => {
+  // Handle zip upload - can create new project or add to existing
+  const handleZipUpload = async (file: File, createNewProjectFromZip: boolean = false) => {
     setIsUploadingZip(true);
     
     try {
@@ -549,11 +676,18 @@ Happy coding! 🎉
         isModified: false,
       }));
       
-      setFiles([...files, ...uploadedFiles]);
-      
-      // Open first file
-      if (uploadedFiles.length > 0) {
-        handleFileSelect(uploadedFiles[0]);
+      if (createNewProjectFromZip) {
+        // Create a new project with the zip contents
+        const projectName = file.name.replace(/\.zip$/i, '');
+        createNewProject(projectName, uploadedFiles);
+      } else {
+        // Add to current project
+        setFiles([...files, ...uploadedFiles]);
+        
+        // Open first file
+        if (uploadedFiles.length > 0) {
+          handleFileSelect(uploadedFiles[0]);
+        }
       }
       
       // Log to Agents.md
@@ -564,6 +698,11 @@ Happy coding! 🎉
     } finally {
       setIsUploadingZip(false);
     }
+  };
+  
+  // Handle zip upload that creates a new project
+  const handleZipUploadAsNewProject = async (file: File) => {
+    await handleZipUpload(file, true);
   };
   
   // Download project as zip
@@ -589,7 +728,7 @@ Happy coding! 🎉
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `vibecode-project-${Date.now()}.zip`;
+      a.download = `${project?.name || 'vibecode-project'}-${Date.now()}.zip`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -962,17 +1101,106 @@ Happy coding! 🎉
             onMoveFiles={handleMoveFiles}
             onCopyFiles={handleCopyFiles}
             onZipUpload={handleZipUpload}
+            onZipUploadAsNewProject={handleZipUploadAsNewProject}
             onDownload={handleDownload}
             isUploadingZip={isUploadingZip}
             isDownloading={isDownloading}
           />
         </div>
         
-        {/* Lower - User Menu */}
-        <div className="h-64 border-t border-[var(--color-border)] p-3 overflow-y-auto">
-          <div className="text-xs text-[var(--color-text-secondary)] uppercase mb-2">Project</div>
-          <div className="text-sm text-[var(--color-text)] truncate mb-3">
-            {project?.name || 'New Project'}
+        {/* Lower - Project & Settings */}
+        <div className="h-72 border-t border-[var(--color-border)] p-3 overflow-y-auto">
+          {/* Project Section */}
+          <div className="text-xs text-[var(--color-text-secondary)] uppercase mb-2 flex justify-between items-center">
+            <span>Project</span>
+            <span className="text-[var(--color-text-secondary)]">({projects.length})</span>
+          </div>
+          
+          {/* Project selector button */}
+          <button
+            onClick={() => setShowProjectSelector(!showProjectSelector)}
+            className="w-full flex items-center justify-between px-2 py-1.5 mb-2 text-sm rounded bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-background)]"
+          >
+            <span className="truncate flex-1 text-left">{project?.name || 'Select Project'}</span>
+            <svg className={`w-4 h-4 ml-2 transition-transform ${showProjectSelector ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          
+          {/* Project dropdown */}
+          {showProjectSelector && (
+            <div className="mb-3 bg-[var(--color-surface)] border border-[var(--color-border)] rounded shadow-lg max-h-48 overflow-y-auto">
+              {/* New project button */}
+              <button
+                onClick={() => {
+                  setShowProjectSelector(false);
+                  setShowNewProjectDialog(true);
+                }}
+                className="w-full px-3 py-2 text-left text-sm text-[var(--color-primary)] hover:bg-[var(--color-background)] flex items-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                New Project
+              </button>
+              <div className="border-t border-[var(--color-border)]" />
+              
+              {/* Project list */}
+              {projects.map(p => (
+                <div
+                  key={p.id}
+                  className={`flex items-center justify-between px-3 py-2 text-sm cursor-pointer ${
+                    p.id === project?.id 
+                      ? 'bg-[var(--color-primary)]/20 text-[var(--color-primary)]' 
+                      : 'text-[var(--color-text)] hover:bg-[var(--color-background)]'
+                  }`}
+                >
+                  <span 
+                    className="truncate flex-1"
+                    onClick={() => loadProject(p)}
+                  >
+                    {p.name}
+                  </span>
+                  <span className="text-xs text-[var(--color-text-secondary)] mr-2">
+                    {p.files.length} files
+                  </span>
+                  {projects.length > 1 && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm(`Delete project "${p.name}"?`)) {
+                          deleteProject(p.id);
+                        }
+                      }}
+                      className="w-5 h-5 flex items-center justify-center text-[var(--color-text-secondary)] hover:text-red-500 rounded hover:bg-[var(--color-background)]"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          
+          {/* Project actions */}
+          <div className="flex gap-1 mb-3">
+            <button
+              onClick={() => {
+                setRenameProjectName(project?.name || '');
+                setShowRenameDialog(true);
+              }}
+              className="flex-1 px-2 py-1 text-xs rounded bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-background)]"
+              title="Rename project"
+            >
+              Rename
+            </button>
+            <button
+              onClick={() => setShowNewProjectDialog(true)}
+              className="flex-1 px-2 py-1 text-xs rounded bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-background)]"
+              title="Create new project"
+            >
+              + New
+            </button>
           </div>
           
           <div className="text-xs text-[var(--color-text-secondary)] uppercase mb-2">Model / GPT</div>
@@ -1146,6 +1374,98 @@ Happy coding! 🎉
           agentState={agentState}
         />
       </div>
+      
+      {/* New Project Dialog */}
+      {showNewProjectDialog && (
+        <>
+          <div 
+            className="fixed inset-0 bg-black/50 z-50" 
+            onClick={() => setShowNewProjectDialog(false)} 
+          />
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg shadow-xl p-4 w-96">
+            <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">New Project</h3>
+            <input
+              type="text"
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && newProjectName.trim()) {
+                  createNewProject(newProjectName.trim());
+                }
+              }}
+              placeholder="Project name"
+              className="w-full px-3 py-2 mb-4 bg-[var(--color-background)] border border-[var(--color-border)] rounded text-[var(--color-text)]"
+              autoFocus
+            />
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => {
+                  setShowNewProjectDialog(false);
+                  setNewProjectName('');
+                }}
+                className="px-4 py-2 text-sm rounded bg-[var(--color-background)] text-[var(--color-text)] hover:bg-[var(--color-border)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (newProjectName.trim()) {
+                    createNewProject(newProjectName.trim());
+                  }
+                }}
+                disabled={!newProjectName.trim()}
+                className="px-4 py-2 text-sm rounded bg-[var(--color-primary)] text-white hover:opacity-90 disabled:opacity-50"
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      
+      {/* Rename Project Dialog */}
+      {showRenameDialog && (
+        <>
+          <div 
+            className="fixed inset-0 bg-black/50 z-50" 
+            onClick={() => setShowRenameDialog(false)} 
+          />
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg shadow-xl p-4 w-96">
+            <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Rename Project</h3>
+            <input
+              type="text"
+              value={renameProjectName}
+              onChange={(e) => setRenameProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && renameProjectName.trim()) {
+                  renameProject();
+                }
+              }}
+              placeholder="New name"
+              className="w-full px-3 py-2 mb-4 bg-[var(--color-background)] border border-[var(--color-border)] rounded text-[var(--color-text)]"
+              autoFocus
+            />
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => {
+                  setShowRenameDialog(false);
+                  setRenameProjectName('');
+                }}
+                className="px-4 py-2 text-sm rounded bg-[var(--color-background)] text-[var(--color-text)] hover:bg-[var(--color-border)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={renameProject}
+                disabled={!renameProjectName.trim()}
+                className="px-4 py-2 text-sm rounded bg-[var(--color-primary)] text-white hover:opacity-90 disabled:opacity-50"
+              >
+                Rename
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
