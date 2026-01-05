@@ -1,5 +1,4 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import api from '../lib/api';
 import type { FlowNode, FlowConnection, FlowNodeType, AgentFlow, LogicConfig, FilterConfig, DocumentsConfig, WebConfig, ModelRequestConfig, OutputConfig } from '../types';
 
 // Node type definitions with metadata
@@ -91,8 +90,6 @@ export default function AgentFlows() {
   const [currentFlow, setCurrentFlow] = useState<AgentFlow | null>(null);
   const [nodes, setNodes] = useState<FlowNode[]>([]);
   const [connections, setConnections] = useState<FlowConnection[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
   
   // Editing state
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
@@ -113,101 +110,58 @@ export default function AgentFlows() {
   const canvasRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
-  // Load flows from API on mount
-  useEffect(() => {
-    const loadFlows = async () => {
-      try {
-        const response = await api.get('/agent-flows');
-        const loadedFlows = response.data.map((f: any) => ({
-          ...f,
-          nodes: f.definition?.nodes || [],
-          connections: f.definition?.connections || [],
-        }));
-        setFlows(loadedFlows);
-      } catch (err) {
-        console.error('Failed to load flows:', err);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-    loadFlows();
-  }, []);
-
   // Create new flow
-  const createNewFlow = async () => {
-    try {
-      const response = await api.post('/agent-flows', {
-        name: 'New Agent Flow',
-        definition: { nodes: [], connections: [] },
-      });
-      const newFlow: AgentFlow = {
-        ...response.data,
-        nodes: response.data.definition?.nodes || [],
-        connections: response.data.definition?.connections || [],
-      };
-      setFlows([newFlow, ...flows]);
-      setCurrentFlow(newFlow);
-      setNodes([]);
-      setConnections([]);
-      setFlowName(newFlow.name);
-      setSelectedNode(null);
-    } catch (err) {
-      console.error('Failed to create flow:', err);
-      alert('Failed to create flow');
-    }
+  const createNewFlow = () => {
+    const newFlow: AgentFlow = {
+      id: generateId(),
+      name: 'New Agent Flow',
+      nodes: [],
+      connections: [],
+      is_active: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    setFlows([...flows, newFlow]);
+    setCurrentFlow(newFlow);
+    setNodes([]);
+    setConnections([]);
+    setFlowName(newFlow.name);
+    setSelectedNode(null);
   };
 
   // Load a flow
   const loadFlow = (flow: AgentFlow) => {
     setCurrentFlow(flow);
-    setNodes(flow.nodes || []);
-    setConnections(flow.connections || []);
+    setNodes(flow.nodes);
+    setConnections(flow.connections);
     setFlowName(flow.name);
     setSelectedNode(null);
   };
 
   // Save current flow
-  const saveFlow = async () => {
+  const saveFlow = () => {
     if (!currentFlow) return;
     
-    setIsSaving(true);
-    try {
-      const response = await api.put(`/agent-flows/${currentFlow.id}`, {
-        name: flowName,
-        definition: { nodes, connections },
-      });
-      
-      const updatedFlow: AgentFlow = {
-        ...response.data,
-        nodes,
-        connections,
-      };
-      
-      setFlows(flows.map(f => f.id === updatedFlow.id ? updatedFlow : f));
-      setCurrentFlow(updatedFlow);
-    } catch (err) {
-      console.error('Failed to save flow:', err);
-      alert('Failed to save flow');
-    } finally {
-      setIsSaving(false);
-    }
+    const updatedFlow: AgentFlow = {
+      ...currentFlow,
+      name: flowName,
+      nodes,
+      connections,
+      updated_at: new Date().toISOString(),
+    };
+    
+    setFlows(flows.map(f => f.id === updatedFlow.id ? updatedFlow : f));
+    setCurrentFlow(updatedFlow);
   };
 
   // Delete flow
-  const deleteFlow = async (flowId: string) => {
+  const deleteFlow = (flowId: string) => {
     if (!confirm('Delete this flow?')) return;
-    
-    try {
-      await api.delete(`/agent-flows/${flowId}`);
-      setFlows(flows.filter(f => f.id !== flowId));
-      if (currentFlow?.id === flowId) {
-        setCurrentFlow(null);
-        setNodes([]);
-        setConnections([]);
-      }
-    } catch (err) {
-      console.error('Failed to delete flow:', err);
-      alert('Failed to delete flow');
+    setFlows(flows.filter(f => f.id !== flowId));
+    if (currentFlow?.id === flowId) {
+      setCurrentFlow(null);
+      setNodes([]);
+      setConnections([]);
     }
   };
 
@@ -400,20 +354,6 @@ export default function AgentFlows() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedNode, showNodeConfig, saveFlow]);
 
-  if (isLoading) {
-    return (
-      <div className="h-full flex items-center justify-center bg-[var(--color-background)]">
-        <div className="flex flex-col items-center gap-4">
-          <svg className="w-8 h-8 animate-spin text-[var(--color-primary)]" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-          </svg>
-          <span className="text-[var(--color-text-secondary)]">Loading agent flows...</span>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="h-full flex bg-[var(--color-background)]">
       {/* Left Panel - Node Palette & Flow List */}
@@ -554,20 +494,12 @@ export default function AgentFlows() {
               <>
                 <button
                   onClick={saveFlow}
-                  disabled={isSaving}
-                  className="flex items-center gap-2 px-3 py-1.5 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 transition-opacity text-sm disabled:opacity-50"
+                  className="flex items-center gap-2 px-3 py-1.5 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 transition-opacity text-sm"
                 >
-                  {isSaving ? (
-                    <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                    </svg>
-                  ) : (
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
-                    </svg>
-                  )}
-                  {isSaving ? 'Saving...' : 'Save'}
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                  </svg>
+                  Save
                 </button>
                 <button
                   onClick={() => {/* TODO: Run flow */}}

@@ -18,11 +18,8 @@ import { groupArtifactsByFilename, getLatestArtifacts } from '../lib/artifacts';
 import api, { chatApi } from '../lib/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import 'katex/dist/katex.min.css';
 
 /**
  * Fix nested code fences for proper markdown rendering.
@@ -102,8 +99,7 @@ const MessageMarkdown = memo(function MessageMarkdown({ content }: { content: st
   
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
+      remarkPlugins={[remarkGfm]}
       components={{
         code({ node, inline, className, children, ...props }: any) {
           const match = /language-(\w+)/.exec(className || '');
@@ -204,7 +200,6 @@ interface MessageListProps {
   onReadAloud?: (content: string) => void;
   onImageRetry?: (prompt: string, width?: number, height?: number, seed?: number) => void;
   onImageEdit?: (prompt: string) => void;
-  onPythonError?: (messageId: string, error: string, code: string) => void;
   readingMessageId?: string | null;
   onArtifactClick: (artifact: Artifact) => void;
   onBranchChange: (parentId: string, childId: string) => void;
@@ -342,7 +337,6 @@ const MessageList = memo(function MessageList({
   onReadAloud,
   onImageRetry,
   onImageEdit,
-  onPythonError,
   readingMessageId,
   onArtifactClick,
   onBranchChange,
@@ -506,7 +500,6 @@ const MessageList = memo(function MessageList({
               onReadAloud={message.role === 'assistant' && onReadAloud ? onReadAloud : undefined}
               onImageRetry={onImageRetry}
               onImageEdit={onImageEdit}
-              onPythonError={onPythonError}
               isReadingAloud={readingMessageId === message.id}
               onArtifactClick={onArtifactClick}
               onBranchChange={() => {}}
@@ -529,152 +522,42 @@ interface StreamingMessageProps {
   assistantName?: string;
 }
 
-// Thinking tokens for streaming - shared cache with MessageBubble
-interface ThinkingTokensState {
-  begin: string;
-  end: string;
-  loadedAt: number;
-}
-
-let streamingThinkingCache: ThinkingTokensState | null = null;
-const STREAMING_CACHE_TTL = 30000;
-
-function useStreamingThinkingTokens() {
-  const [tokens, setTokens] = useState<{ begin: string; end: string } | null>(null);
-  
-  useEffect(() => {
-    let cancelled = false;
-    
-    async function load() {
-      const now = Date.now();
-      if (streamingThinkingCache && (now - streamingThinkingCache.loadedAt) < STREAMING_CACHE_TTL) {
-        setTokens({ begin: streamingThinkingCache.begin, end: streamingThinkingCache.end });
-        return;
-      }
-      
-      try {
-        const res = await api.get('/utils/thinking-tokens');
-        const freshTokens = {
-          begin: res.data.think_begin_token || '',
-          end: res.data.think_end_token || '',
-        };
-        if (!cancelled) {
-          streamingThinkingCache = { ...freshTokens, loadedAt: now };
-          setTokens(freshTokens);
-        }
-      } catch (e) {
-        if (!cancelled) {
-          streamingThinkingCache = { begin: '', end: '', loadedAt: now };
-          setTokens({ begin: '', end: '' });
-        }
-      }
-    }
-    
-    load();
-    return () => { cancelled = true; };
-  }, []);
-  
-  return tokens;
-}
-
-// Filter thinking content from streaming text
-function filterThinkingFromStream(
-  content: string, 
-  beginToken: string, 
-  endToken: string
-): { visibleContent: string; isThinking: boolean; thinkingContent: string } {
-  if (!beginToken || !endToken || !content) {
-    return { visibleContent: content, isThinking: false, thinkingContent: '' };
-  }
-  
-  let visibleContent = '';
-  let thinkingContent = '';
-  let isThinking = false;
-  let remaining = content;
-  
-  while (remaining) {
-    const beginIdx = remaining.indexOf(beginToken);
-    
-    if (beginIdx === -1) {
-      // No more thinking blocks
-      if (isThinking) {
-        // Still inside an unclosed thinking block
-        thinkingContent += remaining;
-      } else {
-        visibleContent += remaining;
-      }
-      break;
-    }
-    
-    // Add content before the thinking block
-    visibleContent += remaining.slice(0, beginIdx);
-    
-    const afterBegin = remaining.slice(beginIdx + beginToken.length);
-    const endIdx = afterBegin.indexOf(endToken);
-    
-    if (endIdx === -1) {
-      // Thinking block started but not closed yet - we're currently thinking
-      isThinking = true;
-      thinkingContent = afterBegin;
-      break;
-    }
-    
-    // Complete thinking block - capture it and continue
-    thinkingContent = afterBegin.slice(0, endIdx);
-    remaining = afterBegin.slice(endIdx + endToken.length);
-    isThinking = false;
-  }
-  
-  return { visibleContent, isThinking, thinkingContent };
-}
-
 function StreamingMessageComponent({
   chatId,
   content,
   toolCall,
   assistantName,
 }: StreamingMessageProps) {
-  // Get thinking tokens for real-time filtering
-  const thinkingTokens = useStreamingThinkingTokens();
-  
   // Track when to re-render markdown
   const lastRenderRef = useRef({ content: '', lineCount: 0 });
   const [renderedContent, setRenderedContent] = useState('');
   
-  // Filter out thinking content in real-time
-  const { visibleContent, isThinking, thinkingContent } = useMemo(() => {
-    if (!thinkingTokens?.begin || !thinkingTokens?.end) {
-      return { visibleContent: content, isThinking: false, thinkingContent: '' };
-    }
-    return filterThinkingFromStream(content, thinkingTokens.begin, thinkingTokens.end);
-  }, [content, thinkingTokens]);
-  
   useEffect(() => {
-    if (!visibleContent) {
+    if (!content) {
       setRenderedContent('');
       lastRenderRef.current = { content: '', lineCount: 0 };
       return;
     }
     
-    const currentLines = visibleContent.split('\n').length;
+    const currentLines = content.split('\n').length;
     const lastLines = lastRenderRef.current.lineCount;
     const lastContent = lastRenderRef.current.content;
     
     // Check if we should re-render markdown
-    const newContent = visibleContent.slice(lastContent.length);
+    const newContent = content.slice(lastContent.length);
     const closedCodeFence = newContent.includes('```') && 
-      (visibleContent.match(/```/g)?.length || 0) % 2 === 0; // Even number = all fences closed
+      (content.match(/```/g)?.length || 0) % 2 === 0; // Even number = all fences closed
     const addedEnoughLines = currentLines - lastLines >= 10;
     
-    if (closedCodeFence || addedEnoughLines || visibleContent.length < 100) {
-      setRenderedContent(visibleContent);
-      lastRenderRef.current = { content: visibleContent, lineCount: currentLines };
+    if (closedCodeFence || addedEnoughLines || content.length < 100) {
+      setRenderedContent(content);
+      lastRenderRef.current = { content, lineCount: currentLines };
     }
-  }, [visibleContent]);
+  }, [content]);
   
   // Use rendered content for markdown, but show full content length
-  const displayContent = renderedContent || visibleContent;
-  const hasUnrenderedContent = visibleContent.length > renderedContent.length;
+  const displayContent = renderedContent || content;
+  const hasUnrenderedContent = content.length > renderedContent.length;
   
   return (
     <div className="py-4">
@@ -684,17 +567,6 @@ function StreamingMessageComponent({
             {assistantName || 'Assistant'}
           </span>
         </div>
-        
-        {/* Thinking indicator - shown when inside thinking block */}
-        {isThinking && (
-          <div className="mb-3 flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
-            <span className="transform transition-transform rotate-90">▶</span>
-            <span className="flex items-center gap-1.5">
-              🧠 Thinking...
-              <span className="inline-block w-1.5 h-3 bg-[var(--color-primary)] animate-pulse" />
-            </span>
-          </div>
-        )}
         
         {/* Tool call indicator */}
         {toolCall && (
@@ -715,13 +587,11 @@ function StreamingMessageComponent({
             <MessageMarkdown content={displayContent} />
             {/* Show unrendered tail as plain text */}
             {hasUnrenderedContent && (
-              <span className="whitespace-pre-wrap">{visibleContent.slice(renderedContent.length)}</span>
+              <span className="whitespace-pre-wrap">{content.slice(renderedContent.length)}</span>
             )}
-            {!isThinking && (
-              <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
-            )}
+            <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
           </div>
-        ) : isThinking ? null : (
+        ) : (
           <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse" />
         )}
       </div>
@@ -756,7 +626,6 @@ export default function ChatPage() {
     generatedImages,
     setShowSummary,
     updateCodeSummary,
-    addWarning,
     fetchCodeSummary,
     setCurrentChat,
     fetchChats,
@@ -779,10 +648,10 @@ export default function ChatPage() {
   };
   
   // Combine saved artifacts with streaming and uploaded artifacts for real-time updates
-  // Filter out agent memory files and hidden artifacts - they're internal and invisible to user
+  // Filter out agent memory files - they're internal and invisible to user
   const artifacts = useMemo(() => {
     const combined = [...savedArtifacts, ...streamingArtifacts, ...uploadedArtifacts];
-    const filtered = combined.filter(a => !isAgentFile(a.filename) && !a.hidden);
+    const filtered = combined.filter(a => !isAgentFile(a.filename));
     console.log('[ChatPage] Combined artifacts:', {
       saved: savedArtifacts.length,
       streaming: streamingArtifacts.length,
@@ -1195,8 +1064,7 @@ export default function ChatPage() {
         modelForNewChat,
         isAssistant: modelForNewChat?.startsWith('gpt:'),
       });
-      // preserveArtifacts=true: User may have uploaded files before sending first message
-      const newChat = await createChat(modelForNewChat, undefined, true);
+      const newChat = await createChat(modelForNewChat);
       targetChatId = newChat.id;
       // Update URL without navigation
       window.history.pushState({}, '', `/chat/${newChat.id}`);
@@ -1215,24 +1083,6 @@ export default function ChatPage() {
     console.log('[handleFilesUploaded] Adding artifacts:', artifacts.length);
     addUploadedArtifacts(artifacts);
   }, [addUploadedArtifacts]);
-  
-  // Handle log file errors - add to code summary warnings
-  const handleLogErrors = useCallback((errors: Array<{ filename: string; errorSummary: string; errorCount: number }>) => {
-    console.log('[handleLogErrors] Processing log errors:', errors.length);
-    for (const err of errors) {
-      addWarning({
-        type: 'log_error',
-        message: `Found ${err.errorCount} errors in ${err.filename}`,
-        file: err.filename,
-        errorSummary: err.errorSummary,
-        errorCount: err.errorCount,
-      });
-    }
-    // Show summary panel if we found errors
-    if (errors.length > 0) {
-      setShowSummary(true);
-    }
-  }, [addWarning, setShowSummary]);
   
   // Persist uploaded files to backend when we have a chat
   // This ensures files survive page refresh
@@ -1305,42 +1155,6 @@ export default function ChatPage() {
     // Regenerate the response
     regenerateMessage(currentChat.id, lastUserMessage.content, lastUserMessage.id);
   }, [currentChat, messages, regenerateMessage, stopReading]);
-  
-  // Handle Python execution errors - send error feedback to LLM
-  const handlePythonError = useCallback(async (assistantMessageId: string, error: string, pythonCode: string) => {
-    if (!currentChat) return;
-    
-    // Find the assistant message that contains the error
-    const assistantMessage = messages.find(m => m.id === assistantMessageId);
-    if (!assistantMessage || assistantMessage.role !== 'assistant') return;
-    
-    // Find the parent user message
-    const parentUserMessage = messages.find(m => m.id === assistantMessage.parent_id);
-    if (!parentUserMessage) return;
-    
-    console.log('[PythonError] Sending error feedback to LLM:', error);
-    
-    // Create error feedback message for LLM (don't delete the message, just continue)
-    const errorFeedback = `[PYTHON EXECUTION ERROR - Please review and fix]
-
-The Python code you provided encountered an error when executed:
-
-Error: ${error}
-
-Code that failed:
-\`\`\`python
-${pythonCode}
-\`\`\`
-
-Please analyze the error and provide corrected code. Common issues:
-- Import errors (module not available in Pyodide)
-- Syntax errors
-- Runtime errors (division by zero, index out of range, etc.)
-- Type errors`;
-    
-    // Send as a continuation with error context (empty attachments array)
-    sendChatMessage(currentChat.id, errorFeedback, [], parentUserMessage.id);
-  }, [currentChat, messages, sendChatMessage]);
   
   const handleBranchChange = useCallback((parentId: string, childId: string) => {
     // Branch change is handled by MessageList state
@@ -1702,7 +1516,6 @@ Please analyze the error and provide corrected code. Common issues:
             onSend={handleSendMessage}
             onZipUpload={handleZipUpload}
             onFilesUploaded={handleFilesUploaded}
-            onLogErrors={handleLogErrors}
             onVoiceModeToggle={sttEnabled ? toggleVoiceMode : undefined}
             disabled={!isConnected}
             isUploadingZip={isUploadingZip}
@@ -1750,9 +1563,9 @@ Please analyze the error and provide corrected code. Common issues:
         </div>
       )}
       
-      <div className="chat-layout-root">
+      <div className="flex h-full">
       {/* Main chat area */}
-      <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
+      <div className="flex flex-col flex-1 min-w-0">
         {/* Header with actions */}
         <div className="flex items-center justify-between px-3 md:px-4 py-2 border-b border-[var(--color-border)]">
           <div className="flex items-center gap-3 min-w-0">
@@ -1952,10 +1765,10 @@ Please analyze the error and provide corrected code. Common issues:
           </div>
         </div>
         
-        {/* Messages container - CSS containment prevents content from affecting layout */}
+        {/* Messages container */}
         <div
           ref={containerRef}
-          className="chat-messages-scroll flex-1 min-h-0"
+          className="flex-1 overflow-y-auto"
         >
           {isLoadingMessages ? (
             <div className="flex items-center justify-center h-32">
@@ -1987,7 +1800,6 @@ Please analyze the error and provide corrected code. Common issues:
                   onReadAloud={ttsEnabled ? readAloud : undefined}
                   onImageRetry={handleImageRetry}
                   onImageEdit={handleImageEdit}
-                  onPythonError={handlePythonError}
                   readingMessageId={readingMessageId}
                   onArtifactClick={handleArtifactClick}
                   onBranchChange={handleBranchChange}
@@ -2038,8 +1850,8 @@ Please analyze the error and provide corrected code. Common issues:
           </button>
         )}
         
-        {/* Input area - fixed at bottom, never affected by content above */}
-        <div className="chat-input-fixed border-t border-[var(--color-border)] p-3 md:p-4 bg-[var(--color-background)]">
+        {/* Input area */}
+        <div className="border-t border-[var(--color-border)] p-3 md:p-4">
           {/* Voice mode indicator */}
           {isVoiceMode && (
             <div className="mb-3 flex items-center justify-between px-3 py-2 rounded-lg bg-[var(--color-primary)]/10 border border-[var(--color-primary)]/30">
@@ -2065,7 +1877,6 @@ Please analyze the error and provide corrected code. Common issues:
             onStop={handleStop}
             onZipUpload={handleZipUpload}
             onFilesUploaded={handleFilesUploaded}
-            onLogErrors={handleLogErrors}
             onVoiceModeToggle={sttEnabled ? toggleVoiceMode : undefined}
             disabled={!isConnected}
             isStreaming={isSending}

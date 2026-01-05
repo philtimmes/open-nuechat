@@ -4,6 +4,7 @@ Custom assistant (GPT) models
 Contains:
 - CustomAssistant: User-created AI assistants
 - AssistantConversation: Usage tracking and ratings
+- AssistantCategory: Categories for organizing assistants
 """
 from sqlalchemy import (
     Column, String, Integer, Float, Boolean, DateTime, Text, 
@@ -22,6 +23,29 @@ assistant_knowledge_stores = Table(
     Column("assistant_id", String(36), ForeignKey("custom_assistants.id", ondelete="CASCADE")),
     Column("knowledge_store_id", String(36), ForeignKey("knowledge_stores.id", ondelete="CASCADE")),
 )
+
+
+class AssistantCategory(Base):
+    """
+    Categories for organizing Custom Assistants/GPTs.
+    Admin-managed, used for filtering in the marketplace.
+    """
+    __tablename__ = "assistant_categories"
+    
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    value = Column(String(50), nullable=False, unique=True)  # URL-friendly slug
+    label = Column(String(100), nullable=False)  # Display name
+    icon = Column(String(50), default="📁")  # Emoji or icon
+    description = Column(String(255), nullable=True)
+    sort_order = Column(Integer, default=0)  # For custom ordering
+    is_active = Column(Boolean, default=True)  # Can be disabled without deleting
+    
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    
+    __table_args__ = (
+        Index("idx_category_sort", "sort_order", "label"),
+    )
 
 
 class CustomAssistant(Base):
@@ -70,6 +94,7 @@ class CustomAssistant(Base):
     is_public = Column(Boolean, default=False)
     is_discoverable = Column(Boolean, default=False)  # Shows in public directory
     is_featured = Column(Boolean, default=False)  # Admin-featured
+    category = Column(String(50), default="general")  # Category for filtering
     
     # Usage stats
     conversation_count = Column(Integer, default=0)

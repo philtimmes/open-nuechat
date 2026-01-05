@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.api.routes import (
     auth, chats, billing, documents, themes, websocket, filters,
     api_keys, knowledge_stores, assistants, branding, admin, tools, utils, tts, stt, images,
-    filter_chains, vibe, procedural_memory, user_settings, agent_flows
+    filter_chains, vibe, procedural_memory, user_settings
 )
 from app.api.routes.v1 import router as v1_router
 from app.services.rag import RAGService
@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.7.01"
+SCHEMA_VERSION = "NC-0.7.15"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -103,21 +103,6 @@ async def run_migrations(conn):
     
     if current == target:
         logger.info("Schema is up to date, no migrations needed")
-        # Still check for missing columns that might have failed to add
-        critical_columns = [
-            ("messages", "time_to_first_token", "INTEGER"),
-            ("messages", "time_to_complete", "INTEGER"),
-        ]
-        for table, column, col_type in critical_columns:
-            result = await conn.execute(text(f"PRAGMA table_info({table})"))
-            columns = [row[1] for row in result.fetchall()]
-            if column not in columns:
-                logger.info(f"Adding missing column {table}.{column}")
-                try:
-                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
-                    logger.info(f"  {table}.{column}: OK")
-                except Exception as e:
-                    logger.warning(f"  {table}.{column}: failed ({e})")
         return
     
     # Define migrations: version -> list of SQL statements
@@ -317,17 +302,32 @@ async def run_migrations(conn):
             ("CREATE INDEX IF NOT EXISTS idx_llm_provider_default ON llm_providers(is_default)", "llm_providers.idx_default"),
             ("CREATE INDEX IF NOT EXISTS idx_llm_provider_vision ON llm_providers(is_vision_default)", "llm_providers.idx_vision"),
         ],
-        "NC-0.6.90": [
-            # Message timing metrics
-            ("ALTER TABLE messages ADD COLUMN time_to_first_token INTEGER", "messages.time_to_first_token"),
-            ("ALTER TABLE messages ADD COLUMN time_to_complete INTEGER", "messages.time_to_complete"),
-        ],
-        "NC-0.6.97": [
-            # Repair chat timestamps - set updated_at to latest message timestamp
-            # This fixes chats whose timestamps were corrupted by is_knowledge_indexed ORM updates
-            ("""UPDATE chats SET updated_at = (
-                SELECT MAX(created_at) FROM messages WHERE messages.chat_id = chats.id
-            ) WHERE EXISTS (SELECT 1 FROM messages WHERE messages.chat_id = chats.id)""", "chats.updated_at repair"),
+        "NC-0.7.11": [
+            # Custom GPT categories
+            ("ALTER TABLE custom_assistants ADD COLUMN category VARCHAR(50) DEFAULT 'general'", "custom_assistants.category"),
+            ("""CREATE TABLE IF NOT EXISTS assistant_categories (
+                id VARCHAR(36) PRIMARY KEY,
+                value VARCHAR(50) NOT NULL UNIQUE,
+                label VARCHAR(100) NOT NULL,
+                icon VARCHAR(50) DEFAULT '📁',
+                description VARCHAR(255),
+                sort_order INTEGER DEFAULT 0,
+                is_active BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""", "assistant_categories table"),
+            ("CREATE INDEX IF NOT EXISTS idx_category_sort ON assistant_categories(sort_order, label)", "assistant_categories.idx_sort"),
+            # Seed default categories
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'general', 'General', '🤖', 0, 1)", "seed category: general"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'writing', 'Writing', '✍️', 1, 1)", "seed category: writing"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'coding', 'Coding', '💻', 2, 1)", "seed category: coding"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'research', 'Research', '🔬', 3, 1)", "seed category: research"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'education', 'Education', '📚', 4, 1)", "seed category: education"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'business', 'Business', '💼', 5, 1)", "seed category: business"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'creative', 'Creative', '🎨', 6, 1)", "seed category: creative"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'productivity', 'Productivity', '⚡', 7, 1)", "seed category: productivity"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'lifestyle', 'Lifestyle', '🌟', 8, 1)", "seed category: lifestyle"),
+            ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'other', 'Other', '📁', 99, 1)", "seed category: other"),
         ],
     }
     
@@ -337,15 +337,16 @@ async def run_migrations(conn):
     for version in sorted_versions:
         version_tuple = parse_version(version)
         
-        # Skip if already past this version
-        if version_tuple <= current:
-            continue
-            
-        logger.info(f"Running migrations for {version}...")
+        # Run migrations for versions we haven't fully processed
+        # Note: We always check individual migrations even for "completed" versions
+        # because the version might have been bumped without all migrations running
+        # (e.g., version updated for a code change, then migration added later)
+        
+        logger.info(f"Checking migrations for {version}...")
         
         for sql, name in migrations[version]:
             try:
-                # Check if column already exists (for safety)
+                # Check if column already exists (for ADD COLUMN safety)
                 if "ADD COLUMN" in sql:
                     parts = sql.split()
                     table_idx = parts.index("TABLE") + 1
@@ -357,8 +358,21 @@ async def run_migrations(conn):
                     columns = [row[1] for row in result.fetchall()]
                     
                     if column in columns:
-                        logger.info(f"  {name}: already exists, skipping")
+                        logger.debug(f"  {name}: already exists, skipping")
                         continue
+                
+                # Check if table already exists (for CREATE TABLE safety)
+                if "CREATE TABLE" in sql and "IF NOT EXISTS" not in sql:
+                    # Extract table name
+                    match = re.search(r"CREATE TABLE\s+(\w+)", sql)
+                    if match:
+                        table_name = match.group(1)
+                        result = await conn.execute(text(
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name=:name"
+                        ), {"name": table_name})
+                        if result.fetchone():
+                            logger.debug(f"  {name}: table exists, skipping")
+                            continue
                 
                 # Check if system_settings key already exists
                 if "INSERT" in sql and "system_settings" in sql:
@@ -371,13 +385,44 @@ async def run_migrations(conn):
                             {"key": setting_key}
                         )
                         if result.fetchone():
-                            logger.info(f"  {name}: setting '{setting_key}' already exists, skipping")
+                            logger.debug(f"  {name}: setting '{setting_key}' already exists, skipping")
+                            continue
+                
+                # Check if assistant_categories value already exists
+                if "INSERT" in sql and "assistant_categories" in sql:
+                    # Extract the value field (second value after id)
+                    value_match = re.search(r",\s*'([^']+)',\s*'[^']+'", sql)
+                    if value_match:
+                        cat_value = value_match.group(1)
+                        result = await conn.execute(
+                            text("SELECT 1 FROM assistant_categories WHERE value = :value"),
+                            {"value": cat_value}
+                        )
+                        if result.fetchone():
+                            logger.debug(f"  {name}: category '{cat_value}' already exists, skipping")
+                            continue
+                
+                # Check if index already exists (for CREATE INDEX safety)
+                if "CREATE INDEX" in sql and "IF NOT EXISTS" not in sql:
+                    match = re.search(r"CREATE INDEX\s+(\w+)", sql)
+                    if match:
+                        index_name = match.group(1)
+                        result = await conn.execute(text(
+                            "SELECT name FROM sqlite_master WHERE type='index' AND name=:name"
+                        ), {"name": index_name})
+                        if result.fetchone():
+                            logger.debug(f"  {name}: index exists, skipping")
                             continue
                 
                 await conn.execute(text(sql))
                 logger.info(f"  {name}: OK")
             except Exception as e:
-                logger.warning(f"  {name}: skipped ({e})")
+                # Only log as warning if it's not a "already exists" type error
+                error_str = str(e).lower()
+                if "already exists" in error_str or "duplicate" in error_str:
+                    logger.debug(f"  {name}: already exists, skipping")
+                else:
+                    logger.warning(f"  {name}: skipped ({e})")
     
     # Update schema version
     if row:
@@ -392,75 +437,18 @@ async def run_migrations(conn):
     logger.info(f"Schema updated to {SCHEMA_VERSION}")
 
 
-async def ensure_persistent_secret_key(conn):
-    """
-    Ensure SECRET_KEY is persistent across server restarts.
-    
-    Priority:
-    1. Environment variable SECRET_KEY (if set)
-    2. Admin-set secret_key (from system_settings)
-    3. Auto-generated jwt_secret_key (stored in database)
-    
-    This prevents users from being logged out when the server restarts.
-    """
-    import os
-    import secrets
-    
-    # If SECRET_KEY is explicitly set in environment, use it
-    env_secret = os.environ.get("SECRET_KEY")
-    if env_secret and env_secret.strip():
-        logger.info("Using SECRET_KEY from environment")
-        return
-    
-    # Check for admin-set secret_key first
-    result = await conn.execute(
-        text("SELECT value FROM system_settings WHERE key = 'secret_key'")
-    )
-    row = result.fetchone()
-    
-    if row and row[0]:
-        # Use admin-set key
-        settings.SECRET_KEY = row[0]
-        logger.info("Loaded SECRET_KEY from admin settings")
-        return
-    
-    # Fall back to auto-generated jwt_secret_key
-    result = await conn.execute(
-        text("SELECT value FROM system_settings WHERE key = 'jwt_secret_key'")
-    )
-    row = result.fetchone()
-    
-    if row and row[0]:
-        # Use stored key
-        stored_key = row[0]
-        settings.SECRET_KEY = stored_key
-        logger.info("Loaded persistent SECRET_KEY from database")
-    else:
-        # Generate and store a new key
-        new_key = secrets.token_urlsafe(32)
-        await conn.execute(
-            text("INSERT INTO system_settings (key, value) VALUES ('jwt_secret_key', :key)"),
-            {"key": new_key}
-        )
-        settings.SECRET_KEY = new_key
-        logger.info("Generated and stored new persistent SECRET_KEY")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown events"""
     # Startup
     logger.info(f"Starting Open-NueChat v{settings.APP_VERSION} (schema {SCHEMA_VERSION})...")
     
-    # Validate SECRET_KEY configuration
-    settings.validate_secret_key()
-    
     # Import all models to ensure they're registered with Base.metadata
     # This must happen BEFORE create_all
     from app.models import (
-        User, OAuthAccount, APIKey, Chat, Message, ChatParticipant, SharedChat,
+        User, OAuthAccount, APIKey, Chat, Message, ChatParticipant,
         Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare,
-        CustomAssistant, AssistantConversation, TokenUsage, Tool, ToolUsage,
+        CustomAssistant, AssistantConversation, AssistantCategory, TokenUsage, Tool, ToolUsage,
         ChatFilter, FilterChain, UploadedFile, UploadedArchive, SystemSetting, Theme
     )
     logger.info("All models imported for table creation")
@@ -474,40 +462,9 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await run_migrations(conn)
     
-    # Ensure SECRET_KEY is persistent across restarts
-    # This prevents users from being logged out when server restarts
-    async with engine.begin() as conn:
-        await ensure_persistent_secret_key(conn)
-    
-    # Apply stored logging level if set
-    async with engine.begin() as conn:
-        from sqlalchemy import text as sql_text
-        result = await conn.execute(
-            sql_text("SELECT value FROM system_settings WHERE key = 'logging_level'")
-        )
-        row = result.fetchone()
-        if row and row[0]:
-            import logging
-            level = getattr(logging, row[0], logging.INFO)
-            logging.getLogger().setLevel(level)
-            for name in ['app', 'uvicorn', 'uvicorn.access', 'uvicorn.error']:
-                logging.getLogger(name).setLevel(level)
-            logger.info(f"Applied stored logging level: {row[0]}")
-    
     # Initialize RAG service (loads embedding model)
     try:
         rag_service = RAGService()
-        # Trigger model load in background with delay
-        import asyncio
-        async def delayed_model_load():
-            await asyncio.sleep(5)  # Wait 5 seconds for other services
-            logger.info("[RAG] Attempting delayed model load...")
-            model = RAGService.get_model()
-            if model:
-                logger.info(f"[RAG] Model loaded successfully: {model.device}")
-            else:
-                logger.warning("[RAG] Model failed to load, will retry automatically in 60s")
-        asyncio.create_task(delayed_model_load())
         logger.info(f"RAG service initialized with model: {settings.EMBEDDING_MODEL}")
     except Exception as e:
         logger.warning(f"RAG service initialization deferred: {e}")
@@ -705,7 +662,6 @@ app.include_router(images.router, prefix="/api", tags=["Images"])  # Routes /api
 app.include_router(filter_chains.router, prefix="/api/admin", tags=["Filter Chains"])  # Routes /api/admin/filter-chains/*
 app.include_router(vibe.router, prefix="/api/vibe", tags=["VibeCode"])  # AI code editor endpoints
 app.include_router(procedural_memory.router, prefix="/api", tags=["Procedural Memory"])  # Skill learning endpoints
-app.include_router(agent_flows.router, prefix="/api", tags=["Agent Flows"])  # Visual agent workflow builder
 app.include_router(user_settings.router, prefix="/api/user", tags=["User Settings"])  # User settings endpoints
 
 # OpenAI-compatible API (v1)
@@ -883,46 +839,7 @@ async def list_models(request: Request):
     }
 
 
-@app.get("/api/models/validate/{model_id:path}")
-async def validate_model(model_id: str, request: Request):
-    """Check if a model ID is valid and available"""
-    from app.services.llm import LLMService
-    from app.db.database import async_session_maker
-    from app.models.models import CustomAssistant
-    from sqlalchemy import select
-    
-    # Handle custom assistant models
-    if model_id.startswith("gpt:"):
-        assistant_id = model_id[4:]
-        async with async_session_maker() as db:
-            result = await db.execute(
-                select(CustomAssistant).where(CustomAssistant.id == assistant_id)
-            )
-            assistant = result.scalar_one_or_none()
-            if assistant:
-                return {"valid": True, "model_id": model_id, "type": "assistant", "name": assistant.name}
-            return {"valid": False, "model_id": model_id, "error": f"Assistant '{assistant_id}' not found"}
-    
-    # Check regular models
-    async with async_session_maker() as db:
-        llm_service = await LLMService.from_database(db)
-        models = await llm_service.list_models()
-        
-        # Check for errors in model list
-        if models and len(models) == 1 and "error" in models[0]:
-            return {"valid": False, "model_id": model_id, "error": f"Could not fetch model list: {models[0]['error']}"}
-        
-        model_ids = [m.get("id") for m in models if "id" in m]
-        
-        if model_id in model_ids:
-            return {"valid": True, "model_id": model_id, "type": "model"}
-        
-        return {
-            "valid": False, 
-            "model_id": model_id, 
-            "error": f"Model not found",
-            "available": model_ids[:10] if model_ids else []
-        }
+@app.get("/api/info")
 async def api_info():
     """API information"""
     return {
@@ -980,99 +897,14 @@ async def api_info():
 
 @app.get("/api/shared/{share_id}")
 async def get_shared_chat(share_id: str):
-    """Get a publicly shared chat snapshot (no authentication required)"""
+    """Get a publicly shared chat (no authentication required)"""
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
     from app.db.database import async_session_maker
-    from app.models import SharedChat
     from app.models.models import Chat, Message
     
     async with async_session_maker() as db:
-        # First try new SharedChat table
-        result = await db.execute(
-            select(SharedChat).where(SharedChat.share_id == share_id)
-        )
-        shared = result.scalar_one_or_none()
-        
-        if shared:
-            # New snapshot-based share
-            messages_snapshot = shared.messages_snapshot or []
-            
-            logger.info(f"[SHARED_CHAT] share_id={share_id}, message_count={len(messages_snapshot)}, owner={shared.owner_name}, anonymous={shared.is_anonymous}")
-            
-            sorted_messages = sorted(messages_snapshot, key=lambda m: m.get('created_at', ''))
-            
-            # Build children map for tree structure
-            children_by_parent = {}
-            for msg in sorted_messages:
-                parent_key = msg.get('parent_id') or 'root'
-                if parent_key not in children_by_parent:
-                    children_by_parent[parent_key] = []
-                children_by_parent[parent_key].append(msg)
-            
-            has_branches = any(len(children) > 1 for children in children_by_parent.values())
-            selected_versions = shared.selected_versions or {}
-            
-            # Walk the tree from root, following selected branches
-            path_messages = []
-            current_parent = 'root'
-            visited = set()
-            
-            while current_parent not in visited:
-                visited.add(current_parent)
-                children = children_by_parent.get(current_parent, [])
-                if not children:
-                    break
-                
-                children.sort(key=lambda m: m.get('created_at', ''))
-                selected = children[-1]
-                selected_id = selected_versions.get(current_parent)
-                if selected_id:
-                    found = next((c for c in children if c.get('id') == selected_id), None)
-                    if found:
-                        selected = found
-                
-                path_messages.append({
-                    "id": selected.get('id'),
-                    "role": selected.get('role'),
-                    "content": selected.get('content'),
-                    "parent_id": selected.get('parent_id'),
-                    "created_at": selected.get('created_at'),
-                    "input_tokens": selected.get('input_tokens'),
-                    "output_tokens": selected.get('output_tokens'),
-                    "sibling_count": len(children),
-                    "attachments": selected.get('attachments', []),
-                    "artifacts": selected.get('artifacts'),
-                })
-                
-                current_parent = selected.get('id')
-            
-            all_messages = [{
-                "id": msg.get('id'),
-                "role": msg.get('role'),
-                "content": msg.get('content'),
-                "parent_id": msg.get('parent_id'),
-                "created_at": msg.get('created_at'),
-                "input_tokens": msg.get('input_tokens'),
-                "output_tokens": msg.get('output_tokens'),
-                "attachments": msg.get('attachments', []),
-                "artifacts": msg.get('artifacts'),
-            } for msg in sorted_messages]
-            
-            return {
-                "id": shared.id,
-                "title": shared.title,
-                "model": shared.model,
-                "assistant_id": shared.assistant_id,
-                "assistant_name": shared.assistant_name,
-                "owner_name": shared.owner_name,
-                "created_at": shared.created_at.isoformat(),
-                "messages": path_messages,
-                "all_messages": all_messages,
-                "has_branches": has_branches,
-            }
-        
-        # Fall back to legacy Chat.share_id for backward compatibility
+        # Find chat by share_id, include owner for name
         result = await db.execute(
             select(Chat)
             .options(selectinload(Chat.messages), selectinload(Chat.owner))
@@ -1084,15 +916,22 @@ async def get_shared_chat(share_id: str):
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Shared chat not found")
         
-        # Legacy share - serve live chat content
+        # Get owner name (unless anonymous)
         owner_name = None
         if not chat.share_anonymous and chat.owner:
+            # Use full_name if set, otherwise username
             owner_name = chat.owner.full_name or chat.owner.username
         
-        logger.info(f"[SHARED_CHAT_LEGACY] share_id={share_id}, chat_id={chat.id}, message_count={len(chat.messages)}")
+        # Debug logging
+        logger.info(f"[SHARED_CHAT] share_id={share_id}, chat_id={chat.id}, message_count={len(chat.messages)}, owner={owner_name}, anonymous={chat.share_anonymous}")
+        for msg in chat.messages:
+            content_preview = (msg.content[:50] + '...') if msg.content and len(msg.content) > 50 else msg.content
+            logger.info(f"[SHARED_CHAT]   msg_id={msg.id[:8]}..., role={msg.role}, parent={msg.parent_id[:8] if msg.parent_id else 'root'}, content={content_preview}")
         
+        # Sort messages chronologically
         sorted_messages = sorted(chat.messages, key=lambda m: m.created_at)
         
+        # Build children map for tree structure
         children_by_parent = {}
         for msg in sorted_messages:
             parent_key = msg.parent_id or 'root'
@@ -1100,9 +939,19 @@ async def get_shared_chat(share_id: str):
                 children_by_parent[parent_key] = []
             children_by_parent[parent_key].append(msg)
         
-        has_branches = any(len(children) > 1 for children in children_by_parent.values())
-        selected_versions = chat.selected_versions or {}
+        # Debug: log children map
+        logger.info(f"[SHARED_CHAT] Children map keys: {list(children_by_parent.keys())}")
+        for parent_key, children in children_by_parent.items():
+            logger.info(f"[SHARED_CHAT]   {parent_key}: {[c.id[:8] for c in children]}")
         
+        # Check if there are branches (any parent has multiple children)
+        has_branches = any(len(children) > 1 for children in children_by_parent.values())
+        
+        # Use selected_versions to determine which branch to follow
+        selected_versions = chat.selected_versions or {}
+        logger.info(f"[SHARED_CHAT] selected_versions: {selected_versions}")
+        
+        # Walk the tree from root, following selected branches
         path_messages = []
         current_parent = 'root'
         visited = set()
@@ -1110,10 +959,14 @@ async def get_shared_chat(share_id: str):
         while current_parent not in visited:
             visited.add(current_parent)
             children = children_by_parent.get(current_parent, [])
+            logger.info(f"[SHARED_CHAT] Walking: parent={current_parent}, children_count={len(children)}")
             if not children:
                 break
             
+            # Sort children by created_at
             children.sort(key=lambda m: m.created_at)
+            
+            # Find selected child or default to newest
             selected = children[-1]
             selected_id = selected_versions.get(current_parent)
             if selected_id:
@@ -1130,11 +983,11 @@ async def get_shared_chat(share_id: str):
                 "input_tokens": selected.input_tokens,
                 "output_tokens": selected.output_tokens,
                 "sibling_count": len(children),
-                "attachments": selected.attachments,
             })
             
             current_parent = selected.id
         
+        # Also include all messages chronologically for "show all" view
         all_messages = [{
             "id": msg.id,
             "role": msg.role.value if hasattr(msg.role, 'value') else msg.role,
@@ -1143,8 +996,10 @@ async def get_shared_chat(share_id: str):
             "created_at": msg.created_at.isoformat(),
             "input_tokens": msg.input_tokens,
             "output_tokens": msg.output_tokens,
-            "attachments": msg.attachments,
         } for msg in sorted_messages]
+        
+        # Log final result
+        logger.info(f"[SHARED_CHAT] Returning: path_messages={len(path_messages)}, all_messages={len(all_messages)}, has_branches={has_branches}")
         
         return {
             "id": chat.id,
@@ -1152,7 +1007,7 @@ async def get_shared_chat(share_id: str):
             "model": chat.model,
             "assistant_id": chat.assistant_id,
             "assistant_name": chat.assistant_name,
-            "owner_name": owner_name,
+            "owner_name": owner_name,  # None if anonymous or no owner
             "created_at": chat.created_at.isoformat(),
             "messages": path_messages,
             "all_messages": all_messages,
@@ -1162,13 +1017,13 @@ async def get_shared_chat(share_id: str):
 
 @app.post("/api/shared/{share_id}/clone")
 async def clone_shared_chat(share_id: str, request: Request):
-    """Clone a shared chat snapshot for the authenticated user"""
+    """Clone a shared chat for the authenticated user"""
     from fastapi import HTTPException
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
     from app.api.dependencies import get_current_user
-    from app.models.chat import Chat, SharedChat
-    from app.models.models import Message, MessageRole
+    from app.models.chat import Chat
+    from app.models.models import Message
     from app.models.user import User
     from app.db.database import async_session_maker
     import uuid
@@ -1192,91 +1047,7 @@ async def clone_shared_chat(share_id: str, request: Request):
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         
-        # Try new SharedChat table first
-        result = await db.execute(
-            select(SharedChat).where(SharedChat.share_id == share_id)
-        )
-        shared = result.scalar_one_or_none()
-        
-        if shared:
-            # Clone from new snapshot-based share
-            new_chat_id = str(uuid.uuid4())
-            new_chat = Chat(
-                id=new_chat_id,
-                owner_id=user.id,
-                title=f"{shared.title} (continued)",
-                model=shared.model,
-                assistant_id=shared.assistant_id,
-                assistant_name=shared.assistant_name,
-            )
-            db.add(new_chat)
-            await db.flush()
-            
-            messages_snapshot = shared.messages_snapshot or []
-            sorted_messages = sorted(messages_snapshot, key=lambda m: m.get('created_at', ''))
-            
-            # Build the message path following selected_versions
-            children_by_parent = {}
-            for msg in sorted_messages:
-                parent_key = msg.get('parent_id') or 'root'
-                if parent_key not in children_by_parent:
-                    children_by_parent[parent_key] = []
-                children_by_parent[parent_key].append(msg)
-            
-            selected_versions = shared.selected_versions or {}
-            
-            # Walk the tree to get the selected path
-            path_messages = []
-            current_parent = 'root'
-            visited = set()
-            while current_parent not in visited and current_parent in children_by_parent:
-                visited.add(current_parent)
-                children = children_by_parent[current_parent]
-                if not children:
-                    break
-                
-                if current_parent in selected_versions:
-                    selected_id = selected_versions[current_parent]
-                    selected = next((c for c in children if c.get('id') == selected_id), children[-1])
-                else:
-                    selected = children[-1]
-                
-                path_messages.append(selected)
-                current_parent = selected.get('id')
-            
-            # Clone messages with new IDs
-            old_to_new_id = {}
-            for old_msg in path_messages:
-                new_msg_id = str(uuid.uuid4())
-                old_to_new_id[old_msg.get('id')] = new_msg_id
-                
-                new_parent_id = None
-                old_parent = old_msg.get('parent_id')
-                if old_parent and old_parent in old_to_new_id:
-                    new_parent_id = old_to_new_id[old_parent]
-                
-                role_str = old_msg.get('role', 'user')
-                role = MessageRole(role_str) if role_str in [r.value for r in MessageRole] else MessageRole.USER
-                
-                new_message = Message(
-                    id=new_msg_id,
-                    chat_id=new_chat_id,
-                    sender_id=user.id if role == MessageRole.USER else None,
-                    role=role,
-                    content=old_msg.get('content'),
-                    parent_id=new_parent_id,
-                    attachments=old_msg.get('attachments', []),
-                    artifacts=old_msg.get('artifacts'),
-                    input_tokens=old_msg.get('input_tokens', 0),
-                    output_tokens=old_msg.get('output_tokens', 0),
-                )
-                db.add(new_message)
-            
-            await db.commit()
-            logger.info(f"[CLONE_CHAT] User {user.id} cloned shared chat {share_id} -> {new_chat_id} ({len(path_messages)} messages)")
-            return {"chat_id": new_chat_id, "message_count": len(path_messages)}
-        
-        # Fall back to legacy Chat.share_id
+        # Find the shared chat
         result = await db.execute(
             select(Chat)
             .options(selectinload(Chat.messages))
@@ -1287,7 +1058,7 @@ async def clone_shared_chat(share_id: str, request: Request):
         if not original_chat:
             raise HTTPException(status_code=404, detail="Shared chat not found")
         
-        # Clone from legacy share
+        # Create new chat for the user
         new_chat_id = str(uuid.uuid4())
         new_chat = Chat(
             id=new_chat_id,
@@ -1301,8 +1072,10 @@ async def clone_shared_chat(share_id: str, request: Request):
         db.add(new_chat)
         await db.flush()
         
+        # Get messages in order (following the selected branch path)
         sorted_messages = sorted(original_chat.messages, key=lambda m: m.created_at)
         
+        # Build the message path following selected_versions
         children_by_parent = {}
         for msg in sorted_messages:
             parent_key = msg.parent_id or 'root'
@@ -1312,6 +1085,7 @@ async def clone_shared_chat(share_id: str, request: Request):
         
         selected_versions = original_chat.selected_versions or {}
         
+        # Walk the tree to get the selected path
         path_messages = []
         current_parent = 'root'
         while current_parent in children_by_parent:
@@ -1319,20 +1093,23 @@ async def clone_shared_chat(share_id: str, request: Request):
             if not children:
                 break
             
+            # Select the right child based on selected_versions
             if current_parent in selected_versions:
                 selected_id = selected_versions[current_parent]
                 selected = next((c for c in children if c.id == selected_id), children[-1])
             else:
-                selected = children[-1]
+                selected = children[-1]  # Default to newest
             
             path_messages.append(selected)
             current_parent = selected.id
         
+        # Clone messages with new IDs, maintaining parent relationships
         old_to_new_id = {}
         for old_msg in path_messages:
             new_msg_id = str(uuid.uuid4())
             old_to_new_id[old_msg.id] = new_msg_id
             
+            # Determine new parent_id
             new_parent_id = None
             if old_msg.parent_id and old_msg.parent_id in old_to_new_id:
                 new_parent_id = old_to_new_id[old_msg.parent_id]
@@ -1345,14 +1122,15 @@ async def clone_shared_chat(share_id: str, request: Request):
                 content=old_msg.content,
                 content_type=old_msg.content_type,
                 parent_id=new_parent_id,
-                attachments=old_msg.attachments,
                 input_tokens=old_msg.input_tokens,
                 output_tokens=old_msg.output_tokens,
             )
             db.add(new_message)
         
         await db.commit()
-        logger.info(f"[CLONE_CHAT_LEGACY] User {user.id} cloned shared chat {share_id} -> {new_chat_id} ({len(path_messages)} messages)")
+        
+        logger.info(f"[CLONE_CHAT] User {user.id} cloned shared chat {share_id} -> {new_chat_id} ({len(path_messages)} messages)")
+        
         return {"chat_id": new_chat_id, "message_count": len(path_messages)}
 
 

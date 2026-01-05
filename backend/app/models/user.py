@@ -69,11 +69,6 @@ class User(Base):
     knowledge_stores = relationship("KnowledgeStore", back_populates="owner", cascade="all, delete-orphan")
     custom_assistants = relationship("CustomAssistant", back_populates="owner", cascade="all, delete-orphan")
     
-    # Payment relationships
-    subscription = relationship("Subscription", back_populates="user", uselist=False, cascade="all, delete-orphan")
-    payment_methods = relationship("PaymentMethod", back_populates="user", cascade="all, delete-orphan")
-    transactions = relationship("Transaction", back_populates="user", cascade="all, delete-orphan")
-    
     @property
     def is_unlimited(self) -> bool:
         """Check if user has unlimited tokens (admin bypass)"""

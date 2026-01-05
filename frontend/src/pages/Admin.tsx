@@ -1,522 +1,39 @@
 import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
-import { useBrandingStore } from '../stores/brandingStore';
-import { useThemeStore } from '../stores/themeStore';
 import api from '../lib/api';
+
+// Import admin tab components and types
+import { 
+  SystemTab, 
+  OAuthTab, 
+  FeaturesTab, 
+  CategoriesTab,
+  SystemSettings,
+  OAuthSettings,
+  LLMSettings,
+  LLMProvider,
+  FeatureFlags,
+  APIRateLimits,
+  TierConfig,
+  UserListItem,
+  ChatListItem,
+  ChatDetail,
+  ToolConfig,
+  ToolUsageStats,
+  ToolUsageStat,
+  FilterConfig,
+  FilterChainDef,
+  FilterChainStep,
+  FilterChainSchema,
+  GlobalKBStore,
+  GPTCategory,
+  TabId,
+  formatHours,
+} from '../components/admin';
 
 // Lazy load FlowEditor for better performance
 const FlowEditor = lazy(() => import('../components/FlowEditor'));
-
-interface SystemSettings {
-  default_system_prompt: string;
-  all_models_prompt: string;
-  title_generation_prompt: string;
-  rag_context_prompt: string;
-  input_token_price: number;
-  output_token_price: number;
-  token_refill_interval_hours: number;
-  free_tier_tokens: number;
-  pro_tier_tokens: number;
-  enterprise_tier_tokens: number;
-  // Storage limits
-  max_upload_size_mb: number;
-  max_knowledge_store_size_mb: number;
-  max_knowledge_stores_free: number;
-  max_knowledge_stores_pro: number;
-  max_knowledge_stores_enterprise: number;
-  // Image classification
-  image_confirm_with_llm: boolean;
-  image_classification_prompt: string;
-  image_classification_true_response: string;
-}
-
-interface OAuthSettings {
-  google_client_id: string;
-  google_client_secret: string;
-  google_oauth_enabled: boolean;
-  google_oauth_timeout: number;
-  github_client_id: string;
-  github_client_secret: string;
-  github_oauth_enabled: boolean;
-  github_oauth_timeout: number;
-}
-
-interface LLMSettings {
-  llm_api_base_url: string;
-  llm_api_key: string;
-  llm_model: string;
-  llm_timeout: number;
-  llm_max_tokens: number;
-  llm_temperature: number;
-  llm_stream_default: boolean;
-  llm_multimodal: boolean;  // Whether legacy model supports vision
-  // Thinking tokens (for models that output reasoning)
-  think_begin_token: string;
-  think_end_token: string;
-  // History compression
-  history_compression_enabled: boolean;
-  history_compression_threshold: number;
-  history_compression_keep_recent: number;
-  history_compression_target_tokens: number;
-}
-
-interface LLMProvider {
-  id: string;
-  name: string;
-  base_url: string;
-  api_key: string;
-  model_id: string;
-  is_multimodal: boolean;
-  supports_tools: boolean;
-  supports_streaming: boolean;
-  is_default: boolean;
-  is_vision_default: boolean;
-  is_enabled: boolean;
-  timeout: number;
-  max_tokens: number;
-  context_size: number;
-  temperature: string;
-  vision_prompt: string | null;
-  created_at: string | null;
-  updated_at: string | null;
-}
-
-interface FeatureFlags {
-  enable_registration: boolean;
-  enable_billing: boolean;
-  freeforall: boolean;
-  enable_safety_filters: boolean;
-}
-
-interface BillingApiSettings {
-  // Stripe
-  stripe_enabled: boolean;
-  stripe_api_key: string;
-  stripe_webhook_secret: string;
-  stripe_publishable_key: string;
-  stripe_pro_price_id: string;
-  stripe_enterprise_price_id: string;
-  // PayPal
-  paypal_enabled: boolean;
-  paypal_client_id: string;
-  paypal_client_secret: string;
-  paypal_webhook_id: string;
-  paypal_mode: string;
-  paypal_pro_plan_id: string;
-  paypal_enterprise_plan_id: string;
-  // Google Pay
-  google_pay_enabled: boolean;
-  google_pay_merchant_id: string;
-  google_pay_merchant_name: string;
-}
-
-interface APIRateLimits {
-  api_rate_limit_completions: number;
-  api_rate_limit_embeddings: number;
-  api_rate_limit_images: number;
-  api_rate_limit_models: number;
-}
-
-interface BrandingSettings {
-  app_name: string;
-  app_tagline: string;
-  favicon_url: string;
-  logo_url: string;
-  custom_css: string;
-  custom_themes: string;  // JSON array of theme objects
-}
-
-interface TierConfig {
-  id: string;
-  name: string;
-  price: number;
-  tokens: number;
-  features: string[];
-  popular: boolean;
-}
-
-interface UserListItem {
-  id: string;
-  email: string;
-  username: string;
-  tier: string;
-  is_admin: boolean;
-  is_active: boolean;
-  tokens_limit: number;
-  tokens_used: number;
-  chat_count: number;
-  created_at: string;
-}
-
-interface ChatListItem {
-  id: string;
-  title: string;
-  model: string | null;
-  owner_email?: string;
-  message_count: number;
-  created_at: string;
-  updated_at: string | null;
-}
-
-interface ChatDetail {
-  id: string;
-  title: string;
-  model: string | null;
-  owner_id: string;
-  owner_email: string;
-  owner_username: string;
-  created_at: string;
-  updated_at: string | null;
-  messages: Array<{
-    id: string;
-    role: string;
-    content: string;
-    created_at: string;
-  }>;
-}
-
-interface ToolConfig {
-  id: string;
-  name: string;
-  description: string | null;
-  tool_type: 'mcp' | 'openapi';
-  url: string;
-  has_api_key: boolean;
-  is_public: boolean;
-  is_enabled: boolean;
-  schema_cache?: Array<{
-    name: string;
-    description?: string;
-    parameters?: unknown;
-  }>;
-}
-
-interface ToolUsageStat {
-  tool_id: string;
-  tool_name: string;
-  total_calls: number;
-  successful_calls: number;
-  failed_calls: number;
-  total_duration_ms: number;
-  avg_duration_ms: number;
-  last_used: string | null;
-  unique_users: number;
-}
-
-interface ToolUsageStats {
-  total_calls: number;
-  successful_calls: number;
-  failed_calls: number;
-  tools: ToolUsageStat[];
-}
-
-interface FilterConfig {
-  id?: string;
-  name: string;
-  description: string | null;
-  filter_type: 'to_llm' | 'from_llm' | 'to_tools' | 'from_tools';
-  priority: 'highest' | 'high' | 'medium' | 'low' | 'least';
-  enabled: boolean;
-  filter_mode: 'pattern' | 'code' | 'llm';
-  pattern: string | null;
-  replacement: string | null;
-  word_list: string[] | null;
-  case_sensitive: boolean;
-  action: 'modify' | 'block' | 'log' | 'passthrough';
-  block_message: string | null;
-  code: string | null;
-  llm_prompt: string | null;
-  config: Record<string, any> | null;
-  is_global: boolean;
-}
-
-type TabId = 'system' | 'oauth' | 'llm' | 'billing_apis' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'dev' | 'branding';
-
-// Theme color variables with labels
-const THEME_COLOR_VARS = [
-  { key: '--color-background', label: 'Background', description: 'Main page background' },
-  { key: '--color-surface', label: 'Surface', description: 'Cards, panels, elevated elements' },
-  { key: '--color-text', label: 'Text', description: 'Primary text color' },
-  { key: '--color-text-secondary', label: 'Text Secondary', description: 'Muted/secondary text' },
-  { key: '--color-border', label: 'Border', description: 'Borders and dividers' },
-  { key: '--color-primary', label: 'Primary', description: 'Primary accent color' },
-  { key: '--color-secondary', label: 'Secondary', description: 'Secondary accent color' },
-  { key: '--color-accent', label: 'Accent', description: 'Highlights and accents' },
-  { key: '--color-button', label: 'Button', description: 'Button background' },
-  { key: '--color-button-text', label: 'Button Text', description: 'Button text color' },
-  { key: '--color-error', label: 'Error', description: 'Error messages' },
-  { key: '--color-success', label: 'Success', description: 'Success messages' },
-  { key: '--color-warning', label: 'Warning', description: 'Warning messages' },
-];
-
-interface CustomTheme {
-  id: string;
-  name: string;
-  [key: string]: string;
-}
-
-interface ThemeEditorProps {
-  themes: string;
-  onChange: (themes: string) => void;
-}
-
-function ThemeEditor({ themes, onChange }: ThemeEditorProps) {
-  const [parsedThemes, setParsedThemes] = useState<CustomTheme[]>([]);
-  const [selectedThemeIndex, setSelectedThemeIndex] = useState<number | null>(null);
-  const [previewTheme, setPreviewTheme] = useState<CustomTheme | null>(null);
-  const [parseError, setParseError] = useState<string | null>(null);
-  
-  // Parse themes JSON on mount and when themes prop changes
-  useEffect(() => {
-    try {
-      const parsed = themes ? JSON.parse(themes) : [];
-      setParsedThemes(Array.isArray(parsed) ? parsed : []);
-      setParseError(null);
-    } catch (e) {
-      setParseError('Invalid JSON format');
-      setParsedThemes([]);
-    }
-  }, [themes]);
-  
-  // Serialize and update parent when themes change
-  const updateThemes = (newThemes: CustomTheme[]) => {
-    setParsedThemes(newThemes);
-    onChange(JSON.stringify(newThemes, null, 2));
-  };
-  
-  // Add new theme
-  const addTheme = () => {
-    const newTheme: CustomTheme = {
-      id: `custom-${Date.now()}`,
-      name: 'New Theme',
-      '--color-background': '#1a1a2e',
-      '--color-surface': '#16213e',
-      '--color-text': '#ffffff',
-      '--color-text-secondary': '#a0a0a0',
-      '--color-border': '#2a2a4e',
-      '--color-primary': '#0f3460',
-      '--color-secondary': '#533483',
-      '--color-accent': '#e94560',
-      '--color-button': '#0f3460',
-      '--color-button-text': '#ffffff',
-      '--color-error': '#ff4444',
-      '--color-success': '#00c851',
-      '--color-warning': '#ffbb33',
-    };
-    updateThemes([...parsedThemes, newTheme]);
-    setSelectedThemeIndex(parsedThemes.length);
-  };
-  
-  // Delete theme
-  const deleteTheme = (index: number) => {
-    const newThemes = parsedThemes.filter((_, i) => i !== index);
-    updateThemes(newThemes);
-    if (selectedThemeIndex === index) {
-      setSelectedThemeIndex(null);
-    } else if (selectedThemeIndex !== null && selectedThemeIndex > index) {
-      setSelectedThemeIndex(selectedThemeIndex - 1);
-    }
-  };
-  
-  // Update theme property
-  const updateThemeProperty = (index: number, key: string, value: string) => {
-    const newThemes = [...parsedThemes];
-    newThemes[index] = { ...newThemes[index], [key]: value };
-    updateThemes(newThemes);
-  };
-  
-  // Preview theme (apply temporarily)
-  const applyPreview = (theme: CustomTheme) => {
-    setPreviewTheme(theme);
-    const root = document.documentElement;
-    THEME_COLOR_VARS.forEach(({ key }) => {
-      if (theme[key]) {
-        root.style.setProperty(key, theme[key]);
-      }
-    });
-  };
-  
-  // Reset preview - restore current theme from store
-  const resetPreview = async () => {
-    setPreviewTheme(null);
-    // Re-apply current theme from theme store
-    const { currentTheme, applyTheme } = useThemeStore.getState();
-    if (currentTheme) {
-      applyTheme(currentTheme);
-    } else {
-      // Fall back to reloading branding config
-      const { loadConfig } = useBrandingStore.getState();
-      await loadConfig(true);
-    }
-  };
-  
-  const selectedTheme = selectedThemeIndex !== null ? parsedThemes[selectedThemeIndex] : null;
-  
-  return (
-    <div className="space-y-4">
-      {parseError && (
-        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
-          {parseError}
-        </div>
-      )}
-      
-      {/* Theme List */}
-      <div className="flex flex-wrap gap-2 items-center">
-        {parsedThemes.map((theme, index) => (
-          <button
-            key={theme.id}
-            onClick={() => setSelectedThemeIndex(index)}
-            className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
-              selectedThemeIndex === index
-                ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
-                : 'bg-[var(--color-background)] text-[var(--color-text)] hover:bg-[var(--color-border)]'
-            }`}
-          >
-            <span
-              className="w-4 h-4 rounded-full border border-[var(--color-border)]"
-              style={{ backgroundColor: theme['--color-primary'] || '#666' }}
-            />
-            {theme.name}
-          </button>
-        ))}
-        <button
-          onClick={addTheme}
-          className="px-3 py-2 rounded-lg text-sm font-medium bg-[var(--color-background)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border)] flex items-center gap-1"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          Add Theme
-        </button>
-      </div>
-      
-      {/* Theme Editor */}
-      {selectedTheme && (
-        <div className="bg-[var(--color-background)] rounded-lg p-4 border border-[var(--color-border)]">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-4">
-              <input
-                type="text"
-                value={selectedTheme.name}
-                onChange={(e) => updateThemeProperty(selectedThemeIndex!, 'name', e.target.value)}
-                className="px-3 py-1.5 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] font-medium"
-                placeholder="Theme Name"
-              />
-              <input
-                type="text"
-                value={selectedTheme.id}
-                onChange={(e) => updateThemeProperty(selectedThemeIndex!, 'id', e.target.value.toLowerCase().replace(/\s+/g, '-'))}
-                className="px-3 py-1.5 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-secondary)] text-sm font-mono"
-                placeholder="theme-id"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => applyPreview(selectedTheme)}
-                className="px-3 py-1.5 rounded-lg text-sm bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
-              >
-                Preview
-              </button>
-              {previewTheme && (
-                <button
-                  onClick={resetPreview}
-                  className="px-3 py-1.5 rounded-lg text-sm bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30"
-                >
-                  Reset
-                </button>
-              )}
-              <button
-                onClick={() => deleteTheme(selectedThemeIndex!)}
-                className="px-3 py-1.5 rounded-lg text-sm bg-red-500/20 text-red-400 hover:bg-red-500/30"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-          
-          {/* Color Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-            {THEME_COLOR_VARS.map(({ key, label, description }) => (
-              <div key={key} className="space-y-1">
-                <label className="block text-xs font-medium text-[var(--color-text)]">
-                  {label}
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    value={selectedTheme[key] || '#000000'}
-                    onChange={(e) => updateThemeProperty(selectedThemeIndex!, key, e.target.value)}
-                    className="w-8 h-8 rounded cursor-pointer border border-[var(--color-border)]"
-                  />
-                  <input
-                    type="text"
-                    value={selectedTheme[key] || ''}
-                    onChange={(e) => updateThemeProperty(selectedThemeIndex!, key, e.target.value)}
-                    className="flex-1 px-2 py-1 bg-[var(--color-surface)] border border-[var(--color-border)] rounded text-[var(--color-text)] text-xs font-mono"
-                    placeholder="#000000"
-                  />
-                </div>
-                <p className="text-xs text-[var(--color-text-secondary)]">{description}</p>
-              </div>
-            ))}
-          </div>
-          
-          {/* Theme Preview Swatch */}
-          <div className="mt-4 p-4 rounded-lg border border-[var(--color-border)]" style={{
-            backgroundColor: selectedTheme['--color-background'],
-            color: selectedTheme['--color-text'],
-          }}>
-            <div className="text-sm font-medium mb-2">Preview</div>
-            <div className="flex flex-wrap gap-2">
-              <div className="px-3 py-1.5 rounded text-sm" style={{
-                backgroundColor: selectedTheme['--color-surface'],
-                border: `1px solid ${selectedTheme['--color-border']}`,
-              }}>
-                Surface
-              </div>
-              <div className="px-3 py-1.5 rounded text-sm" style={{
-                backgroundColor: selectedTheme['--color-button'],
-                color: selectedTheme['--color-button-text'],
-              }}>
-                Button
-              </div>
-              <div className="px-3 py-1.5 rounded text-sm" style={{
-                backgroundColor: selectedTheme['--color-primary'],
-                color: '#fff',
-              }}>
-                Primary
-              </div>
-              <div className="px-3 py-1.5 rounded text-sm" style={{
-                backgroundColor: selectedTheme['--color-accent'],
-                color: '#fff',
-              }}>
-                Accent
-              </div>
-              <span style={{ color: selectedTheme['--color-text-secondary'] }}>
-                Secondary text
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-      
-      {/* Raw JSON Toggle */}
-      <details className="mt-4">
-        <summary className="cursor-pointer text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
-          View/Edit Raw JSON
-        </summary>
-        <textarea
-          value={themes}
-          onChange={(e) => onChange(e.target.value)}
-          rows={8}
-          className="mt-2 w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] font-mono text-sm"
-          placeholder="[]"
-        />
-      </details>
-    </div>
-  );
-}
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -531,9 +48,6 @@ export default function Admin() {
   const [showProviderForm, setShowProviderForm] = useState(false);
   const [testingProvider, setTestingProvider] = useState<string | null>(null);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags | null>(null);
-  const [billingApiSettings, setBillingApiSettings] = useState<BillingApiSettings | null>(null);
-  const [testingStripe, setTestingStripe] = useState(false);
-  const [testingPaypal, setTestingPaypal] = useState(false);
   const [apiRateLimits, setApiRateLimits] = useState<APIRateLimits | null>(null);
   const [tiers, setTiers] = useState<TierConfig[]>([]);
   
@@ -551,12 +65,6 @@ export default function Admin() {
   const [tokenRefillHours, setTokenRefillHours] = useState(720);
   const [debugSettingsLoading, setDebugSettingsLoading] = useState(false);
   
-  // Security settings (stored in backend)
-  const [secretKey, setSecretKey] = useState<string>('');
-  const [secretKeyMasked, setSecretKeyMasked] = useState(true);
-  const [loggingLevel, setLoggingLevel] = useState<string>('INFO');
-  const [securitySettingsLoading, setSecuritySettingsLoading] = useState(false);
-  
   // UI state
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -566,15 +74,6 @@ export default function Admin() {
   const [editingTier, setEditingTier] = useState<string | null>(null);
   const [newFeature, setNewFeature] = useState<string>('');
   
-  // Branding state
-  const [brandingSettings, setBrandingSettings] = useState<BrandingSettings>({
-    app_name: 'Open-NueChat',
-    app_tagline: 'AI-Powered Chat',
-    favicon_url: '',
-    logo_url: '',
-    custom_css: '',
-    custom_themes: '[]',
-  });
   // User management state
   const [users, setUsers] = useState<UserListItem[]>([]);
   const [usersTotal, setUsersTotal] = useState(0);
@@ -583,11 +82,8 @@ export default function Admin() {
   const [usersLoading, setUsersLoading] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserListItem | null>(null);
   const [showUserModal, setShowUserModal] = useState(false);
-  const [userAction, setUserAction] = useState<'upgrade' | 'refund' | 'chats' | 'password' | null>(null);
+  const [userAction, setUserAction] = useState<'upgrade' | 'refund' | 'chats' | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
-  const [newUserPassword, setNewUserPassword] = useState('');
-  const [passwordSetError, setPasswordSetError] = useState<string | null>(null);
-  const [passwordSetSuccess, setPasswordSetSuccess] = useState(false);
   
   // Chat viewing state
   const [userChats, setUserChats] = useState<ChatListItem[]>([]);
@@ -647,74 +143,6 @@ export default function Admin() {
   const [filterTesting, setFilterTesting] = useState(false);
   
   // Filter Chains state (configurable agentic flows)
-  interface FilterChainConditional {
-    enabled: boolean;
-    logic?: string;
-    comparisons: Array<{ left: string; operator: string; right: string }>;
-    on_true?: FilterChainStep[];
-    on_false?: FilterChainStep[];
-  }
-  
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  type StepConfig = Record<string, any>;
-  
-  interface FilterChainStep {
-    id: string;
-    type: string;
-    name?: string;
-    enabled?: boolean;
-    config: StepConfig;
-    on_error?: string;
-    jump_to_step?: string;
-    conditional?: FilterChainConditional;
-    loop?: {
-      enabled: boolean;
-      type: string;
-      count?: number;
-      while?: { left: string; operator: string; right: string };
-      max_iterations?: number;
-      loop_var?: string;
-    };
-  }
-  
-  interface FilterChainDef {
-    id?: string;
-    name: string;
-    description?: string;
-    enabled: boolean;
-    priority: number;
-    retain_history: boolean;
-    bidirectional: boolean;
-    outbound_chain_id?: string;
-    max_iterations: number;
-    debug: boolean;
-    skip_if_rag_hit: boolean;
-    definition: { steps: FilterChainStep[] };
-    created_at?: string;
-    updated_at?: string;
-  }
-  
-  interface StepTypeSchema {
-    label: string;
-    description: string;
-    category: string;
-    fields: Array<{
-      name: string;
-      type: string;
-      label?: string;
-      required?: boolean;
-      default?: unknown;
-      options?: Array<{ value: string; label: string }>;
-    }>;
-  }
-  
-  interface FilterChainSchema {
-    step_types: Record<string, StepTypeSchema>;
-    comparison_operators: Array<{ value: string; label: string }>;
-    builtin_variables: Array<{ value: string; label: string }>;
-    available_tools?: Array<{ value: string; label: string; category: string; description?: string }>;
-  }
-  
   const [filterChains, setFilterChains] = useState<FilterChainDef[]>([]);
   const [filterChainsLoading, setFilterChainsLoading] = useState(false);
   const [filterChainSchema, setFilterChainSchema] = useState<FilterChainSchema | null>(null);
@@ -737,21 +165,23 @@ export default function Admin() {
   const [previewJsonChain, setPreviewJsonChain] = useState<FilterChainDef | null>(null);
   
   // Global Knowledge Store state
-  interface GlobalKBStore {
-    id: string;
-    name: string;
-    description: string | null;
-    icon: string;
-    owner_username: string;
-    document_count: number;
-    is_global: boolean;
-    global_min_score: number;
-    global_max_results: number;
-  }
   const [globalKBStores, setGlobalKBStores] = useState<GlobalKBStore[]>([]);
   const [allKBStores, setAllKBStores] = useState<GlobalKBStore[]>([]);
   const [globalKBLoading, setGlobalKBLoading] = useState(false);
   const [globalKBEnabled, setGlobalKBEnabled] = useState(true);
+  
+  // GPT Categories state
+  const [gptCategories, setGptCategories] = useState<GPTCategory[]>([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(false);
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
+  const [editingCategory, setEditingCategory] = useState<GPTCategory | null>(null);
+  const [categoryForm, setCategoryForm] = useState({
+    value: '',
+    label: '',
+    icon: '📁',
+    description: '',
+    sort_order: 0,
+  });
   
   // LLM test state
   const [llmTestResult, setLLMTestResult] = useState<{ success: boolean; message: string; models?: string[] } | null>(null);
@@ -782,6 +212,13 @@ export default function Admin() {
   useEffect(() => {
     if (activeTab === 'global_kb') {
       fetchGlobalKBStores();
+    }
+  }, [activeTab]);
+  
+  // Fetch GPT categories when that tab is activated
+  useEffect(() => {
+    if (activeTab === 'categories') {
+      fetchCategories();
     }
   }, [activeTab]);
   
@@ -856,6 +293,108 @@ export default function Admin() {
     }
   };
   
+  // GPT Category functions
+  const fetchCategories = async () => {
+    setCategoriesLoading(true);
+    try {
+      const res = await api.get('/assistants/categories', { params: { include_inactive: true } });
+      setGptCategories(res.data || []);
+    } catch (err: any) {
+      console.error('Failed to load categories:', err);
+      setError(err.response?.data?.detail || 'Failed to load categories');
+    } finally {
+      setCategoriesLoading(false);
+    }
+  };
+  
+  const resetCategoryForm = () => {
+    setCategoryForm({
+      value: '',
+      label: '',
+      icon: '📁',
+      description: '',
+      sort_order: gptCategories.length,
+    });
+    setEditingCategory(null);
+    setShowCategoryModal(false);
+  };
+  
+  const startEditCategory = (cat: GPTCategory) => {
+    setEditingCategory(cat);
+    setCategoryForm({
+      value: cat.value,
+      label: cat.label,
+      icon: cat.icon,
+      description: cat.description || '',
+      sort_order: cat.sort_order,
+    });
+    setShowCategoryModal(true);
+  };
+  
+  const saveCategory = async () => {
+    if (!categoryForm.value.trim() || !categoryForm.label.trim()) {
+      setError('Value and label are required');
+      return;
+    }
+    
+    // Validate value format (lowercase, alphanumeric, hyphens)
+    if (!/^[a-z0-9-]+$/.test(categoryForm.value)) {
+      setError('Value must be lowercase letters, numbers, and hyphens only');
+      return;
+    }
+    
+    try {
+      if (editingCategory) {
+        await api.patch(`/assistants/categories/${editingCategory.id}`, {
+          label: categoryForm.label,
+          icon: categoryForm.icon,
+          description: categoryForm.description || null,
+          sort_order: categoryForm.sort_order,
+        });
+        setSuccess('Category updated');
+      } else {
+        await api.post('/assistants/categories', categoryForm);
+        setSuccess('Category created');
+      }
+      setTimeout(() => setSuccess(null), 3000);
+      await fetchCategories();
+      resetCategoryForm();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save category');
+    }
+  };
+  
+  const toggleCategoryActive = async (cat: GPTCategory) => {
+    try {
+      await api.patch(`/assistants/categories/${cat.id}`, {
+        is_active: !cat.is_active,
+      });
+      await fetchCategories();
+      setSuccess(`Category ${cat.is_active ? 'disabled' : 'enabled'}`);
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to update category');
+    }
+  };
+  
+  const deleteCategory = async (cat: GPTCategory) => {
+    if (cat.value === 'general') {
+      setError('Cannot delete the general category');
+      return;
+    }
+    if (!confirm(`Delete category "${cat.label}"? GPTs using this category will be moved to "General".`)) {
+      return;
+    }
+    try {
+      await api.delete(`/assistants/categories/${cat.id}`);
+      await fetchCategories();
+      setSuccess('Category deleted');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to delete category');
+    }
+  };
+  
   const fetchDebugSettings = async () => {
     setDebugSettingsLoading(true);
     try {
@@ -917,72 +456,15 @@ export default function Admin() {
     }
   };
   
-  // Security settings functions
-  const fetchSecuritySettings = async () => {
-    setSecuritySettingsLoading(true);
-    try {
-      const res = await api.get('/admin/security-settings');
-      setSecretKey(res.data.secret_key || '');
-      setLoggingLevel(res.data.logging_level || 'INFO');
-    } catch (err: any) {
-      console.error('Failed to load security settings:', err);
-    } finally {
-      setSecuritySettingsLoading(false);
-    }
-  };
-  
-  const saveSecretKey = async () => {
-    if (!secretKey.trim()) {
-      setError('SECRET_KEY cannot be empty');
-      return;
-    }
-    try {
-      await api.put('/admin/security-settings', { secret_key: secretKey });
-      setSuccess('SECRET_KEY saved. Restart required for changes to take effect.');
-      setTimeout(() => setSuccess(null), 5000);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to save SECRET_KEY');
-    }
-  };
-  
-  const generateSecretKey = () => {
-    // Generate a secure random key (64 hex characters = 32 bytes)
-    const array = new Uint8Array(32);
-    crypto.getRandomValues(array);
-    const key = Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
-    setSecretKey(key);
-    setSecretKeyMasked(false);
-  };
-  
-  const saveLoggingLevel = async (level: string) => {
-    try {
-      await api.put('/admin/security-settings', { logging_level: level });
-      setLoggingLevel(level);
-      setSuccess('Logging level saved');
-      setTimeout(() => setSuccess(null), 3000);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to save logging level');
-    }
-  };
-  
-  // Load security settings when dev tab is activated
-  useEffect(() => {
-    if (activeTab === 'dev') {
-      fetchSecuritySettings();
-    }
-  }, [activeTab]);
-  
   const fetchData = async () => {
     try {
-      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes, rateLimitsRes, billingApisRes, brandingRes] = await Promise.all([
+      const [systemRes, oauthRes, llmRes, featuresRes, tiersRes, rateLimitsRes] = await Promise.all([
         api.get('/admin/settings'),
         api.get('/admin/oauth-settings'),
         api.get('/admin/llm-settings'),
         api.get('/admin/feature-flags'),
         api.get('/admin/tiers'),
         api.get('/admin/api-rate-limits'),
-        api.get('/admin/billing-api-settings'),
-        api.get('/admin/settings/branding'),
       ]);
       setSystemSettings(systemRes.data);
       setOAuthSettings(oauthRes.data);
@@ -990,8 +472,6 @@ export default function Admin() {
       setFeatureFlags(featuresRes.data);
       setTiers(tiersRes.data.tiers);
       setApiRateLimits(rateLimitsRes.data);
-      setBillingApiSettings(billingApisRes.data);
-      setBrandingSettings(brandingRes.data);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to load settings');
     } finally {
@@ -1149,57 +629,6 @@ export default function Admin() {
       setError(err.response?.data?.detail || 'Failed to save API rate limits');
     } finally {
       setIsSaving(false);
-    }
-  };
-  
-  const saveBillingApiSettings = async () => {
-    if (!billingApiSettings) return;
-    setIsSaving(true);
-    setError(null);
-    try {
-      await api.put('/admin/billing-api-settings', billingApiSettings);
-      setSuccess('Billing API settings saved successfully');
-      setTimeout(() => setSuccess(null), 3000);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to save billing API settings');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-  
-  const testStripeConnection = async () => {
-    setTestingStripe(true);
-    setError(null);
-    try {
-      const response = await api.post('/admin/billing-api-settings/test-stripe');
-      if (response.data.success) {
-        setSuccess(response.data.message);
-      } else {
-        setError(response.data.message);
-      }
-      setTimeout(() => setSuccess(null), 5000);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to test Stripe connection');
-    } finally {
-      setTestingStripe(false);
-    }
-  };
-  
-  const testPaypalConnection = async () => {
-    setTestingPaypal(true);
-    setError(null);
-    try {
-      const response = await api.post('/admin/billing-api-settings/test-paypal');
-      if (response.data.success) {
-        setSuccess(response.data.message);
-      } else {
-        setError(response.data.message);
-      }
-      setTimeout(() => setSuccess(null), 5000);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to test PayPal connection');
-    } finally {
-      setTestingPaypal(false);
     }
   };
   
@@ -1915,12 +1344,6 @@ export default function Admin() {
     return tokens.toString();
   };
   
-  const formatHours = (hours: number) => {
-    if (hours >= 24 * 7) return `${Math.round(hours / (24 * 7))} week(s)`;
-    if (hours >= 24) return `${Math.round(hours / 24)} day(s)`;
-    return `${hours} hour(s)`;
-  };
-  
   const AdminTabIcon = ({ type }: { type: string }) => {
     const iconClass = "w-4 h-4";
     switch (type) {
@@ -1930,8 +1353,6 @@ export default function Admin() {
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>;
       case 'llm':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>;
-      case 'billing':
-        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>;
       case 'features':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>;
       case 'filters':
@@ -1950,61 +1371,34 @@ export default function Admin() {
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
       case 'dev':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>;
-      case 'branding':
-        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" /></svg>;
       default:
         return null;
     }
   };
 
-  // Tab groups for better organization
-  const tabGroups: { label: string; tabs: { id: TabId; label: string; iconType: string }[] }[] = [
-    {
-      label: 'Configuration',
-      tabs: [
-        { id: 'system', label: 'System', iconType: 'system' },
-        { id: 'llm', label: 'LLM', iconType: 'llm' },
-        { id: 'branding', label: 'Branding', iconType: 'branding' },
-        { id: 'features', label: 'Features', iconType: 'features' },
-      ],
-    },
-    {
-      label: 'Authentication',
-      tabs: [
-        { id: 'oauth', label: 'OAuth', iconType: 'oauth' },
-        { id: 'billing_apis', label: 'Billing APIs', iconType: 'billing' },
-        { id: 'tiers', label: 'Tiers', iconType: 'tiers' },
-      ],
-    },
-    {
-      label: 'AI & Filters',
-      tabs: [
-        { id: 'filters', label: 'Filters', iconType: 'filters' },
-        { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
-        { id: 'global_kb', label: 'Global KB', iconType: 'global_kb' },
-        { id: 'tools', label: 'Tools', iconType: 'tools' },
-      ],
-    },
-    {
-      label: 'Data',
-      tabs: [
-        { id: 'users', label: 'Users', iconType: 'users' },
-        { id: 'chats', label: 'Chats', iconType: 'chats' },
-        { id: 'dev', label: 'Site Dev', iconType: 'dev' },
-      ],
-    },
+  const tabs: { id: TabId; label: string; iconType: string }[] = [
+    { id: 'system', label: 'System', iconType: 'system' },
+    { id: 'oauth', label: 'OAuth', iconType: 'oauth' },
+    { id: 'llm', label: 'LLM', iconType: 'llm' },
+    { id: 'features', label: 'Features', iconType: 'features' },
+    { id: 'filters', label: 'Filters', iconType: 'filters' },
+    { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
+    { id: 'global_kb', label: 'Global KB', iconType: 'global_kb' },
+    { id: 'categories', label: 'GPT Categories', iconType: 'categories' },
+    { id: 'tiers', label: 'Tiers', iconType: 'tiers' },
+    { id: 'users', label: 'Users', iconType: 'users' },
+    { id: 'chats', label: 'Chats', iconType: 'chats' },
+    { id: 'tools', label: 'Tools', iconType: 'tools' },
+    { id: 'dev', label: 'Site Dev', iconType: 'dev' },
   ];
-  
-  // Flatten for backward compatibility
-  const tabs = tabGroups.flatMap(g => g.tabs);
   
   if (!user?.is_admin) {
     return null;
   }
   
   return (
-    <div className="h-full overflow-y-auto bg-[var(--color-background)] p-6">
-      <div className="max-w-6xl mx-auto pb-8">
+    <div className="h-full overflow-y-auto bg-[var(--color-background)]">
+      <div className="max-w-6xl mx-auto p-6 pb-12">
         <h1 className="text-2xl font-bold text-[var(--color-text)] mb-6">Admin Panel</h1>
         
         {/* Status Messages */}
@@ -2020,28 +1414,21 @@ export default function Admin() {
           </div>
         )}
         
-        {/* Tabs - Grouped */}
-        <div className="mb-6 border-b border-[var(--color-border)] pb-4 space-y-3">
-          {tabGroups.map(group => (
-            <div key={group.label} className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wide w-24 shrink-0">
-                {group.label}
-              </span>
-              {group.tabs.map(tab => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                    activeTab === tab.id
-                      ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
-                      : 'bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border)]'
-                  }`}
-                >
-                  <AdminTabIcon type={tab.iconType} />
-                  {tab.label}
-                </button>
-              ))}
-            </div>
+        {/* Tabs */}
+        <div className="flex flex-wrap gap-2 mb-6 border-b border-[var(--color-border)] pb-4">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                activeTab === tab.id
+                  ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                  : 'bg-[var(--color-surface)] text-[var(--color-text-secondary)] hover:bg-[var(--color-border)]'
+              }`}
+            >
+              <AdminTabIcon type={tab.iconType} />
+              {tab.label}
+            </button>
           ))}
         </div>
         
@@ -2091,56 +1478,63 @@ export default function Admin() {
                     </div>
                     
                     <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">RAG Context Prompt</label>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">RAG Context Prompt (Legacy/Default)</label>
                       <textarea
                         value={systemSettings.rag_context_prompt}
                         onChange={(e) => setSystemSettings({ ...systemSettings, rag_context_prompt: e.target.value })}
                         rows={2}
                         className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       />
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">Fallback prompt if specific prompts below are empty</p>
+                    </div>
+                    
+                    <div className="col-span-full border-t border-[var(--color-border)] pt-4 mt-2">
+                      <h3 className="text-sm font-semibold text-[var(--color-text)] mb-3">Source-Specific RAG Prompts</h3>
+                      <p className="text-xs text-[var(--color-text-secondary)] mb-4">Use {'{context}'} placeholder for the retrieved content. Use {'{sources}'} for source names (Global KB only).</p>
                     </div>
                     
                     <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
-                        Image Classification Prompt
-                        <span className="ml-2 text-xs text-[var(--color-text-secondary)]">(LLM prompt to detect image generation requests)</span>
-                      </label>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Global Knowledge Base Prompt</label>
                       <textarea
-                        value={systemSettings.image_classification_prompt || ''}
-                        onChange={(e) => setSystemSettings({ ...systemSettings, image_classification_prompt: e.target.value })}
+                        value={systemSettings.rag_prompt_global_kb || ''}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, rag_prompt_global_kb: e.target.value })}
                         rows={4}
-                        placeholder="Leave empty for default. The LLM classifies if the user wants to generate an image."
+                        placeholder="Leave empty for default authoritative prompt. Use {context} and {sources} placeholders."
                         className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                       />
                     </div>
                     
-                    <div className="flex items-center gap-4">
-                      <div className="flex-1">
-                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
-                          Image Classification True Response
-                          <span className="ml-2 text-xs text-[var(--color-text-secondary)]">(Response prefix that means "generate image")</span>
-                        </label>
-                        <input
-                          type="text"
-                          value={systemSettings.image_classification_true_response || ''}
-                          onChange={(e) => setSystemSettings({ ...systemSettings, image_classification_true_response: e.target.value })}
-                          placeholder="YES"
-                          className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                        />
-                      </div>
-                      
-                      <div className="flex items-center gap-2 pt-5">
-                        <input
-                          type="checkbox"
-                          id="image_confirm_with_llm"
-                          checked={systemSettings.image_confirm_with_llm ?? true}
-                          onChange={(e) => setSystemSettings({ ...systemSettings, image_confirm_with_llm: e.target.checked })}
-                          className="w-4 h-4 rounded border-[var(--color-border)] text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
-                        />
-                        <label htmlFor="image_confirm_with_llm" className="text-sm text-[var(--color-text)]">
-                          Enable LLM Confirmation
-                        </label>
-                      </div>
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Custom GPT Knowledge Base Prompt</label>
+                      <textarea
+                        value={systemSettings.rag_prompt_gpt_kb || ''}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, rag_prompt_gpt_kb: e.target.value })}
+                        rows={4}
+                        placeholder="Leave empty to use legacy prompt. Use {context} placeholder."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">User Documents Prompt</label>
+                      <textarea
+                        value={systemSettings.rag_prompt_user_docs || ''}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, rag_prompt_user_docs: e.target.value })}
+                        rows={4}
+                        placeholder="Leave empty to use legacy prompt. Use {context} placeholder."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Chat History Knowledge Prompt</label>
+                      <textarea
+                        value={systemSettings.rag_prompt_chat_history || ''}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, rag_prompt_chat_history: e.target.value })}
+                        rows={4}
+                        placeholder="Leave empty for default chat history prompt. Use {context} placeholder."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
                     </div>
                   </div>
                 </div>
@@ -2778,49 +2172,6 @@ export default function Admin() {
                       </label>
                     </div>
                     
-                    {/* Thinking Tokens Settings */}
-                    <div className="border-t border-[var(--color-border)] pt-4 mt-4">
-                      <h4 className="text-sm font-medium text-[var(--color-text)] mb-3 flex items-center gap-2">
-                        🧠 Thinking Tokens
-                        <span className="text-xs font-normal text-[var(--color-text-secondary)]">
-                          (hide reasoning behind collapsible panel)
-                        </span>
-                      </h4>
-                      
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-xs text-[var(--color-text-secondary)] mb-1">
-                            Think Begin Token
-                          </label>
-                          <input
-                            type="text"
-                            value={llmSettings.think_begin_token}
-                            onChange={(e) => setLLMSettings({ ...llmSettings, think_begin_token: e.target.value })}
-                            placeholder="<think>"
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] font-mono text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                          />
-                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">e.g. &lt;think&gt;, &lt;reasoning&gt;, [thinking]</p>
-                        </div>
-                        
-                        <div>
-                          <label className="block text-xs text-[var(--color-text-secondary)] mb-1">
-                            Think End Token
-                          </label>
-                          <input
-                            type="text"
-                            value={llmSettings.think_end_token}
-                            onChange={(e) => setLLMSettings({ ...llmSettings, think_end_token: e.target.value })}
-                            placeholder="</think>"
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] font-mono text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
-                          />
-                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">e.g. &lt;/think&gt;, &lt;/reasoning&gt;, [/thinking]</p>
-                        </div>
-                      </div>
-                      <p className="text-xs text-[var(--color-text-secondary)] mt-2">
-                        Content between these tokens will be hidden in a collapsible "Thinking..." panel
-                      </p>
-                    </div>
-                    
                     {/* History Compression Settings */}
                     <div className="border-t border-[var(--color-border)] pt-4 mt-4">
                       <h4 className="text-sm font-medium text-[var(--color-text)] mb-3 flex items-center gap-2">
@@ -2934,235 +2285,6 @@ export default function Admin() {
                     {isSaving ? 'Saving...' : 'Save Legacy Settings'}
                   </button>
                 </details>
-              </div>
-            )}
-            
-            {/* BILLING APIS TAB */}
-            {activeTab === 'billing_apis' && billingApiSettings && (
-              <div className="space-y-6">
-                {/* Stripe Section */}
-                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                      <h2 className="text-lg font-semibold text-[var(--color-text)]">Stripe</h2>
-                      <span className={`px-2 py-0.5 rounded text-xs ${billingApiSettings.stripe_enabled ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
-                        {billingApiSettings.stripe_enabled ? 'Enabled' : 'Disabled'}
-                      </span>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={billingApiSettings.stripe_enabled}
-                      onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_enabled: e.target.checked })}
-                      className="w-5 h-5 rounded"
-                    />
-                  </div>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">API Key (Secret)</label>
-                      <input
-                        type="password"
-                        value={billingApiSettings.stripe_api_key}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_api_key: e.target.value })}
-                        placeholder="sk_live_..."
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Publishable Key</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.stripe_publishable_key}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_publishable_key: e.target.value })}
-                        placeholder="pk_live_..."
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Webhook Secret</label>
-                      <input
-                        type="password"
-                        value={billingApiSettings.stripe_webhook_secret}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_webhook_secret: e.target.value })}
-                        placeholder="whsec_..."
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Pro Plan Price ID</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.stripe_pro_price_id}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_pro_price_id: e.target.value })}
-                        placeholder="price_..."
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Enterprise Plan Price ID</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.stripe_enterprise_price_id}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, stripe_enterprise_price_id: e.target.value })}
-                        placeholder="price_..."
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div className="flex items-end">
-                      <button
-                        onClick={testStripeConnection}
-                        disabled={testingStripe || !billingApiSettings.stripe_api_key}
-                        className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-500 disabled:opacity-50 text-sm"
-                      >
-                        {testingStripe ? 'Testing...' : 'Test Connection'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                
-                {/* PayPal Section */}
-                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                      <h2 className="text-lg font-semibold text-[var(--color-text)]">PayPal</h2>
-                      <span className={`px-2 py-0.5 rounded text-xs ${billingApiSettings.paypal_enabled ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
-                        {billingApiSettings.paypal_enabled ? 'Enabled' : 'Disabled'}
-                      </span>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={billingApiSettings.paypal_enabled}
-                      onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_enabled: e.target.checked })}
-                      className="w-5 h-5 rounded"
-                    />
-                  </div>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Client ID</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.paypal_client_id}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_client_id: e.target.value })}
-                        placeholder="Client ID"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Client Secret</label>
-                      <input
-                        type="password"
-                        value={billingApiSettings.paypal_client_secret}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_client_secret: e.target.value })}
-                        placeholder="Client Secret"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Webhook ID</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.paypal_webhook_id}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_webhook_id: e.target.value })}
-                        placeholder="Webhook ID"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Mode</label>
-                      <select
-                        value={billingApiSettings.paypal_mode}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_mode: e.target.value })}
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      >
-                        <option value="sandbox">Sandbox (Testing)</option>
-                        <option value="live">Live (Production)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Pro Plan ID</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.paypal_pro_plan_id}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_pro_plan_id: e.target.value })}
-                        placeholder="Plan ID"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Enterprise Plan ID</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.paypal_enterprise_plan_id}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, paypal_enterprise_plan_id: e.target.value })}
-                        placeholder="Plan ID"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div className="flex items-end">
-                      <button
-                        onClick={testPaypalConnection}
-                        disabled={testingPaypal || !billingApiSettings.paypal_client_id || !billingApiSettings.paypal_client_secret}
-                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 disabled:opacity-50 text-sm"
-                      >
-                        {testingPaypal ? 'Testing...' : 'Test Connection'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                
-                {/* Google Pay Section */}
-                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-3">
-                      <h2 className="text-lg font-semibold text-[var(--color-text)]">Google Pay</h2>
-                      <span className={`px-2 py-0.5 rounded text-xs ${billingApiSettings.google_pay_enabled ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
-                        {billingApiSettings.google_pay_enabled ? 'Enabled' : 'Disabled'}
-                      </span>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={billingApiSettings.google_pay_enabled}
-                      onChange={(e) => setBillingApiSettings({ ...billingApiSettings, google_pay_enabled: e.target.checked })}
-                      className="w-5 h-5 rounded"
-                    />
-                  </div>
-                  
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Merchant ID</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.google_pay_merchant_id}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, google_pay_merchant_id: e.target.value })}
-                        placeholder="Merchant ID"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Merchant Name</label>
-                      <input
-                        type="text"
-                        value={billingApiSettings.google_pay_merchant_name}
-                        onChange={(e) => setBillingApiSettings({ ...billingApiSettings, google_pay_merchant_name: e.target.value })}
-                        placeholder="Your Business Name"
-                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      />
-                    </div>
-                  </div>
-                  <p className="text-xs text-[var(--color-text-secondary)] mt-3">
-                    Note: Google Pay requires Stripe or PayPal as the payment processor. Configure one of them above.
-                  </p>
-                </div>
-                
-                {/* Save Button */}
-                <button
-                  onClick={saveBillingApiSettings}
-                  disabled={isSaving}
-                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
-                >
-                  {isSaving ? 'Saving...' : 'Save Billing API Settings'}
-                </button>
               </div>
             )}
             
@@ -3723,7 +2845,7 @@ export default function Admin() {
                             </button>
                           </td>
                           <td className="px-4 py-3">
-                            <div className="flex gap-2 flex-wrap">
+                            <div className="flex gap-2">
                               <button
                                 onClick={() => { setSelectedUser(u); setUserAction('upgrade'); setShowUserModal(true); }}
                                 className="text-xs px-2 py-1 bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30"
@@ -3736,17 +2858,6 @@ export default function Admin() {
                                 onClick={() => handleResetTokens(u)}
                                 className="text-xs px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded hover:bg-yellow-500/30"
                               >Reset</button>
-                              <button
-                                onClick={() => { 
-                                  setSelectedUser(u); 
-                                  setUserAction('password'); 
-                                  setNewUserPassword('');
-                                  setPasswordSetError(null);
-                                  setPasswordSetSuccess(false);
-                                  setShowUserModal(true); 
-                                }}
-                                className="text-xs px-2 py-1 bg-orange-500/20 text-orange-400 rounded hover:bg-orange-500/30"
-                              >Password</button>
                               <button
                                 onClick={() => handleToggleAdmin(u)}
                                 disabled={u.id === user?.id}
@@ -3999,7 +3110,7 @@ export default function Admin() {
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
                 <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-2xl max-h-[80vh] overflow-y-auto border border-[var(--color-border)]">
                   <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
-                    {userAction === 'upgrade' ? 'Change Tier' : userAction === 'refund' ? 'Add Tokens' : userAction === 'password' ? 'Set Password' : 'User Chats'}
+                    {userAction === 'upgrade' ? 'Change Tier' : userAction === 'refund' ? 'Add Tokens' : 'User Chats'}
                     <span className="text-sm font-normal text-[var(--color-text-secondary)] ml-2">— {selectedUser.email}</span>
                   </h3>
                   
@@ -4033,61 +3144,6 @@ export default function Admin() {
                           +{formatTokens(amount)}
                         </button>
                       ))}
-                    </div>
-                  )}
-                  
-                  {userAction === 'password' && (
-                    <div className="space-y-4">
-                      {passwordSetSuccess && (
-                        <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-green-400">
-                          ✓ Password set successfully
-                        </div>
-                      )}
-                      {passwordSetError && (
-                        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
-                          {passwordSetError}
-                        </div>
-                      )}
-                      <div>
-                        <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
-                          New Password
-                        </label>
-                        <input
-                          type="password"
-                          value={newUserPassword}
-                          onChange={(e) => setNewUserPassword(e.target.value)}
-                          className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
-                          placeholder="At least 8 characters"
-                        />
-                      </div>
-                      <button
-                        onClick={async () => {
-                          if (newUserPassword.length < 8) {
-                            setPasswordSetError('Password must be at least 8 characters');
-                            return;
-                          }
-                          setActionLoading(true);
-                          setPasswordSetError(null);
-                          try {
-                            await api.post(`/admin/users/${selectedUser.id}/set-password`, {
-                              password: newUserPassword
-                            });
-                            setPasswordSetSuccess(true);
-                            setNewUserPassword('');
-                          } catch (err: any) {
-                            setPasswordSetError(err.response?.data?.detail || 'Failed to set password');
-                          } finally {
-                            setActionLoading(false);
-                          }
-                        }}
-                        disabled={actionLoading || newUserPassword.length < 8}
-                        className="px-4 py-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 disabled:opacity-50"
-                      >
-                        {actionLoading ? 'Setting...' : 'Set Password'}
-                      </button>
-                      <p className="text-xs text-[var(--color-text-secondary)]">
-                        This will set or reset the user's password. They can use this to log in without OAuth.
-                      </p>
                     </div>
                   )}
                   
@@ -4865,6 +3921,193 @@ export default function Admin() {
               </div>
             )}
             
+            {/* GPT CATEGORIES TAB */}
+            {activeTab === 'categories' && (
+              <div className="space-y-6">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <div className="flex items-center justify-between mb-4">
+                    <div>
+                      <h3 className="text-lg font-semibold text-[var(--color-text)]">GPT Categories</h3>
+                      <p className="text-sm text-[var(--color-text-secondary)]">
+                        Manage categories for organizing Custom GPTs in the marketplace
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        resetCategoryForm();
+                        setShowCategoryModal(true);
+                      }}
+                      className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90"
+                    >
+                      + Add Category
+                    </button>
+                  </div>
+                  
+                  {categoriesLoading ? (
+                    <div className="text-[var(--color-text-secondary)]">Loading...</div>
+                  ) : gptCategories.length === 0 ? (
+                    <div className="text-center py-8 text-[var(--color-text-secondary)]">
+                      No categories yet. Click "Add Category" to create one.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {gptCategories.map(cat => (
+                        <div
+                          key={cat.id}
+                          className={`flex items-center justify-between p-4 rounded-lg transition-colors ${
+                            cat.is_active 
+                              ? 'bg-[var(--color-background)]' 
+                              : 'bg-[var(--color-background)]/50 opacity-60'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-2xl w-10 text-center">{cat.icon}</span>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium text-[var(--color-text)]">{cat.label}</span>
+                                <code className="text-xs px-2 py-0.5 rounded bg-[var(--color-surface)] text-[var(--color-text-secondary)]">
+                                  {cat.value}
+                                </code>
+                                {!cat.is_active && (
+                                  <span className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
+                                    Disabled
+                                  </span>
+                                )}
+                              </div>
+                              {cat.description && (
+                                <div className="text-sm text-[var(--color-text-secondary)]">{cat.description}</div>
+                              )}
+                            </div>
+                          </div>
+                          
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-[var(--color-text-secondary)] mr-2">
+                              Order: {cat.sort_order}
+                            </span>
+                            <button
+                              onClick={() => startEditCategory(cat)}
+                              className="px-3 py-1 text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] rounded hover:bg-[var(--color-border)]"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => toggleCategoryActive(cat)}
+                              className={`px-3 py-1 text-sm rounded ${
+                                cat.is_active
+                                  ? 'bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30'
+                                  : 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                              }`}
+                            >
+                              {cat.is_active ? 'Disable' : 'Enable'}
+                            </button>
+                            {cat.value !== 'general' && (
+                              <button
+                                onClick={() => deleteCategory(cat)}
+                                className="px-3 py-1 text-sm bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                              >
+                                Delete
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                
+                {/* Category Modal */}
+                {showCategoryModal && (
+                  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                    <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-md border border-[var(--color-border)]">
+                      <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
+                        {editingCategory ? 'Edit Category' : 'New Category'}
+                      </h3>
+                      
+                      <div className="space-y-4">
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                            Value (URL-friendly) {!editingCategory && '*'}
+                          </label>
+                          <input
+                            type="text"
+                            value={categoryForm.value}
+                            onChange={(e) => setCategoryForm({ ...categoryForm, value: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                            placeholder="e.g., data-science"
+                            disabled={!!editingCategory}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] disabled:opacity-50"
+                          />
+                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                            Lowercase letters, numbers, and hyphens only
+                          </p>
+                        </div>
+                        
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Label *</label>
+                          <input
+                            type="text"
+                            value={categoryForm.label}
+                            onChange={(e) => setCategoryForm({ ...categoryForm, label: e.target.value })}
+                            placeholder="e.g., Data Science"
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Icon (emoji)</label>
+                          <input
+                            type="text"
+                            value={categoryForm.icon}
+                            onChange={(e) => setCategoryForm({ ...categoryForm, icon: e.target.value })}
+                            placeholder="📁"
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Description</label>
+                          <input
+                            type="text"
+                            value={categoryForm.description}
+                            onChange={(e) => setCategoryForm({ ...categoryForm, description: e.target.value })}
+                            placeholder="Optional description..."
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Sort Order</label>
+                          <input
+                            type="number"
+                            value={categoryForm.sort_order}
+                            onChange={(e) => setCategoryForm({ ...categoryForm, sort_order: parseInt(e.target.value) || 0 })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                          />
+                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                            Lower numbers appear first
+                          </p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex justify-end gap-3 mt-6">
+                        <button
+                          onClick={resetCategoryForm}
+                          className="px-4 py-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={saveCategory}
+                          className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90"
+                        >
+                          {editingCategory ? 'Save Changes' : 'Create Category'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            
             {/* SITE DEV TAB */}
             {activeTab === 'dev' && (
               <div className="space-y-6">
@@ -4998,313 +4241,6 @@ export default function Admin() {
                     </div>
                   )}
                 </div>
-                
-                {/* Security Settings */}
-                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Security Settings</h3>
-                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
-                    Configure security-related settings. Changes may require a server restart.
-                  </p>
-                  
-                  {securitySettingsLoading ? (
-                    <div className="text-[var(--color-text-secondary)]">Loading...</div>
-                  ) : (
-                    <div className="space-y-6">
-                      {/* SECRET_KEY */}
-                      <div>
-                        <label className="block text-sm font-medium text-[var(--color-text)] mb-2">
-                          SECRET_KEY
-                        </label>
-                        <p className="text-xs text-[var(--color-text-secondary)] mb-2">
-                          Used for JWT token signing. Auto-generated keys change on restart, invalidating all sessions.
-                          Set a stable key for production.
-                        </p>
-                        <div className="flex gap-2">
-                          <div className="relative flex-1">
-                            <input
-                              type={secretKeyMasked ? "password" : "text"}
-                              value={secretKey}
-                              onChange={(e) => setSecretKey(e.target.value)}
-                              placeholder="Enter or generate a secret key"
-                              className="w-full px-3 py-2 pr-10 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] font-mono text-sm"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setSecretKeyMasked(!secretKeyMasked)}
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-                              title={secretKeyMasked ? "Show" : "Hide"}
-                            >
-                              {secretKeyMasked ? (
-                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                                </svg>
-                              ) : (
-                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                                </svg>
-                              )}
-                            </button>
-                          </div>
-                          <button
-                            onClick={generateSecretKey}
-                            className="px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] hover:bg-[var(--color-surface)] text-sm"
-                            title="Generate new key"
-                          >
-                            Generate
-                          </button>
-                          <button
-                            onClick={saveSecretKey}
-                            className="px-4 py-2 bg-[var(--color-primary)] text-white rounded-lg hover:opacity-90 text-sm"
-                          >
-                            Save
-                          </button>
-                        </div>
-                        <p className="text-xs text-yellow-500 mt-2">
-                          ⚠️ Changing SECRET_KEY will invalidate all existing sessions. Users will need to log in again.
-                        </p>
-                      </div>
-                      
-                      {/* Logging Level */}
-                      <div>
-                        <label className="block text-sm font-medium text-[var(--color-text)] mb-2">
-                          Log Level
-                        </label>
-                        <p className="text-xs text-[var(--color-text-secondary)] mb-2">
-                          Controls the verbosity of server logs. DEBUG includes sensitive information and should only be used for development.
-                        </p>
-                        <select
-                          value={loggingLevel}
-                          onChange={(e) => saveLoggingLevel(e.target.value)}
-                          className="w-full max-w-xs px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
-                        >
-                          <option value="DEBUG">DEBUG (verbose, includes sensitive data)</option>
-                          <option value="INFO">INFO (standard)</option>
-                          <option value="WARNING">WARNING (warnings and errors only)</option>
-                          <option value="ERROR">ERROR (errors only)</option>
-                        </select>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-            
-            {/* BRANDING TAB */}
-            {activeTab === 'branding' && (
-              <div className="space-y-6">
-                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Application Branding</h2>
-                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
-                    Customize the look and feel of your application. Changes will apply to all users.
-                  </p>
-                  
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
-                        Application Name
-                      </label>
-                      <input
-                        type="text"
-                        value={brandingSettings.app_name}
-                        onChange={(e) => setBrandingSettings({ ...brandingSettings, app_name: e.target.value })}
-                        className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
-                        placeholder="Open-NueChat"
-                      />
-                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-                        Replaces "Open-NueChat" throughout the application
-                      </p>
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
-                        Tagline
-                      </label>
-                      <input
-                        type="text"
-                        value={brandingSettings.app_tagline}
-                        onChange={(e) => setBrandingSettings({ ...brandingSettings, app_tagline: e.target.value })}
-                        className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
-                        placeholder="AI-Powered Chat"
-                      />
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
-                        Favicon
-                      </label>
-                      <div className="flex items-center gap-3">
-                        {brandingSettings.favicon_url && (
-                          <img 
-                            src={brandingSettings.favicon_url} 
-                            alt="Current favicon" 
-                            className="w-8 h-8 rounded border border-[var(--color-border)]"
-                            onError={(e) => (e.currentTarget.style.display = 'none')}
-                          />
-                        )}
-                        <input
-                          type="text"
-                          value={brandingSettings.favicon_url}
-                          onChange={(e) => setBrandingSettings({ ...brandingSettings, favicon_url: e.target.value })}
-                          className="flex-1 px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
-                          placeholder="https://example.com/favicon.ico or upload below"
-                        />
-                      </div>
-                      <div className="mt-2 flex items-center gap-2">
-                        <label className="px-3 py-1.5 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg cursor-pointer hover:opacity-90 text-sm">
-                          Upload Favicon
-                          <input
-                            type="file"
-                            accept="image/png,image/jpeg,image/x-icon,image/svg+xml,.ico"
-                            className="hidden"
-                            onChange={async (e) => {
-                              const file = e.target.files?.[0];
-                              if (!file) return;
-                              
-                              const formData = new FormData();
-                              formData.append('file', file);
-                              
-                              try {
-                                const res = await api.post('/admin/settings/branding/favicon', formData, {
-                                  headers: { 'Content-Type': 'multipart/form-data' }
-                                });
-                                setBrandingSettings({ ...brandingSettings, favicon_url: res.data.url });
-                                setSuccess('Favicon uploaded successfully');
-                                setTimeout(() => setSuccess(null), 3000);
-                                
-                                // Apply immediately
-                                const { loadConfig } = useBrandingStore.getState();
-                                await loadConfig(true);
-                              } catch (err: any) {
-                                setError(err.response?.data?.detail || 'Failed to upload favicon');
-                              }
-                            }}
-                          />
-                        </label>
-                        <span className="text-xs text-[var(--color-text-secondary)]">
-                          PNG, JPG, ICO, or SVG (max 1MB)
-                        </span>
-                      </div>
-                    </div>
-                    
-                    <div>
-                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
-                        Logo
-                      </label>
-                      <div className="flex items-center gap-3">
-                        {brandingSettings.logo_url && (
-                          <img 
-                            src={brandingSettings.logo_url} 
-                            alt="Current logo" 
-                            className="h-8 max-w-32 rounded border border-[var(--color-border)] object-contain"
-                            onError={(e) => (e.currentTarget.style.display = 'none')}
-                          />
-                        )}
-                        <input
-                          type="text"
-                          value={brandingSettings.logo_url}
-                          onChange={(e) => setBrandingSettings({ ...brandingSettings, logo_url: e.target.value })}
-                          className="flex-1 px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)]"
-                          placeholder="https://example.com/logo.png or upload below"
-                        />
-                      </div>
-                      <div className="mt-2 flex items-center gap-2">
-                        <label className="px-3 py-1.5 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg cursor-pointer hover:opacity-90 text-sm">
-                          Upload Logo
-                          <input
-                            type="file"
-                            accept="image/png,image/jpeg,image/svg+xml"
-                            className="hidden"
-                            onChange={async (e) => {
-                              const file = e.target.files?.[0];
-                              if (!file) return;
-                              
-                              const formData = new FormData();
-                              formData.append('file', file);
-                              
-                              try {
-                                const res = await api.post('/admin/settings/branding/logo', formData, {
-                                  headers: { 'Content-Type': 'multipart/form-data' }
-                                });
-                                setBrandingSettings({ ...brandingSettings, logo_url: res.data.url });
-                                setSuccess('Logo uploaded successfully');
-                                setTimeout(() => setSuccess(null), 3000);
-                                
-                                // Apply immediately
-                                const { loadConfig } = useBrandingStore.getState();
-                                await loadConfig(true);
-                              } catch (err: any) {
-                                setError(err.response?.data?.detail || 'Failed to upload logo');
-                              }
-                            }}
-                          />
-                        </label>
-                        <span className="text-xs text-[var(--color-text-secondary)]">
-                          PNG, JPG, or SVG (max 2MB)
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Custom Themes</h2>
-                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
-                    Create and edit custom color themes visually.
-                  </p>
-                  
-                  <ThemeEditor 
-                    themes={brandingSettings.custom_themes}
-                    onChange={(themes) => setBrandingSettings({ ...brandingSettings, custom_themes: themes })}
-                  />
-                </div>
-                
-                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Custom CSS</h2>
-                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
-                    Add custom CSS rules that will be injected into the application.
-                  </p>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-[var(--color-text)] mb-1">
-                      Custom CSS
-                    </label>
-                    <textarea
-                      value={brandingSettings.custom_css}
-                      onChange={(e) => setBrandingSettings({ ...brandingSettings, custom_css: e.target.value })}
-                      rows={8}
-                      className="w-full px-3 py-2 bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg text-[var(--color-text)] font-mono text-sm"
-                      placeholder={`/* Custom styles */
-.sidebar-header {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}`}
-                    />
-                  </div>
-                </div>
-                
-                <button
-                  onClick={async () => {
-                    setIsSaving(true);
-                    try {
-                      await api.post('/admin/settings/branding', brandingSettings);
-                      
-                      // Apply branding immediately without requiring reload
-                      const { loadConfig } = useBrandingStore.getState();
-                      await loadConfig(true);  // Force reload from server
-                      
-                      setSuccess('Branding settings saved and applied');
-                      setTimeout(() => setSuccess(null), 3000);
-                    } catch (err: any) {
-                      setError(err.response?.data?.detail || 'Failed to save branding settings');
-                    } finally {
-                      setIsSaving(false);
-                    }
-                  }}
-                  disabled={isSaving}
-                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
-                >
-                  {isSaving ? 'Saving...' : 'Save Branding Settings'}
-                </button>
               </div>
             )}
           </>

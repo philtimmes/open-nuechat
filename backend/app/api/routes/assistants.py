@@ -7,12 +7,18 @@ with specific objectives, knowledge bases, and tools.
 
 from typing import List, Optional
 from datetime import datetime, timezone, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, text
 from sqlalchemy.orm import selectinload
 import re
+import os
+import uuid
+from pathlib import Path
+from PIL import Image
+import io
 
 from app.db.database import get_db
 from app.api.dependencies import get_current_user
@@ -20,8 +26,13 @@ from app.models.models import (
     User, CustomAssistant, KnowledgeStore, 
     AssistantConversation, Chat, assistant_knowledge_stores
 )
+from app.core.config import settings
 
 router = APIRouter()
+
+# Avatar storage directory
+AVATAR_DIR = Path(settings.UPLOAD_DIR) / "avatars"
+AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Test route to verify router is loaded
@@ -29,6 +40,127 @@ router = APIRouter()
 async def test_assistants_router():
     """Test endpoint to verify assistants router is loaded"""
     return {"status": "ok", "router": "assistants"}
+
+
+# === Avatar Upload ===
+
+@router.post("/{assistant_id}/avatar")
+async def upload_avatar(
+    assistant_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Upload an avatar image for an assistant.
+    Image is resized to 64x64 pixels.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Verify ownership
+    result = await db.execute(
+        select(CustomAssistant).where(CustomAssistant.id == assistant_id)
+    )
+    assistant = result.scalar_one_or_none()
+    
+    if not assistant:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+    
+    if assistant.owner_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Not authorized to modify this assistant")
+    
+    # Validate file type
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    
+    allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Allowed formats: JPEG, PNG, GIF, WebP")
+    
+    try:
+        # Read image data
+        image_data = await file.read()
+        
+        # Open and resize image to 64x64
+        img = Image.open(io.BytesIO(image_data))
+        
+        # Convert to RGB if necessary (for JPEG compatibility)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        
+        # Resize to 64x64 with high-quality resampling
+        img = img.resize((64, 64), Image.Resampling.LANCZOS)
+        
+        # Generate unique filename
+        file_id = str(uuid.uuid4())[:8]
+        filename = f"{assistant_id}_{file_id}.jpg"
+        filepath = AVATAR_DIR / filename
+        
+        # Delete old avatar if exists
+        if assistant.avatar_url:
+            old_filename = assistant.avatar_url.split("/")[-1]
+            old_path = AVATAR_DIR / old_filename
+            if old_path.exists():
+                old_path.unlink()
+        
+        # Save resized image
+        img.save(filepath, "JPEG", quality=90)
+        
+        # Update assistant with avatar URL
+        avatar_url = f"/api/assistants/avatars/{filename}"
+        assistant.avatar_url = avatar_url
+        await db.commit()
+        
+        logger.info(f"Avatar uploaded for assistant {assistant_id}: {filename}")
+        
+        return {
+            "avatar_url": avatar_url,
+            "message": "Avatar uploaded successfully"
+        }
+        
+    except Exception as e:
+        logger.exception(f"Failed to process avatar: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process image")
+
+
+@router.get("/avatars/{filename}")
+async def get_avatar(filename: str):
+    """Serve avatar images"""
+    filepath = AVATAR_DIR / filename
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Avatar not found")
+    return FileResponse(filepath, media_type="image/jpeg")
+
+
+@router.delete("/{assistant_id}/avatar")
+async def delete_avatar(
+    assistant_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an assistant's avatar"""
+    result = await db.execute(
+        select(CustomAssistant).where(CustomAssistant.id == assistant_id)
+    )
+    assistant = result.scalar_one_or_none()
+    
+    if not assistant:
+        raise HTTPException(status_code=404, detail="Assistant not found")
+    
+    if assistant.owner_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Not authorized to modify this assistant")
+    
+    if assistant.avatar_url:
+        filename = assistant.avatar_url.split("/")[-1]
+        filepath = AVATAR_DIR / filename
+        if filepath.exists():
+            filepath.unlink()
+        
+        assistant.avatar_url = None
+        await db.commit()
+    
+    return {"message": "Avatar deleted"}
 
 
 # === Default Assistant Seeding ===
@@ -139,6 +271,7 @@ class AssistantCreate(BaseModel):
     # Visibility
     is_public: bool = False
     is_discoverable: bool = False
+    category: str = Field(default="general", max_length=50)
 
 
 class AssistantResponse(BaseModel):
@@ -168,6 +301,7 @@ class AssistantResponse(BaseModel):
     is_public: bool
     is_discoverable: bool
     is_featured: bool
+    category: str
     
     conversation_count: int
     message_count: int
@@ -208,6 +342,7 @@ class AssistantUpdate(BaseModel):
     
     is_public: Optional[bool] = None
     is_discoverable: Optional[bool] = None
+    category: Optional[str] = Field(None, max_length=50)
 
 
 class AssistantPublicInfo(BaseModel):
@@ -381,6 +516,7 @@ async def create_assistant(
         enabled_tools=request.enabled_tools,
         is_public=request.is_public,
         is_discoverable=request.is_discoverable,
+        category=request.category,
     )
     
     db.add(assistant)
@@ -732,6 +868,221 @@ async def get_subscription_stats(
     
     return stats
 
+
+# === Category Management ===
+# NOTE: These routes MUST be defined BEFORE /{assistant_id} routes to avoid path conflicts
+
+class CategoryCreate(BaseModel):
+    """Create a new category"""
+    value: str = Field(..., min_length=1, max_length=50, pattern=r'^[a-z0-9-]+$')
+    label: str = Field(..., min_length=1, max_length=100)
+    icon: str = Field(default="📁", max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    sort_order: int = Field(default=0)
+
+
+class CategoryUpdate(BaseModel):
+    """Update a category"""
+    label: Optional[str] = Field(None, min_length=1, max_length=100)
+    icon: Optional[str] = Field(None, max_length=50)
+    description: Optional[str] = Field(None, max_length=255)
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class CategoryResponse(BaseModel):
+    """Category info"""
+    id: str
+    value: str
+    label: str
+    icon: str = "📁"
+    description: Optional[str] = None
+    sort_order: int = 0
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True
+
+
+async def seed_default_categories(db: AsyncSession):
+    """Seed default categories if none exist"""
+    from app.models import AssistantCategory
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    defaults = [
+        {"value": "general", "label": "General", "icon": "🤖", "sort_order": 0},
+        {"value": "writing", "label": "Writing", "icon": "✍️", "sort_order": 1},
+        {"value": "coding", "label": "Coding", "icon": "💻", "sort_order": 2},
+        {"value": "research", "label": "Research", "icon": "🔬", "sort_order": 3},
+        {"value": "education", "label": "Education", "icon": "📚", "sort_order": 4},
+        {"value": "business", "label": "Business", "icon": "💼", "sort_order": 5},
+        {"value": "creative", "label": "Creative", "icon": "🎨", "sort_order": 6},
+        {"value": "productivity", "label": "Productivity", "icon": "⚡", "sort_order": 7},
+        {"value": "lifestyle", "label": "Lifestyle", "icon": "🌟", "sort_order": 8},
+        {"value": "other", "label": "Other", "icon": "📁", "sort_order": 99},
+    ]
+    
+    for cat_data in defaults:
+        cat = AssistantCategory(**cat_data)
+        db.add(cat)
+    
+    await db.commit()
+    logger.info("Seeded default assistant categories")
+
+
+@router.get("/categories", response_model=List[CategoryResponse])
+async def list_categories(
+    include_inactive: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """List all assistant categories (public endpoint)"""
+    from app.models import AssistantCategory
+    
+    query = select(AssistantCategory)
+    if not include_inactive:
+        query = query.where(AssistantCategory.is_active != False)
+    query = query.order_by(AssistantCategory.sort_order, AssistantCategory.label)
+    
+    result = await db.execute(query)
+    categories = result.scalars().all()
+    
+    # If no categories exist, seed defaults
+    if not categories:
+        await seed_default_categories(db)
+        result = await db.execute(query)
+        categories = result.scalars().all()
+    
+    return [CategoryResponse.model_validate(c) for c in categories]
+
+
+@router.post("/categories", response_model=CategoryResponse)
+async def create_category(
+    request: CategoryCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new category (admin only)"""
+    from app.models import AssistantCategory
+    
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    # Check if value already exists
+    result = await db.execute(
+        select(AssistantCategory).where(AssistantCategory.value == request.value)
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Category with value '{request.value}' already exists"
+        )
+    
+    category = AssistantCategory(
+        value=request.value,
+        label=request.label,
+        icon=request.icon,
+        description=request.description,
+        sort_order=request.sort_order,
+    )
+    
+    db.add(category)
+    await db.commit()
+    await db.refresh(category)
+    
+    return CategoryResponse.model_validate(category)
+
+
+@router.patch("/categories/{category_id}", response_model=CategoryResponse)
+async def update_category(
+    category_id: str,
+    request: CategoryUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a category (admin only)"""
+    from app.models import AssistantCategory
+    
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    result = await db.execute(
+        select(AssistantCategory).where(AssistantCategory.id == category_id)
+    )
+    category = result.scalar_one_or_none()
+    
+    if not category:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Category not found"
+        )
+    
+    # Update fields
+    update_data = request.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(category, field, value)
+    
+    await db.commit()
+    await db.refresh(category)
+    
+    return CategoryResponse.model_validate(category)
+
+
+@router.delete("/categories/{category_id}")
+async def delete_category(
+    category_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a category (admin only). Assistants using this category will be set to 'general'."""
+    from app.models import AssistantCategory
+    
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    
+    result = await db.execute(
+        select(AssistantCategory).where(AssistantCategory.id == category_id)
+    )
+    category = result.scalar_one_or_none()
+    
+    if not category:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Category not found"
+        )
+    
+    # Don't allow deleting 'general' category
+    if category.value == "general":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete the 'general' category"
+        )
+    
+    # Update any assistants using this category to 'general'
+    await db.execute(
+        text("UPDATE custom_assistants SET category = 'general' WHERE category = :cat_value"),
+        {"cat_value": category.value}
+    )
+    
+    await db.delete(category)
+    await db.commit()
+    
+    return {"message": f"Category '{category.label}' deleted", "reassigned_to": "general"}
+
+
+# === Individual Assistant Routes ===
+# NOTE: These /{assistant_id} routes must come AFTER /categories routes
 
 @router.get("/{assistant_id}", response_model=AssistantResponse)
 async def get_assistant(

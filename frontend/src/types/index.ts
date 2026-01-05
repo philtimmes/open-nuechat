@@ -63,7 +63,6 @@ export interface Artifact {
   size?: number;
   signatures?: CodeSignature[];
   source?: 'upload' | 'generated';  // Track origin for filtering
-  hidden?: boolean;  // Hidden from user but searchable by LLM (e.g., agent context files)
 }
 
 export interface CodeSignature {
@@ -112,8 +111,6 @@ export interface Message {
   artifacts?: Artifact[];
   input_tokens?: number;
   output_tokens?: number;
-  time_to_first_token?: number;  // milliseconds
-  time_to_complete?: number;  // milliseconds
   created_at: string;
   // Tree structure for conversation branching
   parent_id?: string | null;
@@ -242,6 +239,7 @@ export interface KnowledgeStore {
   color: string;
   is_public: boolean;
   is_discoverable: boolean;
+  is_global?: boolean;  // Auto-searched on every query (admin-only setting)
   document_count: number;
   total_chunks: number;
   total_size_bytes: number;
@@ -280,6 +278,7 @@ export interface CustomAssistant {
   is_public: boolean;
   is_discoverable: boolean;
   is_featured: boolean;
+  category: string;
   conversation_count: number;
   message_count: number;
   average_rating: number;
@@ -411,13 +410,11 @@ export interface FileChange {
 }
 
 export interface SignatureWarning {
-  type: 'missing' | 'mismatch' | 'orphan' | 'library_not_found' | 'log_error';
+  type: 'missing' | 'mismatch' | 'orphan' | 'library_not_found';
   message: string;
   file?: string;
   signature?: string;
   suggestion?: string;
-  errorSummary?: string;  // For log_error type: detailed error context
-  errorCount?: number;    // For log_error type: number of errors found
 }
 
 export interface CodeSummary {

@@ -31,9 +31,8 @@ logger = logging.getLogger(__name__)
 AGENT_FILE_PREFIX = "{Agent"
 AGENT_FILE_SUFFIX = "}.md"
 
-# Token thresholds - defaults now much lower for practical compression
-# Can be overridden via admin settings
-DEFAULT_TOKEN_THRESHOLD = 8000  # Compress when history exceeds this many tokens
+# Token thresholds
+DEFAULT_TOKEN_THRESHOLD_PERCENT = 50  # Compress when history > 50% of model context
 CHARS_PER_TOKEN = 4  # Rough estimate
 
 
@@ -72,10 +71,9 @@ def is_agent_file(filename: str) -> bool:
 class AgentMemoryService:
     """Service for managing agent memory files"""
     
-    def __init__(self, model_context_size: int = 128000, threshold_tokens: int = None):
+    def __init__(self, model_context_size: int = 128000):
         self.model_context_size = model_context_size
-        # Use explicit threshold if provided, otherwise default
-        self.threshold_tokens = threshold_tokens if threshold_tokens is not None else DEFAULT_TOKEN_THRESHOLD
+        self.threshold_tokens = int(model_context_size * DEFAULT_TOKEN_THRESHOLD_PERCENT / 100)
     
     async def get_next_agent_number(self, db: AsyncSession, chat_id: str) -> int:
         """Get the next available agent file number for a chat"""
@@ -367,25 +365,16 @@ async def compress_chat_history(
     api_key: str,
     model_context_size: int = 128000,
     keep_recent: int = 10,
-    threshold_tokens: int = None,
 ) -> Tuple[List[Dict], bool]:
     """
     Main entry point for compressing chat history.
     
-    Args:
-        threshold_tokens: Compress when history exceeds this token count.
-                         Defaults to 8000 if not specified.
-    
     Returns:
         Tuple of (compressed_messages, was_compressed)
     """
-    service = AgentMemoryService(model_context_size, threshold_tokens=threshold_tokens)
+    service = AgentMemoryService(model_context_size)
     
-    current_tokens = estimate_message_tokens(messages)
-    should = service.should_compress(messages)
-    logger.info(f"[AGENT_MEMORY] Check: {current_tokens} tokens, threshold={service.threshold_tokens}, should_compress={should}")
-    
-    if not should:
+    if not service.should_compress(messages):
         return messages, False
     
     # Split messages: system, to_compress, to_keep

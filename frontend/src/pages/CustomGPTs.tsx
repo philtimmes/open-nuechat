@@ -37,7 +37,17 @@ export default function CustomGPTs() {
     is_public: false,
     is_discoverable: false,
     knowledge_store_ids: [] as string[],
+    category: 'general',
   });
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  
+  // Filter/sort state for explore tab
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [sortBy, setSortBy] = useState<'popularity' | 'updated' | 'alphabetical'>('popularity');
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 12;
   
   useEffect(() => {
     fetchModels();
@@ -170,14 +180,34 @@ export default function CustomGPTs() {
         knowledge_store_ids: formData.knowledge_store_ids,
         is_public: formData.is_public,
         is_discoverable: formData.is_discoverable,
+        category: formData.category,
       };
       
       console.log('Submitting assistant data:', data);
       
+      let assistantId: string;
       if (editingGpt) {
         await api.patch(`/assistants/${editingGpt.id}`, data);
+        assistantId = editingGpt.id;
       } else {
-        await api.post('/assistants', data);
+        const res = await api.post('/assistants', data);
+        assistantId = res.data.id;
+      }
+      
+      // Upload avatar if selected
+      if (avatarFile) {
+        setUploadingAvatar(true);
+        const avatarFormData = new FormData();
+        avatarFormData.append('file', avatarFile);
+        try {
+          await api.post(`/assistants/${assistantId}/avatar`, avatarFormData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
+        } catch (err) {
+          console.error('Failed to upload avatar:', err);
+          // Don't fail the whole operation for avatar upload failure
+        }
+        setUploadingAvatar(false);
       }
       
       await fetchData();
@@ -289,7 +319,10 @@ export default function CustomGPTs() {
       is_public: gpt.is_public,
       is_discoverable: gpt.is_discoverable,
       knowledge_store_ids: gpt.knowledge_store_ids || [],
+      category: gpt.category || 'general',
     });
+    setAvatarPreview(gpt.avatar_url || null);
+    setAvatarFile(null);
     setShowForm(true);
   };
   
@@ -310,7 +343,10 @@ export default function CustomGPTs() {
       is_public: false,
       is_discoverable: false,
       knowledge_store_ids: [],
+      category: 'general',
     });
+    setAvatarFile(null);
+    setAvatarPreview(null);
   };
   
   const addSuggestedPrompt = () => {
@@ -340,10 +376,101 @@ export default function CustomGPTs() {
     setFormData({ ...formData, knowledge_store_ids: ids });
   };
   
-  const filteredPublicGpts = publicGpts.filter(gpt =>
-    gpt.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    gpt.tagline?.toLowerCase().includes(searchQuery.toLowerCase())
+  // Handle avatar file selection
+  const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (!file.type.startsWith('image/')) {
+        setError('Please select an image file');
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        setError('Image must be less than 5MB');
+        return;
+      }
+      setAvatarFile(file);
+      setAvatarPreview(URL.createObjectURL(file));
+    }
+  };
+  
+  // Category options - fetched from API
+  const [categories, setCategories] = useState<{ value: string; label: string; icon?: string }[]>([
+    { value: 'general', label: 'General' }, // Fallback default
+  ]);
+  
+  // Fetch categories on mount
+  useEffect(() => {
+    const fetchCategories = async () => {
+      try {
+        const res = await api.get('/assistants/categories');
+        if (res.data && res.data.length > 0) {
+          setCategories(res.data.map((c: { value: string; label: string; icon: string }) => ({
+            value: c.value,
+            label: c.label,
+            icon: c.icon,
+          })));
+        }
+      } catch (err) {
+        console.error('Failed to fetch categories:', err);
+        // Keep fallback categories
+      }
+    };
+    fetchCategories();
+  }, []);
+  
+  // Filter and sort public GPTs
+  const filteredAndSortedGpts = (() => {
+    let filtered = publicGpts.filter(gpt => {
+      // Search filter
+      const matchesSearch = !searchQuery || 
+        gpt.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        gpt.tagline?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        gpt.description?.toLowerCase().includes(searchQuery.toLowerCase());
+      
+      // Category filter
+      const matchesCategory = categoryFilter === 'all' || gpt.category === categoryFilter;
+      
+      return matchesSearch && matchesCategory;
+    });
+    
+    // Sort
+    switch (sortBy) {
+      case 'popularity':
+        filtered.sort((a, b) => b.conversation_count - a.conversation_count);
+        break;
+      case 'updated':
+        filtered.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+        break;
+      case 'alphabetical':
+        filtered.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+    }
+    
+    return filtered;
+  })();
+  
+  // Pagination
+  const totalPages = Math.ceil(filteredAndSortedGpts.length / itemsPerPage);
+  const paginatedGpts = filteredAndSortedGpts.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
   );
+  
+  // Reset to page 1 when filters change
+  const handleFilterChange = (filter: string) => {
+    setCategoryFilter(filter);
+    setCurrentPage(1);
+  };
+  
+  const handleSortChange = (sort: 'popularity' | 'updated' | 'alphabetical') => {
+    setSortBy(sort);
+    setCurrentPage(1);
+  };
+  
+  const handleSearchChange = (query: string) => {
+    setSearchQuery(query);
+    setCurrentPage(1);
+  };
   
   const iconOptions = ['AI', 'ML', 'BOT', 'PRO', 'DOC', 'DEV', 'BIZ', 'ART', 'SCI', 'ENG', 'OPS', 'FIN'];
   
@@ -437,12 +564,20 @@ export default function CustomGPTs() {
                     className="bg-[var(--color-surface)] rounded-xl p-5 border border-[var(--color-border)] hover:border-[var(--color-text-secondary)]/30 transition-all group"
                   >
                     <div className="flex items-start gap-4">
-                      <div
-                        className="w-14 h-14 rounded-xl flex items-center justify-center text-3xl flex-shrink-0"
-                        style={{ backgroundColor: `${gpt.color}20` }}
-                      >
-                        {gpt.icon}
-                      </div>
+                      {gpt.avatar_url ? (
+                        <img
+                          src={gpt.avatar_url}
+                          alt={gpt.name}
+                          className="w-14 h-14 rounded-xl object-cover flex-shrink-0"
+                        />
+                      ) : (
+                        <div
+                          className="w-14 h-14 rounded-xl flex items-center justify-center text-3xl flex-shrink-0"
+                          style={{ backgroundColor: `${gpt.color}20` }}
+                        >
+                          {gpt.icon}
+                        </div>
+                      )}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <h3 className="font-semibold text-[var(--color-text)] truncate">{gpt.name}</h3>
@@ -456,6 +591,7 @@ export default function CustomGPTs() {
                           <p className="text-sm text-[var(--color-text-secondary)] truncate">{gpt.tagline}</p>
                         )}
                         <div className="flex items-center gap-3 mt-2 text-xs text-[var(--color-text-secondary)]">
+                          <span className="px-2 py-0.5 rounded-full bg-[var(--color-background)] capitalize">{gpt.category || 'general'}</span>
                           <span>{gpt.conversation_count} chats</span>
                           {gpt.average_rating > 0 && (
                             <span>⭐ {gpt.average_rating.toFixed(1)}</span>
@@ -496,7 +632,9 @@ export default function CustomGPTs() {
         {/* Explore Marketplace Tab */}
         {activeTab === 'explore' && (
           <>
-            <div className="mb-6">
+            {/* Search and Filters */}
+            <div className="mb-6 space-y-4">
+              {/* Search */}
               <div className="relative">
                 <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -504,10 +642,70 @@ export default function CustomGPTs() {
                 <input
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => handleSearchChange(e.target.value)}
                   placeholder="Search Custom GPTs..."
                   className="w-full pl-10 pr-4 py-3 rounded-lg bg-[var(--color-surface)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-zinc-500/50 focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                 />
+              </div>
+              
+              {/* Categories and Sort */}
+              <div className="flex flex-wrap items-center gap-3">
+                {/* Category Filter */}
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-[var(--color-text-secondary)]">Category:</span>
+                  <select
+                    value={categoryFilter}
+                    onChange={(e) => handleFilterChange(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                  >
+                    <option value="all">All Categories</option>
+                    {categories.map(cat => (
+                      <option key={cat.value} value={cat.value}>{cat.label}</option>
+                    ))}
+                  </select>
+                </div>
+                
+                {/* Sort */}
+                <div className="flex items-center gap-2 ml-auto">
+                  <span className="text-sm text-[var(--color-text-secondary)]">Sort:</span>
+                  <div className="flex bg-[var(--color-background)] rounded-lg p-1 border border-[var(--color-border)]">
+                    <button
+                      onClick={() => handleSortChange('popularity')}
+                      className={`px-3 py-1 text-sm rounded-md transition-colors ${
+                        sortBy === 'popularity'
+                          ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                          : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
+                      }`}
+                    >
+                      Popular
+                    </button>
+                    <button
+                      onClick={() => handleSortChange('updated')}
+                      className={`px-3 py-1 text-sm rounded-md transition-colors ${
+                        sortBy === 'updated'
+                          ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                          : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
+                      }`}
+                    >
+                      Recent
+                    </button>
+                    <button
+                      onClick={() => handleSortChange('alphabetical')}
+                      className={`px-3 py-1 text-sm rounded-md transition-colors ${
+                        sortBy === 'alphabetical'
+                          ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                          : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text)]'
+                      }`}
+                    >
+                      A-Z
+                    </button>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Results count */}
+              <div className="text-sm text-[var(--color-text-secondary)]">
+                {filteredAndSortedGpts.length} {filteredAndSortedGpts.length === 1 ? 'GPT' : 'GPTs'} found
               </div>
             </div>
             
@@ -518,70 +716,78 @@ export default function CustomGPTs() {
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                 </svg>
               </div>
-            ) : filteredPublicGpts.length === 0 ? (
+            ) : paginatedGpts.length === 0 ? (
               <div className="text-center py-12 bg-[var(--color-surface)] rounded-xl border border-[var(--color-border)]">
                 <svg className="w-12 h-12 mx-auto mb-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
                 </svg>
-                <p className="text-[var(--color-text-secondary)]">No public GPTs found</p>
-                <p className="text-zinc-500/60 text-sm mt-1">Be the first to publish one!</p>
+                <p className="text-[var(--color-text-secondary)]">No GPTs found</p>
+                <p className="text-zinc-500/60 text-sm mt-1">Try adjusting your filters or be the first to publish one!</p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {filteredPublicGpts.map((gpt) => (
-                  <div
-                    key={gpt.id}
-                    className="bg-[var(--color-surface)] rounded-xl p-5 border border-[var(--color-border)] hover:border-[var(--color-text-secondary)]/30 transition-all"
-                  >
-                    <div className="flex items-start gap-3 mb-3">
-                      <div
-                        className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl flex-shrink-0"
-                        style={{ backgroundColor: `${gpt.color}20` }}
-                      >
-                        {gpt.icon}
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {paginatedGpts.map((gpt) => (
+                    <div
+                      key={gpt.id}
+                      className="bg-[var(--color-surface)] rounded-xl p-5 border border-[var(--color-border)] hover:border-[var(--color-text-secondary)]/30 transition-all"
+                    >
+                      <div className="flex items-start gap-3 mb-3">
+                        {gpt.avatar_url ? (
+                          <img
+                            src={gpt.avatar_url}
+                            alt={gpt.name}
+                            className="w-12 h-12 rounded-xl object-cover flex-shrink-0"
+                          />
+                        ) : (
+                          <div
+                            className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl flex-shrink-0"
+                            style={{ backgroundColor: `${gpt.color}20` }}
+                          >
+                            {gpt.icon}
+                          </div>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <h3 className="font-semibold text-[var(--color-text)] truncate">{gpt.name}</h3>
+                          {gpt.tagline && (
+                            <p className="text-sm text-[var(--color-text-secondary)] truncate">{gpt.tagline}</p>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <h3 className="font-semibold text-[var(--color-text)] truncate">{gpt.name}</h3>
-                        {gpt.tagline && (
-                          <p className="text-sm text-[var(--color-text-secondary)] truncate">{gpt.tagline}</p>
+                      
+                      {gpt.description && (
+                        <p className="text-sm text-[var(--color-text-secondary)] line-clamp-2 mb-3">
+                          {gpt.description}
+                        </p>
+                      )}
+                      
+                      <div className="flex items-center justify-between text-xs text-[var(--color-text-secondary)] mb-4">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded-full bg-[var(--color-background)] capitalize">{gpt.category || 'general'}</span>
+                          <span>{gpt.conversation_count} chats</span>
+                        </div>
+                        {gpt.average_rating > 0 && (
+                          <span>⭐ {gpt.average_rating.toFixed(1)}</span>
                         )}
                       </div>
-                    </div>
-                    
-                    {gpt.description && (
-                      <p className="text-sm text-[var(--color-text-secondary)] line-clamp-2 mb-3">
-                        {gpt.description}
-                      </p>
-                    )}
-                    
-                    <div className="flex items-center justify-between text-xs text-[var(--color-text-secondary)] mb-4">
-                      <span>{gpt.conversation_count} chats</span>
-                      {gpt.average_rating > 0 && (
-                        <span>⭐ {gpt.average_rating.toFixed(1)}</span>
-                      )}
-                    </div>
-                    
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => handleStartChat(gpt)}
-                        className="flex-1 px-3 py-2 text-sm rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90"
-                      >
-                        Chat
-                      </button>
-                      {(() => {
-                        const isSubscribed = subscribedIds.has(gpt.id);
-                        console.log(`GPT ${gpt.name} (${gpt.id}): isSubscribed=${isSubscribed}, subscribedIds size=${subscribedIds.size}`);
-                        return isSubscribed;
-                      })() ? (
+                      
+                      <div className="flex gap-2">
                         <button
-                          onClick={() => handleUnsubscribe(gpt)}
-                          className="px-3 py-2 text-sm rounded-lg bg-[var(--color-background)] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-border)]"
+                          onClick={() => handleStartChat(gpt)}
+                          className="flex-1 px-3 py-2 text-sm rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90"
                         >
-                          ✓ Subscribed
+                          Chat
                         </button>
-                      ) : (
-                        <button
-                          onClick={() => handleSubscribe(gpt)}
+                        {subscribedIds.has(gpt.id) ? (
+                          <button
+                            onClick={() => handleUnsubscribe(gpt)}
+                            className="px-3 py-2 text-sm rounded-lg bg-[var(--color-background)] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-border)]"
+                          >
+                            ✓ Subscribed
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => handleSubscribe(gpt)}
                           className="px-3 py-2 text-sm rounded-lg bg-[var(--color-success)]/10 text-[var(--color-success)] border border-[var(--color-success)]/30 hover:bg-[var(--color-success)]/20"
                         >
                           + Subscribe
@@ -591,6 +797,56 @@ export default function CustomGPTs() {
                   </div>
                 ))}
               </div>
+              
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="mt-8 flex items-center justify-center gap-2">
+                  <button
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    disabled={currentPage === 1}
+                    className="px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[var(--color-border)]"
+                  >
+                    Previous
+                  </button>
+                  
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                      let pageNum: number;
+                      if (totalPages <= 5) {
+                        pageNum = i + 1;
+                      } else if (currentPage <= 3) {
+                        pageNum = i + 1;
+                      } else if (currentPage >= totalPages - 2) {
+                        pageNum = totalPages - 4 + i;
+                      } else {
+                        pageNum = currentPage - 2 + i;
+                      }
+                      return (
+                        <button
+                          key={pageNum}
+                          onClick={() => setCurrentPage(pageNum)}
+                          className={`w-10 h-10 rounded-lg text-sm font-medium transition-colors ${
+                            currentPage === pageNum
+                              ? 'bg-[var(--color-button)] text-[var(--color-button-text)]'
+                              : 'bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-border)]'
+                          }`}
+                        >
+                          {pageNum}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  
+                  <button
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    disabled={currentPage === totalPages}
+                    className="px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-[var(--color-border)]"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+              </>
             )}
           </>
         )}
@@ -617,12 +873,48 @@ export default function CustomGPTs() {
                 {/* Basic Info */}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="col-span-2 flex gap-4">
+                    {/* Avatar Upload */}
                     <div>
-                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Icon</label>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Avatar</label>
+                      <div className="relative">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleAvatarChange}
+                          className="hidden"
+                          id="avatar-upload"
+                        />
+                        <label
+                          htmlFor="avatar-upload"
+                          className="w-16 h-16 rounded-xl flex items-center justify-center cursor-pointer border-2 border-dashed border-[var(--color-border)] hover:border-[var(--color-primary)] transition-colors overflow-hidden"
+                          style={{ backgroundColor: avatarPreview ? undefined : `${formData.color}20` }}
+                        >
+                          {avatarPreview ? (
+                            <img src={avatarPreview} alt="Avatar preview" className="w-full h-full object-cover" />
+                          ) : (
+                            <span className="text-2xl">{formData.icon}</span>
+                          )}
+                        </label>
+                        {avatarPreview && (
+                          <button
+                            type="button"
+                            onClick={() => { setAvatarFile(null); setAvatarPreview(null); }}
+                            className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs flex items-center justify-center"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">64×64px</p>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Icon (fallback)</label>
                       <div className="flex flex-wrap gap-1">
                         {iconOptions.map((icon) => (
                           <button
                             key={icon}
+                            type="button"
                             onClick={() => setFormData({ ...formData, icon })}
                             className={`w-9 h-9 rounded-lg text-lg flex items-center justify-center ${
                               formData.icon === icon
@@ -658,6 +950,19 @@ export default function CustomGPTs() {
                   </div>
                   
                   <div>
+                    <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Category</label>
+                    <select
+                      value={formData.category}
+                      onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                      className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                    >
+                      {categories.map(cat => (
+                        <option key={cat.value} value={cat.value}>{cat.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  <div className="col-span-2">
                     <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Tagline</label>
                     <input
                       type="text"

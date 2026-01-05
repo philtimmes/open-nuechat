@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type { Artifact } from '../types';
-import { groupArtifactsByFilename, buildFileTree, type ArtifactGroup, type FileTreeNode } from '../lib/artifacts';
+import { groupArtifactsByFilename, type ArtifactGroup } from '../lib/artifacts';
 import { formatFileSize, formatMessageTime } from '../lib/formatters';
-import api from '../lib/api';
 
 interface ArtifactsPanelProps {
   artifacts: Artifact[];
@@ -22,8 +21,6 @@ export default function ArtifactsPanel({
 }: ArtifactsPanelProps) {
   console.log('[ArtifactsPanel] RENDERING with', artifacts.length, 'artifacts');
   const [view, setView] = useState<View>('list');
-  const [listMode, setListMode] = useState<'flat' | 'tree'>('flat');
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [selectedGroup, setSelectedGroup] = useState<ArtifactGroup | null>(null);
   const [activeTab, setActiveTab] = useState<'preview' | 'code' | 'signatures'>('preview');
   const [previewMode, setPreviewMode] = useState<PreviewMode>('preview');
@@ -39,47 +36,8 @@ export default function ArtifactsPanel({
     [artifacts]
   );
   
-  // Build file tree structure
-  const fileTree = useMemo(() => 
-    buildFileTree(artifactGroups),
-    [artifactGroups]
-  );
-  
   // Count of unique files
   const uniqueFileCount = artifactGroups.length;
-  
-  // Toggle folder expansion
-  const toggleFolder = (path: string) => {
-    setExpandedFolders(prev => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-      }
-      return next;
-    });
-  };
-  
-  // Expand all folders
-  const expandAll = () => {
-    const allPaths = new Set<string>();
-    const collectPaths = (nodes: FileTreeNode[]) => {
-      for (const node of nodes) {
-        if (node.type === 'folder') {
-          allPaths.add(node.path);
-          if (node.children) collectPaths(node.children);
-        }
-      }
-    };
-    collectPaths(fileTree);
-    setExpandedFolders(allPaths);
-  };
-  
-  // Collapse all folders
-  const collapseAll = () => {
-    setExpandedFolders(new Set());
-  };
   
   // Reset view when artifacts change significantly
   useEffect(() => {
@@ -135,99 +93,6 @@ export default function ArtifactsPanel({
     URL.revokeObjectURL(url);
   };
   
-  // Export mermaid/SVG to transparent PNG
-  const [isExportingPng, setIsExportingPng] = useState(false);
-  
-  const downloadPng = useCallback(async () => {
-    if (!selectedArtifact || !iframeRef.current) return;
-    
-    setIsExportingPng(true);
-    
-    try {
-      // Get SVG from iframe
-      const iframeDoc = iframeRef.current.contentDocument || iframeRef.current.contentWindow?.document;
-      if (!iframeDoc) {
-        console.error('Cannot access iframe document');
-        return;
-      }
-      
-      const svgElement = iframeDoc.querySelector('svg');
-      if (!svgElement) {
-        console.error('No SVG found in iframe');
-        return;
-      }
-      
-      // Clone SVG and set transparent background
-      const svgClone = svgElement.cloneNode(true) as SVGSVGElement;
-      svgClone.style.background = 'transparent';
-      
-      // Get dimensions
-      const bbox = svgElement.getBoundingClientRect();
-      const width = bbox.width || 800;
-      const height = bbox.height || 600;
-      
-      // Set viewBox if not present
-      if (!svgClone.getAttribute('viewBox')) {
-        svgClone.setAttribute('viewBox', `0 0 ${width} ${height}`);
-      }
-      svgClone.setAttribute('width', String(width));
-      svgClone.setAttribute('height', String(height));
-      
-      // Convert to data URL
-      const svgData = new XMLSerializer().serializeToString(svgClone);
-      const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
-      const svgUrl = URL.createObjectURL(svgBlob);
-      
-      // Create canvas and draw
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      
-      // Use 2x scale for better quality
-      const scale = 2;
-      canvas.width = width * scale;
-      canvas.height = height * scale;
-      ctx.scale(scale, scale);
-      
-      // Don't fill background - leave transparent
-      
-      const img = new Image();
-      img.onload = () => {
-        ctx.drawImage(img, 0, 0, width, height);
-        
-        // Convert to PNG
-        canvas.toBlob((blob) => {
-          if (!blob) return;
-          
-          const filename = selectedArtifact.filename 
-            ? selectedArtifact.filename.replace(/\.(mmd|svg)$/i, '.png').split('/').pop()
-            : `${selectedArtifact.title.replace(/\s+/g, '_')}.png`;
-          
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = filename || 'diagram.png';
-          a.click();
-          URL.revokeObjectURL(url);
-          URL.revokeObjectURL(svgUrl);
-          setIsExportingPng(false);
-        }, 'image/png');
-      };
-      
-      img.onerror = () => {
-        console.error('Failed to load SVG as image');
-        URL.revokeObjectURL(svgUrl);
-        setIsExportingPng(false);
-      };
-      
-      img.src = svgUrl;
-      
-    } catch (error) {
-      console.error('Failed to export PNG:', error);
-      setIsExportingPng(false);
-    }
-  }, [selectedArtifact]);
-  
   // Convert markdown to PDF and download via API
   const downloadPdf = useCallback(async () => {
     if (!selectedArtifact || selectedArtifact.type !== 'markdown') return;
@@ -241,16 +106,25 @@ export default function ArtifactsPanel({
         : `${selectedArtifact.title.replace(/\s+/g, '_')}.pdf`;
       
       // Call backend API to convert markdown to PDF
-      const response = await api.post('/utils/markdown-to-pdf', {
-        content: selectedArtifact.content,
-        filename: filename,
-        title: selectedArtifact.title
-      }, {
-        responseType: 'blob'
+      const response = await fetch('/api/utils/markdown-to-pdf', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('nexus-auth') ? JSON.parse(localStorage.getItem('nexus-auth')!).state?.token : ''}`
+        },
+        body: JSON.stringify({
+          content: selectedArtifact.content,
+          filename: filename,
+          title: selectedArtifact.title
+        })
       });
       
+      if (!response.ok) {
+        throw new Error('Failed to generate PDF');
+      }
+      
       // Download the PDF
-      const blob = new Blob([response.data], { type: 'application/pdf' });
+      const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -554,69 +428,6 @@ export default function ArtifactsPanel({
     );
   };
   
-  // Tree node component
-  const TreeNode = ({ node, depth = 0 }: { node: FileTreeNode; depth?: number }) => {
-    const isExpanded = expandedFolders.has(node.path);
-    const paddingLeft = depth * 16 + 8;
-    
-    if (node.type === 'folder') {
-      return (
-        <div>
-          <button
-            onClick={() => toggleFolder(node.path)}
-            className="w-full px-2 py-1.5 flex items-center gap-2 hover:bg-[var(--color-background)] rounded text-left"
-            style={{ paddingLeft }}
-          >
-            <svg className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-            </svg>
-            <svg className="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
-            </svg>
-            <span className="text-sm text-[var(--color-text)] truncate">{node.name}</span>
-            {node.children && (
-              <span className="text-xs text-[var(--color-text-secondary)]">
-                ({node.children.filter(c => c.type === 'file').length})
-              </span>
-            )}
-          </button>
-          {isExpanded && node.children && (
-            <div>
-              {node.children.map(child => (
-                <TreeNode key={child.path} node={child} depth={depth + 1} />
-              ))}
-            </div>
-          )}
-        </div>
-      );
-    }
-    
-    // File node
-    const group = node.group!;
-    const sigCount = group.latestVersion.signatures?.length || 0;
-    
-    return (
-      <button
-        onClick={() => handleFileClick(group)}
-        className="w-full px-2 py-1.5 flex items-center gap-2 hover:bg-[var(--color-background)] rounded text-left"
-        style={{ paddingLeft: paddingLeft + 20 }}
-      >
-        <TypeIcon type={group.type} />
-        <span className="text-sm text-[var(--color-text)] truncate flex-1">{node.name}</span>
-        {group.versions.length > 1 && (
-          <span className="text-xs text-[var(--color-text-secondary)] bg-[var(--color-background)] px-1 rounded">
-            v{group.versions.length}
-          </span>
-        )}
-        {sigCount > 0 && (
-          <span className="text-xs text-[var(--color-text-secondary)]" title="Code signatures">
-            {sigCount}σ
-          </span>
-        )}
-      </button>
-    );
-  };
-  
   // VIEW 1: File list
   if (view === 'list') {
     return (
@@ -626,54 +437,12 @@ export default function ArtifactsPanel({
             <h2 className="font-semibold text-[var(--color-text)]">Artifacts</h2>
             <p className="text-xs text-[var(--color-text-secondary)]">{uniqueFileCount} unique file{uniqueFileCount !== 1 ? 's' : ''}</p>
           </div>
-          <div className="flex items-center gap-2">
-            {/* Tree/Flat toggle */}
-            <div className="flex bg-[var(--color-background)] rounded-lg p-0.5">
-              <button
-                onClick={() => setListMode('flat')}
-                className={`p-1.5 rounded ${listMode === 'flat' ? 'bg-[var(--color-surface)] shadow-sm' : ''}`}
-                title="Flat list"
-              >
-                <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                </svg>
-              </button>
-              <button
-                onClick={() => setListMode('tree')}
-                className={`p-1.5 rounded ${listMode === 'tree' ? 'bg-[var(--color-surface)] shadow-sm' : ''}`}
-                title="Tree view"
-              >
-                <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1v-2zM14 13a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1v-2z" />
-                </svg>
-              </button>
-            </div>
-            <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
+          <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
-        
-        {/* Tree expand/collapse controls */}
-        {listMode === 'tree' && fileTree.some(n => n.type === 'folder') && (
-          <div className="px-4 py-2 border-b border-[var(--color-border)] flex gap-2">
-            <button
-              onClick={expandAll}
-              className="text-xs text-[var(--color-primary)] hover:underline"
-            >
-              Expand all
-            </button>
-            <span className="text-[var(--color-text-secondary)]">|</span>
-            <button
-              onClick={collapseAll}
-              className="text-xs text-[var(--color-primary)] hover:underline"
-            >
-              Collapse all
-            </button>
-          </div>
-        )}
         
         <div className="flex-1 overflow-y-auto p-4">
           {artifactGroups.length === 0 ? (
@@ -684,15 +453,7 @@ export default function ArtifactsPanel({
               <p>No artifacts yet</p>
               <p className="text-sm mt-1">Artifacts will appear here when code or files are created</p>
             </div>
-          ) : listMode === 'tree' ? (
-            /* Tree view */
-            <div className="space-y-0.5">
-              {fileTree.map(node => (
-                <TreeNode key={node.path} node={node} />
-              ))}
-            </div>
           ) : (
-            /* Flat list view */
             <div className="space-y-2">
               {artifactGroups.map((group) => {
                 const sigCount = group.latestVersion.signatures?.length || 0;
@@ -708,8 +469,7 @@ export default function ArtifactsPanel({
                       <TypeIcon type={group.type} />
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-[var(--color-text)] truncate">{group.displayName}</p>
-                        <p className="text-xs text-[var(--color-text-secondary)] truncate">{group.filename}</p>
-                        <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] mt-0.5">
+                        <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
                           <span>{group.language?.toUpperCase() || getLanguageLabel(group.latestVersion)}</span>
                           <span>•</span>
                           <span>{group.versions.length} version{group.versions.length !== 1 ? 's' : ''}</span>
@@ -951,8 +711,8 @@ export default function ArtifactsPanel({
                     </svg>
                   </button>
                 )}
-                {/* PDF download for markdown - show when preview tab or always for markdown */}
-                {isMarkdown && activeTab === 'preview' && (
+                {/* PDF download for markdown */}
+                {isMarkdown && (
                   <button
                     onClick={downloadPdf}
                     disabled={isGeneratingPdf}
@@ -967,26 +727,6 @@ export default function ArtifactsPanel({
                     ) : (
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                      </svg>
-                    )}
-                  </button>
-                )}
-                {/* PNG export for mermaid/SVG - show when preview tab */}
-                {(selectedArtifact?.type === 'mermaid' || selectedArtifact?.type === 'svg') && activeTab === 'preview' && (
-                  <button
-                    onClick={downloadPng}
-                    disabled={isExportingPng}
-                    className="p-2 rounded-lg hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] disabled:opacity-50"
-                    title="Export as transparent PNG"
-                  >
-                    {isExportingPng ? (
-                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                    ) : (
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                       </svg>
                     )}
                   </button>

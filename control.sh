@@ -1,18 +1,22 @@
 #!/bin/bash
 
 # =============================================================================
-# Open-NueChat - Docker Controller
+# Open-NueChat - Service Controller
 # =============================================================================
 # Usage: ./control.sh [command] [options]
 #
+# Modes:
+#   Docker (default) - Uses docker-compose for containerized deployment
+#   Native           - Runs services directly on host (--native flag)
+#
 # Commands:
-#   build       Build Docker images
-#   start       Build and start containers
-#   stop        Stop running containers
+#   build       Build Docker images (or install deps in native mode)
+#   start       Build and start containers (or start services natively)
+#   stop        Stop running containers/services
 #   down        Stop and remove containers
-#   restart     Restart containers
-#   logs        View container logs
-#   status      Show container status
+#   restart     Restart containers/services
+#   logs        View container/service logs
+#   status      Show container/service status
 #   shell       Open shell in container
 #   test        Run tests
 #   clean       Remove containers, volumes, and images
@@ -35,6 +39,13 @@ PROJECT_NAME="open-nuechat"
 COMPOSE_FILE="docker-compose.yml"
 COMPOSE_DEV_FILE="docker-compose.dev.yml"
 
+# Native mode configuration
+NATIVE_MODE=false
+NATIVE_VENV_DIR="${NATIVE_VENV_DIR:-./venv}"
+NATIVE_DATA_DIR="${NATIVE_DATA_DIR:-/opt/nuechat/_data}"
+NATIVE_PID_DIR="${NATIVE_PID_DIR:-/tmp/nuechat}"
+NATIVE_LOG_DIR="${NATIVE_LOG_DIR:-/var/log/nuechat}"
+
 # -----------------------------------------------------------------------------
 # Helper Functions
 # -----------------------------------------------------------------------------
@@ -42,7 +53,7 @@ COMPOSE_DEV_FILE="docker-compose.dev.yml"
 print_banner() {
     echo -e "${CYAN}"
     echo "╔═══════════════════════════════════════════════════════════════════╗"
-    echo "║                   Open-NueChat Docker Controller                   ║"
+    echo "║                   Open-NueChat Service Controller                  ║"
     echo "╚═══════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -50,30 +61,33 @@ print_banner() {
 print_help() {
     echo -e "${BLUE}Usage:${NC} ./control.sh [command] [options]"
     echo ""
+    echo -e "${BLUE}Global Options:${NC}"
+    echo -e "  ${GREEN}--native${NC}           Run in native mode (no Docker)"
+    echo ""
     echo -e "${BLUE}Commands:${NC}"
-    echo -e "  ${GREEN}build${NC}              Build Docker images"
+    echo -e "  ${GREEN}build${NC}              Build Docker images (or install deps in native mode)"
     echo -e "    --no-cache       Build without using cache"
     echo -e "    --profile NAME   Build specific profile (rocm, cuda, cpu)"
     echo ""
-    echo -e "  ${GREEN}start${NC}              Build and start containers"
+    echo -e "  ${GREEN}start${NC}              Build and start containers/services"
     echo -e "    -d, --detach     Run in detached mode"
     echo -e "    --build          Force rebuild before starting"
     echo -e "    --profile NAME   Use specific profile (rocm, cuda, cpu)"
     echo ""
-    echo -e "  ${GREEN}stop${NC}               Stop running containers"
+    echo -e "  ${GREEN}stop${NC}               Stop running containers/services"
     echo ""
     echo -e "  ${GREEN}down${NC}               Stop and remove containers"
     echo -e "    -v, --volumes    Also remove volumes"
     echo ""
-    echo -e "  ${GREEN}restart${NC}            Restart containers"
+    echo -e "  ${GREEN}restart${NC}            Restart containers/services"
     echo ""
-    echo -e "  ${GREEN}logs${NC}               View container logs"
+    echo -e "  ${GREEN}logs${NC}               View container/service logs"
     echo -e "    -f, --follow     Follow log output"
     echo -e "    -n, --tail N     Number of lines to show (default: 100)"
     echo ""
-    echo -e "  ${GREEN}status${NC}             Show container status"
+    echo -e "  ${GREEN}status${NC}             Show container/service status"
     echo ""
-    echo -e "  ${GREEN}shell${NC}              Open shell in container"
+    echo -e "  ${GREEN}shell${NC}              Open shell in container (or activate venv in native)"
     echo ""
     echo -e "  ${GREEN}test${NC}               Run tests"
     echo -e "    --coverage       Include coverage report"
@@ -115,7 +129,7 @@ print_help() {
     echo -e "  ${CYAN}cuda${NC}               NVIDIA GPU with CUDA (requires nvidia-container-toolkit)"
     echo -e "  ${CYAN}cpu${NC}                CPU only (no GPU required, slower)"
     echo ""
-    echo -e "${BLUE}Examples:${NC}"
+    echo -e "${BLUE}Docker Examples:${NC}"
     echo "  ./control.sh build --profile cuda       # Build for NVIDIA GPU"
     echo "  ./control.sh build --profile cpu        # Build for CPU only"
     echo "  ./control.sh start -d --profile rocm    # Start with AMD GPU"
@@ -127,16 +141,24 @@ print_help() {
     echo "  ./control.sh build --no-cache --profile rocm  # Full rebuild"
     echo "  ./control.sh clean --all                # Full cleanup"
     echo ""
-    echo -e "${BLUE}First-time Setup (ROCm):${NC}"
+    echo -e "${BLUE}Native Mode Examples:${NC}"
+    echo "  ./control.sh --native build             # Install Python deps"
+    echo "  ./control.sh --native start -d          # Start services in background"
+    echo "  ./control.sh --native stop              # Stop all services"
+    echo "  ./control.sh --native logs -f           # Follow service logs"
+    echo "  ./control.sh --native status            # Check service status"
+    echo "  ./control.sh --native shell             # Activate virtualenv"
+    echo ""
+    echo -e "${BLUE}First-time Setup (Docker ROCm):${NC}"
     echo "  1. Copy .env.example to .env and configure"
     echo "  2. ./control.sh faiss-build --profile rocm  # ~12 min, once only"
     echo "  3. ./control.sh build --profile rocm"
     echo "  4. ./control.sh start -d --profile rocm"
     echo ""
-    echo -e "${BLUE}First-time Setup (CUDA/CPU):${NC}"
+    echo -e "${BLUE}First-time Setup (Native):${NC}"
     echo "  1. Copy .env.example to .env and configure"
-    echo "  2. ./control.sh build --profile <cuda|cpu>"
-    echo "  3. ./control.sh start -d --profile <cuda|cpu>"
+    echo "  2. ./control.sh --native build             # Create venv, install deps"
+    echo "  3. ./control.sh --native start -d          # Start backend + frontend"
     echo ""
 }
 
@@ -1101,6 +1123,384 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Native Mode Functions
+# -----------------------------------------------------------------------------
+
+native_check_python() {
+    if ! command -v python3 &> /dev/null; then
+        log_error "Python 3 is not installed. Please install Python 3.11+."
+        exit 1
+    fi
+    
+    local py_version=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    local py_major=$(echo $py_version | cut -d. -f1)
+    local py_minor=$(echo $py_version | cut -d. -f2)
+    
+    if [ "$py_major" -lt 3 ] || ([ "$py_major" -eq 3 ] && [ "$py_minor" -lt 11 ]); then
+        log_error "Python 3.11+ required. Found: Python $py_version"
+        exit 1
+    fi
+    
+    log_info "Python version: $py_version"
+}
+
+native_check_node() {
+    if ! command -v node &> /dev/null; then
+        log_error "Node.js is not installed. Please install Node.js 18+."
+        exit 1
+    fi
+    
+    local node_version=$(node --version | sed 's/v//')
+    log_info "Node.js version: $node_version"
+}
+
+native_setup_dirs() {
+    mkdir -p "$NATIVE_PID_DIR"
+    mkdir -p "$NATIVE_LOG_DIR"
+    mkdir -p "$NATIVE_DATA_DIR"
+    mkdir -p "$NATIVE_DATA_DIR/faiss_indexes"
+    mkdir -p "$NATIVE_DATA_DIR/uploads"
+    mkdir -p "$NATIVE_DATA_DIR/generated"
+}
+
+native_build() {
+    log_info "Building in native mode..."
+    
+    native_check_python
+    native_check_node
+    native_setup_dirs
+    
+    # Create Python virtual environment
+    if [ ! -d "$NATIVE_VENV_DIR" ]; then
+        log_info "Creating Python virtual environment..."
+        python3 -m venv "$NATIVE_VENV_DIR"
+    fi
+    
+    # Activate venv and install backend deps
+    log_info "Installing backend dependencies..."
+    source "$NATIVE_VENV_DIR/bin/activate"
+    pip install --upgrade pip
+    pip install -r backend/requirements.txt
+    
+    # Install frontend deps
+    log_info "Installing frontend dependencies..."
+    cd frontend
+    npm install
+    cd ..
+    
+    log_success "Native build completed!"
+    echo ""
+    echo "To activate the virtual environment manually:"
+    echo "  source $NATIVE_VENV_DIR/bin/activate"
+}
+
+native_start() {
+    local detach=false
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -d|--detach)
+                detach=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    native_setup_dirs
+    check_env
+    
+    # Source .env file
+    if [ -f ".env" ]; then
+        set -a
+        source .env
+        set +a
+    fi
+    
+    # Check if already running
+    if [ -f "$NATIVE_PID_DIR/backend.pid" ] && kill -0 $(cat "$NATIVE_PID_DIR/backend.pid") 2>/dev/null; then
+        log_warning "Backend already running (PID: $(cat $NATIVE_PID_DIR/backend.pid))"
+    else
+        log_info "Starting backend..."
+        source "$NATIVE_VENV_DIR/bin/activate"
+        
+        # Set default env vars
+        export DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:///$NATIVE_DATA_DIR/nuechat.db}"
+        export FAISS_INDEX_DIR="${FAISS_INDEX_DIR:-$NATIVE_DATA_DIR/faiss_indexes}"
+        export UPLOAD_DIR="${UPLOAD_DIR:-$NATIVE_DATA_DIR/uploads}"
+        export GENERATED_IMAGES_DIR="${GENERATED_IMAGES_DIR:-$NATIVE_DATA_DIR/generated}"
+        
+        if [ "$detach" = true ]; then
+            cd backend
+            nohup python -m uvicorn app.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-8000} \
+                > "$NATIVE_LOG_DIR/backend.log" 2>&1 &
+            echo $! > "$NATIVE_PID_DIR/backend.pid"
+            cd ..
+            log_success "Backend started (PID: $(cat $NATIVE_PID_DIR/backend.pid))"
+        else
+            cd backend
+            python -m uvicorn app.main:app --host 0.0.0.0 --port ${BACKEND_PORT:-8000} &
+            BACKEND_PID=$!
+            echo $BACKEND_PID > "$NATIVE_PID_DIR/backend.pid"
+            cd ..
+        fi
+    fi
+    
+    # Check if frontend already running
+    if [ -f "$NATIVE_PID_DIR/frontend.pid" ] && kill -0 $(cat "$NATIVE_PID_DIR/frontend.pid") 2>/dev/null; then
+        log_warning "Frontend already running (PID: $(cat $NATIVE_PID_DIR/frontend.pid))"
+    else
+        log_info "Starting frontend..."
+        
+        if [ "$detach" = true ]; then
+            cd frontend
+            nohup npm run dev -- --host 0.0.0.0 --port ${FRONTEND_PORT:-5173} \
+                > "$NATIVE_LOG_DIR/frontend.log" 2>&1 &
+            echo $! > "$NATIVE_PID_DIR/frontend.pid"
+            cd ..
+            log_success "Frontend started (PID: $(cat $NATIVE_PID_DIR/frontend.pid))"
+        else
+            cd frontend
+            npm run dev -- --host 0.0.0.0 --port ${FRONTEND_PORT:-5173} &
+            FRONTEND_PID=$!
+            echo $FRONTEND_PID > "$NATIVE_PID_DIR/frontend.pid"
+            cd ..
+        fi
+    fi
+    
+    if [ "$detach" = true ]; then
+        echo ""
+        log_success "Services started in background"
+        echo ""
+        echo "  Backend:  http://localhost:${BACKEND_PORT:-8000}"
+        echo "  Frontend: http://localhost:${FRONTEND_PORT:-5173}"
+        echo ""
+        echo "View logs:  ./control.sh --native logs -f"
+        echo "Stop:       ./control.sh --native stop"
+    else
+        log_info "Running in foreground. Press Ctrl+C to stop."
+        
+        # Wait for either process to exit
+        trap "native_stop; exit 0" SIGINT SIGTERM
+        wait
+    fi
+}
+
+native_stop() {
+    log_info "Stopping native services..."
+    
+    # Stop backend
+    if [ -f "$NATIVE_PID_DIR/backend.pid" ]; then
+        local pid=$(cat "$NATIVE_PID_DIR/backend.pid")
+        if kill -0 $pid 2>/dev/null; then
+            log_info "Stopping backend (PID: $pid)..."
+            kill $pid 2>/dev/null || true
+            sleep 2
+            kill -9 $pid 2>/dev/null || true
+        fi
+        rm -f "$NATIVE_PID_DIR/backend.pid"
+    fi
+    
+    # Stop frontend
+    if [ -f "$NATIVE_PID_DIR/frontend.pid" ]; then
+        local pid=$(cat "$NATIVE_PID_DIR/frontend.pid")
+        if kill -0 $pid 2>/dev/null; then
+            log_info "Stopping frontend (PID: $pid)..."
+            kill $pid 2>/dev/null || true
+            sleep 1
+            kill -9 $pid 2>/dev/null || true
+        fi
+        rm -f "$NATIVE_PID_DIR/frontend.pid"
+    fi
+    
+    # Also kill any orphaned processes
+    pkill -f "uvicorn app.main:app" 2>/dev/null || true
+    pkill -f "vite.*--port" 2>/dev/null || true
+    
+    log_success "Services stopped"
+}
+
+native_restart() {
+    native_stop
+    sleep 2
+    native_start "$@"
+}
+
+native_status() {
+    echo -e "${BLUE}Native Services Status:${NC}"
+    echo ""
+    
+    # Backend
+    echo -n "  Backend:  "
+    if [ -f "$NATIVE_PID_DIR/backend.pid" ]; then
+        local pid=$(cat "$NATIVE_PID_DIR/backend.pid")
+        if kill -0 $pid 2>/dev/null; then
+            echo -e "${GREEN}Running${NC} (PID: $pid)"
+        else
+            echo -e "${RED}Stopped${NC} (stale PID file)"
+        fi
+    else
+        echo -e "${RED}Stopped${NC}"
+    fi
+    
+    # Frontend
+    echo -n "  Frontend: "
+    if [ -f "$NATIVE_PID_DIR/frontend.pid" ]; then
+        local pid=$(cat "$NATIVE_PID_DIR/frontend.pid")
+        if kill -0 $pid 2>/dev/null; then
+            echo -e "${GREEN}Running${NC} (PID: $pid)"
+        else
+            echo -e "${RED}Stopped${NC} (stale PID file)"
+        fi
+    else
+        echo -e "${RED}Stopped${NC}"
+    fi
+    
+    echo ""
+    echo -e "${BLUE}Data Directory:${NC} $NATIVE_DATA_DIR"
+    echo -e "${BLUE}Log Directory:${NC} $NATIVE_LOG_DIR"
+    echo -e "${BLUE}PID Directory:${NC} $NATIVE_PID_DIR"
+    
+    # Check database
+    if [ -f "$NATIVE_DATA_DIR/nuechat.db" ]; then
+        local db_size=$(du -h "$NATIVE_DATA_DIR/nuechat.db" | cut -f1)
+        echo -e "${BLUE}Database:${NC} $db_size"
+    fi
+}
+
+native_logs() {
+    local follow=""
+    local tail="100"
+    local service="all"
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -f|--follow)
+                follow="-f"
+                shift
+                ;;
+            -n|--tail)
+                tail="$2"
+                shift 2
+                ;;
+            backend|frontend)
+                service="$1"
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    if [ "$service" = "all" ] || [ "$service" = "backend" ]; then
+        if [ -f "$NATIVE_LOG_DIR/backend.log" ]; then
+            echo -e "${CYAN}=== Backend Logs ===${NC}"
+            if [ -n "$follow" ]; then
+                tail $follow -n $tail "$NATIVE_LOG_DIR/backend.log" &
+                BACKEND_TAIL_PID=$!
+            else
+                tail -n $tail "$NATIVE_LOG_DIR/backend.log"
+            fi
+        else
+            echo -e "${YELLOW}No backend logs found${NC}"
+        fi
+    fi
+    
+    if [ "$service" = "all" ] || [ "$service" = "frontend" ]; then
+        if [ -f "$NATIVE_LOG_DIR/frontend.log" ]; then
+            echo -e "${CYAN}=== Frontend Logs ===${NC}"
+            if [ -n "$follow" ]; then
+                tail $follow -n $tail "$NATIVE_LOG_DIR/frontend.log" &
+                FRONTEND_TAIL_PID=$!
+            else
+                tail -n $tail "$NATIVE_LOG_DIR/frontend.log"
+            fi
+        else
+            echo -e "${YELLOW}No frontend logs found${NC}"
+        fi
+    fi
+    
+    # Wait for tail processes if following
+    if [ -n "$follow" ]; then
+        trap "kill $BACKEND_TAIL_PID $FRONTEND_TAIL_PID 2>/dev/null; exit 0" SIGINT SIGTERM
+        wait
+    fi
+}
+
+native_shell() {
+    if [ ! -d "$NATIVE_VENV_DIR" ]; then
+        log_error "Virtual environment not found. Run './control.sh --native build' first."
+        exit 1
+    fi
+    
+    log_info "Activating virtual environment..."
+    echo ""
+    echo "Run 'deactivate' to exit the virtual environment."
+    echo ""
+    
+    # Start a subshell with venv activated
+    bash --rcfile <(echo "source ~/.bashrc; source $NATIVE_VENV_DIR/bin/activate; cd $(pwd)")
+}
+
+native_update() {
+    log_info "Updating native installation..."
+    
+    # Pull latest code (if git repo)
+    if [ -d ".git" ]; then
+        log_info "Pulling latest changes..."
+        git pull
+    fi
+    
+    # Update backend deps
+    log_info "Updating backend dependencies..."
+    source "$NATIVE_VENV_DIR/bin/activate"
+    pip install --upgrade -r backend/requirements.txt
+    
+    # Update frontend deps
+    log_info "Updating frontend dependencies..."
+    cd frontend
+    npm install
+    npm run build
+    cd ..
+    
+    log_success "Update completed!"
+    echo ""
+    echo "Restart services with: ./control.sh --native restart -d"
+}
+
+native_clean() {
+    log_warning "This will remove the virtual environment and logs."
+    read -p "Continue? (y/N) " -n 1 -r
+    echo ""
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        native_stop
+        
+        log_info "Removing virtual environment..."
+        rm -rf "$NATIVE_VENV_DIR"
+        
+        log_info "Removing logs..."
+        rm -rf "$NATIVE_LOG_DIR"
+        
+        log_info "Removing PID files..."
+        rm -rf "$NATIVE_PID_DIR"
+        
+        log_info "Removing frontend node_modules..."
+        rm -rf frontend/node_modules
+        
+        log_success "Cleanup completed!"
+        echo ""
+        log_warning "Data in $NATIVE_DATA_DIR was NOT removed."
+        echo "To remove data: rm -rf $NATIVE_DATA_DIR"
+    else
+        log_info "Cleanup cancelled."
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Main Script
 # -----------------------------------------------------------------------------
 
@@ -1108,92 +1508,165 @@ main() {
     # Change to script directory
     cd "$(dirname "$0")"
     
-    # Check prerequisites
-    check_docker
-    check_compose
+    # Check for --native flag first
+    local args=()
+    for arg in "$@"; do
+        if [ "$arg" = "--native" ]; then
+            NATIVE_MODE=true
+        else
+            args+=("$arg")
+        fi
+    done
+    set -- "${args[@]}"
+    
+    # Check prerequisites based on mode
+    if [ "$NATIVE_MODE" = false ]; then
+        check_docker
+        check_compose
+    fi
     
     # Parse command
     local command="${1:-help}"
     shift 2>/dev/null || true
     
-    case $command in
-        build)
-            print_banner
-            cmd_build "$@"
-            ;;
-        start|up)
-            print_banner
-            cmd_start "$@"
-            ;;
-        stop)
-            print_banner
-            cmd_stop "$@"
-            ;;
-        down)
-            print_banner
-            cmd_down "$@"
-            ;;
-        restart)
-            print_banner
-            cmd_restart "$@"
-            ;;
-        logs)
-            cmd_logs "$@"
-            ;;
-        status|ps)
-            print_banner
-            cmd_status "$@"
-            ;;
-        shell|exec|sh)
-            cmd_shell "$@"
-            ;;
-        test)
-            print_banner
-            cmd_test "$@"
-            ;;
-        clean)
-            print_banner
-            cmd_clean "$@"
-            ;;
-        dev)
-            print_banner
-            cmd_dev "$@"
-            ;;
-        db)
-            print_banner
-            cmd_db "$@"
-            ;;
-        tts)
-            print_banner
-            cmd_tts "$@"
-            ;;
-        image|imagegen)
-            print_banner
-            cmd_image "$@"
-            ;;
-        migrate)
-            print_banner
-            cmd_migrate "$@"
-            ;;
-        faiss)
-            print_banner
-            cmd_faiss_status
-            ;;
-        faiss-build)
-            print_banner
-            cmd_faiss_build "$@"
-            ;;
-        help|--help|-h)
-            print_banner
-            print_help
-            ;;
-        *)
-            log_error "Unknown command: $command"
-            echo ""
-            print_help
-            exit 1
-            ;;
-    esac
+    # Route to native or docker commands
+    if [ "$NATIVE_MODE" = true ]; then
+        case $command in
+            build)
+                print_banner
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_build "$@"
+                ;;
+            start|up)
+                print_banner
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_start "$@"
+                ;;
+            stop)
+                print_banner
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_stop "$@"
+                ;;
+            restart)
+                print_banner
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_restart "$@"
+                ;;
+            logs)
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_logs "$@"
+                ;;
+            status|ps)
+                print_banner
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_status "$@"
+                ;;
+            shell|exec|sh)
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_shell "$@"
+                ;;
+            update)
+                print_banner
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_update "$@"
+                ;;
+            clean)
+                print_banner
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_clean "$@"
+                ;;
+            help|--help|-h)
+                print_banner
+                print_help
+                ;;
+            *)
+                log_error "Unknown command for native mode: $command"
+                echo ""
+                echo "Available native commands: build, start, stop, restart, logs, status, shell, update, clean, help"
+                exit 1
+                ;;
+        esac
+    else
+        # Docker mode (original behavior)
+        case $command in
+            build)
+                print_banner
+                cmd_build "$@"
+                ;;
+            start|up)
+                print_banner
+                cmd_start "$@"
+                ;;
+            stop)
+                print_banner
+                cmd_stop "$@"
+                ;;
+            down)
+                print_banner
+                cmd_down "$@"
+                ;;
+            restart)
+                print_banner
+                cmd_restart "$@"
+                ;;
+            logs)
+                cmd_logs "$@"
+                ;;
+            status|ps)
+                print_banner
+                cmd_status "$@"
+                ;;
+            shell|exec|sh)
+                cmd_shell "$@"
+                ;;
+            test)
+                print_banner
+                cmd_test "$@"
+                ;;
+            clean)
+                print_banner
+                cmd_clean "$@"
+                ;;
+            dev)
+                print_banner
+                cmd_dev "$@"
+                ;;
+            db)
+                print_banner
+                cmd_db "$@"
+                ;;
+            tts)
+                print_banner
+                cmd_tts "$@"
+                ;;
+            image|imagegen)
+                print_banner
+                cmd_image "$@"
+                ;;
+            migrate)
+                print_banner
+                cmd_migrate "$@"
+                ;;
+            faiss)
+                print_banner
+                cmd_faiss_status
+                ;;
+            faiss-build)
+                print_banner
+                cmd_faiss_build "$@"
+                ;;
+            help|--help|-h)
+                print_banner
+                print_help
+                ;;
+            *)
+                log_error "Unknown command: $command"
+                echo ""
+                print_help
+                exit 1
+                ;;
+        esac
+    fi
 }
 
 main "$@"

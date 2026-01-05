@@ -4,12 +4,8 @@
 
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import 'katex/dist/katex.min.css';
 
 interface ChatMessage {
   id: string;
@@ -194,8 +190,6 @@ export default function VibeChat({
               {message.role === 'assistant' ? (
                 <div className="prose prose-sm prose-invert max-w-none">
                   <ReactMarkdown
-                    remarkPlugins={[remarkGfm, remarkMath]}
-                    rehypePlugins={[rehypeKatex]}
                     components={{
                       code({ className, children, ...props }) {
                         const match = /language-(\w+)/.exec(className || '');

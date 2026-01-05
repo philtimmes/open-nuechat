@@ -44,11 +44,8 @@ export default function CodeEditor({
   lintErrors,
 }: CodeEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const editorRef = useRef<HTMLDivElement>(null);
-  const measureRef = useRef<HTMLSpanElement>(null);
   const [selectedSuggestion, setSelectedSuggestion] = useState(0);
   const [cursorPosition, setCursorPosition] = useState({ top: 0, left: 0 });
-  const [charWidth, setCharWidth] = useState(8.4);
   
   // Map language names
   const languageMap: Record<string, string> = {
@@ -73,21 +70,10 @@ export default function CodeEditor({
   
   const highlightLanguage = languageMap[language] || 'text';
   
-  // Measure actual character width on mount
-  useEffect(() => {
-    if (measureRef.current) {
-      const width = measureRef.current.getBoundingClientRect().width / 10; // 10 chars
-      if (width > 0) {
-        setCharWidth(width);
-      }
-    }
-  }, []);
-  
   // Handle cursor position change
   const handleCursorChange = useCallback(() => {
     const textarea = textareaRef.current;
-    const editor = editorRef.current;
-    if (!textarea || !editor) return;
+    if (!textarea) return;
     
     const selectionStart = textarea.selectionStart;
     const textBeforeCursor = content.substring(0, selectionStart);
@@ -97,26 +83,14 @@ export default function CodeEditor({
     
     onCursorChange({ line, column });
     
-    // Calculate cursor pixel position relative to viewport
+    // Calculate cursor pixel position for suggestions overlay
     const lineHeight = 20;
-    const lineNumberWidth = 56; // Width of line number gutter
-    const padding = 12;
-    
-    // Get editor's position on screen
-    const editorRect = editor.getBoundingClientRect();
-    const scrollTop = editor.scrollTop;
-    const scrollLeft = editor.scrollLeft;
-    
-    // Calculate position relative to editor, accounting for scroll
-    const relativeTop = (line - 1) * lineHeight + padding;
-    const relativeLeft = (column - 1) * charWidth + lineNumberWidth + padding;
-    
-    // Convert to viewport coordinates
-    const top = editorRect.top + relativeTop - scrollTop;
-    const left = editorRect.left + relativeLeft - scrollLeft;
+    const charWidth = 8.4;
+    const top = (line - 1) * lineHeight + 40; // +40 for padding
+    const left = (column - 1) * charWidth + 60; // +60 for line numbers
     
     setCursorPosition({ top, left });
-  }, [content, onCursorChange, charWidth]);
+  }, [content, onCursorChange]);
   
   // Handle key events
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -171,19 +145,16 @@ export default function CodeEditor({
   // Update cursor position on various events
   useEffect(() => {
     const textarea = textareaRef.current;
-    const editor = editorRef.current;
-    if (!textarea || !editor) return;
+    if (!textarea) return;
     
     const updateCursor = () => handleCursorChange();
     
     textarea.addEventListener('click', updateCursor);
     textarea.addEventListener('keyup', updateCursor);
-    editor.addEventListener('scroll', updateCursor);
     
     return () => {
       textarea.removeEventListener('click', updateCursor);
       textarea.removeEventListener('keyup', updateCursor);
-      editor.removeEventListener('scroll', updateCursor);
     };
   }, [handleCursorChange]);
   
@@ -199,19 +170,7 @@ export default function CodeEditor({
   const contentHeight = Math.max(lineCount * 20 + 24, 300); // 20px per line + padding
   
   return (
-    <div ref={editorRef} className="relative h-full bg-[#1e1e1e] overflow-auto font-mono text-sm">
-      {/* Hidden element to measure character width */}
-      <span 
-        ref={measureRef}
-        className="absolute opacity-0 pointer-events-none"
-        style={{
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-          fontSize: '14px',
-        }}
-      >
-        0123456789
-      </span>
-      
+    <div className="relative h-full bg-[#1e1e1e] overflow-auto font-mono text-sm">
       {/* Content wrapper - sets minimum size for scrolling */}
       <div 
         className="relative"
@@ -290,7 +249,7 @@ export default function CodeEditor({
               className="absolute group"
               style={{
                 top: (error.line - 1) * 20 + 12,
-                left: (error.column - 1) * charWidth + 12,
+                left: (error.column - 1) * 8.4 + 12 + 56, // +56 for line numbers width
               }}
             >
               <div 
@@ -307,13 +266,13 @@ export default function CodeEditor({
         </div>
       </div>
       
-      {/* Suggestions overlay - positioned relative to viewport */}
+      {/* Suggestions overlay */}
       {showSuggestions && suggestions.length > 0 && (
         <div
           className="fixed z-50 bg-[#252526] border border-[#454545] rounded shadow-lg max-w-md overflow-hidden"
           style={{
-            top: Math.min(cursorPosition.top + 20, window.innerHeight - 200), // +20 to appear below cursor
-            left: Math.max(8, Math.min(cursorPosition.left, window.innerWidth - 400)),
+            top: cursorPosition.top,
+            left: Math.min(cursorPosition.left, window.innerWidth - 400),
           }}
         >
           <div className="px-2 py-1 text-xs text-[#858585] border-b border-[#454545]">

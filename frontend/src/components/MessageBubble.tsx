@@ -1,654 +1,10 @@
-import React, { useState, memo, useEffect, useRef } from 'react';
+import React, { useState, memo } from 'react';
 import type { Message, Artifact, GeneratedImage } from '../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import GeneratedImageCard from './GeneratedImageCard';
-import api from '../lib/api';
-import 'katex/dist/katex.min.css';
-
-// Mermaid diagram component with Preview/Code toggle
-// Uses iframe with CDN mermaid for consistent rendering (same as ArtifactsPanel)
-const MermaidDiagram = memo(({ code }: { code: string }) => {
-  const [view, setView] = useState<'preview' | 'code'>('preview');
-  const [height, setHeight] = useState(200);
-  const iframeId = useRef(`mermaid-iframe-${Math.random().toString(36).substr(2, 9)}`);
-  
-  // Get theme colors from CSS variables
-  const getThemeColors = () => {
-    const style = getComputedStyle(document.documentElement);
-    return {
-      background: style.getPropertyValue('--color-bg-primary').trim() || '#18181b',
-      text: style.getPropertyValue('--color-text-primary').trim() || '#e4e4e7',
-      primary: style.getPropertyValue('--color-primary').trim() || '#6366f1',
-      border: style.getPropertyValue('--color-border').trim() || '#52525b',
-    };
-  };
-  
-  const colors = getThemeColors();
-
-  // Generate iframe content with CDN mermaid (same approach as ArtifactsPanel)
-  const iframeContent = `<!DOCTYPE html>
-<html>
-<head>
-  <style>
-    body { 
-      margin: 0; 
-      padding: 16px; 
-      background: ${colors.background}; 
-      display: flex;
-      justify-content: center;
-      min-height: fit-content;
-    }
-    .mermaid { 
-      background: transparent;
-    }
-    .mermaid svg {
-      max-width: 100%;
-      height: auto;
-    }
-  </style>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"><\/script>
-</head>
-<body>
-  <div class="mermaid">${code}</div>
-  <script>
-    mermaid.initialize({
-      startOnLoad: true,
-      theme: 'base',
-      securityLevel: 'loose',
-      themeVariables: {
-        background: '${colors.background}',
-        primaryColor: '${colors.primary}',
-        primaryTextColor: '${colors.text}',
-        primaryBorderColor: '${colors.border}',
-        lineColor: '${colors.text}',
-        secondaryColor: '${colors.primary}22',
-        tertiaryColor: '${colors.background}',
-        mainBkg: '${colors.primary}33',
-        nodeBorder: '${colors.border}',
-        clusterBkg: '${colors.background}',
-        titleColor: '${colors.text}',
-        edgeLabelBackground: '${colors.background}',
-        textColor: '${colors.text}',
-        nodeTextColor: '${colors.text}',
-      }
-    });
-    // Notify parent of height after render
-    setTimeout(function() {
-      var height = document.body.scrollHeight;
-      window.parent.postMessage({ type: 'mermaid-height', id: '${iframeId.current}', height: height }, '*');
-    }, 500);
-  <\/script>
-</body>
-</html>`;
-
-  // Listen for height messages from iframe
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'mermaid-height' && event.data.id === iframeId.current && event.data.height) {
-        setHeight(Math.min(event.data.height + 20, 600)); // Cap at 600px
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
-
-  return (
-    <div className="my-3 rounded-lg bg-zinc-900 overflow-hidden">
-      {/* Toggle header */}
-      <div className="flex items-center gap-1 px-3 py-2 bg-zinc-800 border-b border-zinc-700">
-        <span className="text-xs text-zinc-400 mr-2">Mermaid</span>
-        <button
-          onClick={() => setView('preview')}
-          className={`px-2 py-0.5 text-xs rounded transition-colors ${
-            view === 'preview' 
-              ? 'bg-[var(--color-primary)] text-white' 
-              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
-          }`}
-        >
-          Preview
-        </button>
-        <button
-          onClick={() => setView('code')}
-          className={`px-2 py-0.5 text-xs rounded transition-colors ${
-            view === 'code' 
-              ? 'bg-[var(--color-primary)] text-white' 
-              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
-          }`}
-        >
-          Code
-        </button>
-      </div>
-      
-      {/* Content */}
-      {view === 'preview' ? (
-        <div className="overflow-auto" style={{ maxHeight: '600px' }}>
-          <iframe
-            srcDoc={iframeContent}
-            className="w-full border-0"
-            style={{ height: `${height}px`, background: colors.background }}
-            sandbox="allow-scripts"
-            title="Mermaid diagram"
-          />
-        </div>
-      ) : (
-        <SyntaxHighlighter
-          style={oneDark}
-          language="mermaid"
-          PreTag="div"
-          customStyle={{
-            margin: 0,
-            borderRadius: 0,
-            fontSize: '0.8125rem',
-            maxHeight: '70vh',
-            overflow: 'auto',
-          }}
-        >
-          {code}
-        </SyntaxHighlighter>
-      )}
-    </div>
-  );
-});
-
-// SVG Preview component with Preview/Code toggle
-// Uses iframe for consistent rendering (same as ArtifactsPanel)
-const SVGPreview = memo(({ code }: { code: string }) => {
-  const [view, setView] = useState<'preview' | 'code'>('preview');
-  const [height, setHeight] = useState(200);
-  const iframeId = useRef(`svg-iframe-${Math.random().toString(36).substr(2, 9)}`);
-  
-  // Get theme colors from CSS variables
-  const getThemeColors = () => {
-    const style = getComputedStyle(document.documentElement);
-    return {
-      background: style.getPropertyValue('--color-bg-primary').trim() || '#18181b',
-    };
-  };
-  
-  const colors = getThemeColors();
-
-  // Generate iframe content for SVG
-  const iframeContent = `<!DOCTYPE html>
-<html>
-<head>
-  <style>
-    body { 
-      margin: 0; 
-      padding: 16px; 
-      background: ${colors.background}; 
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: fit-content;
-    }
-    svg {
-      max-width: 100%;
-      height: auto;
-    }
-  </style>
-</head>
-<body>
-  ${code}
-  <script>
-    // Notify parent of height after render
-    setTimeout(function() {
-      var height = document.body.scrollHeight;
-      window.parent.postMessage({ type: 'svg-height', id: '${iframeId.current}', height: height }, '*');
-    }, 100);
-  <\/script>
-</body>
-</html>`;
-
-  // Listen for height messages from iframe
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'svg-height' && event.data.id === iframeId.current && event.data.height) {
-        setHeight(Math.min(event.data.height + 20, 600)); // Cap at 600px
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
-
-  return (
-    <div className="my-3 rounded-lg bg-zinc-900 overflow-hidden">
-      {/* Toggle header */}
-      <div className="flex items-center gap-1 px-3 py-2 bg-zinc-800 border-b border-zinc-700">
-        <span className="text-xs text-zinc-400 mr-2">SVG</span>
-        <button
-          onClick={() => setView('preview')}
-          className={`px-2 py-0.5 text-xs rounded transition-colors ${
-            view === 'preview' 
-              ? 'bg-[var(--color-primary)] text-white' 
-              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
-          }`}
-        >
-          Preview
-        </button>
-        <button
-          onClick={() => setView('code')}
-          className={`px-2 py-0.5 text-xs rounded transition-colors ${
-            view === 'code' 
-              ? 'bg-[var(--color-primary)] text-white' 
-              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
-          }`}
-        >
-          Code
-        </button>
-      </div>
-      
-      {/* Content */}
-      {view === 'preview' ? (
-        <div className="overflow-auto" style={{ maxHeight: '600px' }}>
-          <iframe
-            srcDoc={iframeContent}
-            className="w-full border-0"
-            style={{ height: `${height}px`, background: colors.background }}
-            sandbox="allow-scripts"
-            title="SVG preview"
-          />
-        </div>
-      ) : (
-        <SyntaxHighlighter
-          style={oneDark}
-          language="xml"
-          PreTag="div"
-          customStyle={{
-            margin: 0,
-            borderRadius: 0,
-            fontSize: '0.8125rem',
-            maxHeight: '70vh',
-            overflow: 'auto',
-          }}
-        >
-          {code}
-        </SyntaxHighlighter>
-      )}
-    </div>
-  );
-});
-
-// LaTeX block component with Preview/Code toggle
-const LaTeXBlock = memo(({ code }: { code: string }) => {
-  const [view, setView] = useState<'preview' | 'code'>('preview');
-
-  return (
-    <div className="my-3 rounded-lg bg-zinc-900 overflow-hidden">
-      {/* Toggle header */}
-      <div className="flex items-center gap-1 px-3 py-2 bg-zinc-800 border-b border-zinc-700">
-        <span className="text-xs text-zinc-400 mr-2">LaTeX</span>
-        <button
-          onClick={() => setView('preview')}
-          className={`px-2 py-0.5 text-xs rounded transition-colors ${
-            view === 'preview' 
-              ? 'bg-[var(--color-primary)] text-white' 
-              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
-          }`}
-        >
-          Preview
-        </button>
-        <button
-          onClick={() => setView('code')}
-          className={`px-2 py-0.5 text-xs rounded transition-colors ${
-            view === 'code' 
-              ? 'bg-[var(--color-primary)] text-white' 
-              : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
-          }`}
-        >
-          Code
-        </button>
-      </div>
-      
-      {/* Content */}
-      {view === 'preview' ? (
-        <div className="p-4 overflow-x-auto">
-          <ReactMarkdown
-            remarkPlugins={[remarkMath]}
-            rehypePlugins={[rehypeKatex]}
-          >
-            {`$$${code}$$`}
-          </ReactMarkdown>
-        </div>
-      ) : (
-        <SyntaxHighlighter
-          style={oneDark}
-          language="latex"
-          PreTag="div"
-          customStyle={{
-            margin: 0,
-            borderRadius: 0,
-            fontSize: '0.8125rem',
-            maxHeight: '70vh',
-            overflow: 'auto',
-          }}
-        >
-          {code}
-        </SyntaxHighlighter>
-      )}
-    </div>
-  );
-});
-
-// Pyodide loader - singleton pattern with installed packages tracking
-let pyodidePromise: Promise<any> | null = null;
-let installedPackages: Set<string> = new Set(['numpy', 'micropip']);
-
-const loadPyodide = async () => {
-  if (!pyodidePromise) {
-    pyodidePromise = (async () => {
-      // @ts-ignore - Pyodide loaded from CDN
-      const pyodide = await window.loadPyodide({
-        indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.24.1/full/',
-      });
-      // Pre-load common packages
-      await pyodide.loadPackage(['numpy', 'micropip']);
-      return pyodide;
-    })();
-  }
-  return pyodidePromise;
-};
-
-// Install a package via micropip
-const installPackage = async (packageName: string): Promise<{ success: boolean; message: string }> => {
-  if (installedPackages.has(packageName.toLowerCase())) {
-    return { success: true, message: `${packageName} is already installed` };
-  }
-  
-  try {
-    const pyodide = await loadPyodide();
-    await pyodide.runPythonAsync(`
-import micropip
-await micropip.install('${packageName}')
-    `);
-    installedPackages.add(packageName.toLowerCase());
-    return { success: true, message: `Successfully installed ${packageName}` };
-  } catch (e: any) {
-    return { success: false, message: e.message || `Failed to install ${packageName}` };
-  }
-};
-
-// Python runner component with Code/Output/Args tabs, pip install, and error reporting
-const PythonRunner = memo(({ code: initialCode, onError }: { code: string; onError?: (error: string, code: string) => void }) => {
-  const [view, setView] = useState<'code' | 'output' | 'args' | 'packages'>('code');
-  const [code, setCode] = useState(initialCode);
-  const [args, setArgs] = useState<string>('');
-  const [output, setOutput] = useState<string>('');
-  const [error, setError] = useState<string | null>(null);
-  const [isRunning, setIsRunning] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [pyodideReady, setPyodideReady] = useState(false);
-  const [informModel, setInformModel] = useState(false);
-  const [hasReportedError, setHasReportedError] = useState(false);
-  const lastReportedErrorRef = useRef<string>('');
-  
-  // Package management
-  const [packageInput, setPackageInput] = useState('');
-  const [isInstalling, setIsInstalling] = useState(false);
-  const [packageStatus, setPackageStatus] = useState<string | null>(null);
-  const [sessionPackages, setSessionPackages] = useState<string[]>([...installedPackages]);
-
-  // Check if Pyodide script is loaded
-  useEffect(() => {
-    const checkPyodide = () => {
-      // @ts-ignore
-      if (window.loadPyodide) {
-        setPyodideReady(true);
-      }
-    };
-    
-    checkPyodide();
-    
-    // @ts-ignore
-    if (!window.loadPyodide) {
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js';
-      script.onload = checkPyodide;
-      document.head.appendChild(script);
-    }
-  }, []);
-
-  const handleInstallPackage = async () => {
-    if (!packageInput.trim() || isInstalling) return;
-    
-    setIsInstalling(true);
-    setPackageStatus(null);
-    
-    const result = await installPackage(packageInput.trim());
-    setPackageStatus(result.message);
-    
-    if (result.success) {
-      setSessionPackages([...installedPackages]);
-      setPackageInput('');
-    }
-    
-    setIsInstalling(false);
-  };
-
-  const runCode = async () => {
-    if (!pyodideReady) {
-      setError('Pyodide is still loading...');
-      return;
-    }
-    
-    setIsRunning(true);
-    setIsLoading(true);
-    setError(null);
-    setOutput('');
-    setView('output');
-    setHasReportedError(false);
-
-    try {
-      const pyodide = await loadPyodide();
-      setIsLoading(false);
-      
-      // Parse args into sys.argv
-      const argsList = args.trim() ? args.trim().split(/\s+/) : [];
-      
-      // Set up sys.argv
-      await pyodide.runPythonAsync(`
-import sys
-sys.argv = ['script.py'] + ${JSON.stringify(argsList)}
-      `);
-      
-      // Capture stdout
-      let stdout = '';
-      pyodide.setStdout({
-        batched: (text: string) => {
-          stdout += text + '\n';
-          setOutput(stdout);
-        }
-      });
-      
-      // Run the code
-      const result = await pyodide.runPythonAsync(code);
-      
-      // If there's a return value, add it to output
-      if (result !== undefined && result !== null) {
-        const resultStr = String(result);
-        if (resultStr && resultStr !== 'None') {
-          stdout += resultStr;
-          setOutput(stdout);
-        }
-      }
-      
-      if (!stdout.trim()) {
-        setOutput('(No output)');
-      }
-    } catch (e: any) {
-      setIsLoading(false);
-      const errorMsg = e.message || 'Execution failed';
-      setError(errorMsg);
-      
-      // Report error to LLM if checkbox is checked (only once per unique error)
-      const errorKey = `${code}:${errorMsg}`;
-      if (informModel && onError && !hasReportedError && lastReportedErrorRef.current !== errorKey) {
-        setHasReportedError(true);
-        lastReportedErrorRef.current = errorKey;
-        onError(errorMsg, code);
-      }
-    } finally {
-      setIsRunning(false);
-    }
-  };
-
-  return (
-    <div className="my-3 rounded-lg bg-zinc-900 overflow-hidden">
-      {/* Header with tabs and run button */}
-      <div className="flex items-center justify-between px-3 py-2 bg-zinc-800 border-b border-zinc-700 flex-wrap gap-2">
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-zinc-400 mr-2">Python</span>
-          {(['code', 'args', 'packages', 'output'] as const).map(tab => (
-            <button
-              key={tab}
-              onClick={() => setView(tab)}
-              className={`px-2 py-0.5 text-xs rounded transition-colors ${
-                view === tab 
-                  ? 'bg-[var(--color-primary)] text-white' 
-                  : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
-              }`}
-            >
-              {tab.charAt(0).toUpperCase() + tab.slice(1)}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-2">
-          {onError && (
-            <label className="flex items-center gap-1 text-xs text-zinc-400 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={informModel}
-                onChange={(e) => setInformModel(e.target.checked)}
-                className="w-3 h-3 rounded border-zinc-600 bg-zinc-700 text-[var(--color-primary)] focus:ring-[var(--color-primary)]"
-              />
-              Inform model of errors
-            </label>
-          )}
-          <button
-            onClick={runCode}
-            disabled={isRunning || !pyodideReady}
-            className="flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-green-600 text-white hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {isRunning ? (
-              <>
-                <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-                Running...
-              </>
-            ) : (
-              <>
-                <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
-                </svg>
-                Run
-              </>
-            )}
-          </button>
-        </div>
-      </div>
-      
-      {/* Content */}
-      {view === 'code' ? (
-        <div className="relative">
-          <textarea
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            className="w-full p-4 bg-zinc-900 text-zinc-100 font-mono text-sm resize-y min-h-[100px] max-h-[50vh] focus:outline-none"
-            spellCheck={false}
-            placeholder="# Enter Python code here..."
-          />
-        </div>
-      ) : view === 'args' ? (
-        <div className="p-4">
-          <label className="block text-xs text-zinc-400 mb-2">
-            Command-line arguments (space-separated, available as sys.argv[1:])
-          </label>
-          <input
-            type="text"
-            value={args}
-            onChange={(e) => setArgs(e.target.value)}
-            className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-zinc-100 font-mono text-sm focus:outline-none focus:border-[var(--color-primary)]"
-            placeholder="arg1 arg2 --flag value"
-          />
-          <div className="mt-3 text-xs text-zinc-500">
-            Example: If you enter "hello world --count 5", your code can access:
-            <pre className="mt-1 p-2 bg-zinc-800 rounded">
-              {`import sys
-print(sys.argv)  # ['script.py', 'hello', 'world', '--count', '5']`}
-            </pre>
-          </div>
-        </div>
-      ) : view === 'packages' ? (
-        <div className="p-4">
-          <label className="block text-xs text-zinc-400 mb-2">
-            Install packages (via micropip - PyPI packages that support Pyodide)
-          </label>
-          <div className="flex gap-2 mb-3">
-            <input
-              type="text"
-              value={packageInput}
-              onChange={(e) => setPackageInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleInstallPackage()}
-              className="flex-1 px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-zinc-100 font-mono text-sm focus:outline-none focus:border-[var(--color-primary)]"
-              placeholder="package-name"
-              disabled={isInstalling}
-            />
-            <button
-              onClick={handleInstallPackage}
-              disabled={isInstalling || !packageInput.trim()}
-              className="px-3 py-2 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {isInstalling ? 'Installing...' : 'Install'}
-            </button>
-          </div>
-          {packageStatus && (
-            <div className={`text-xs mb-3 ${packageStatus.includes('Success') ? 'text-green-400' : 'text-red-400'}`}>
-              {packageStatus}
-            </div>
-          )}
-          <div className="text-xs text-zinc-400 mb-2">Installed packages (this session):</div>
-          <div className="flex flex-wrap gap-1">
-            {sessionPackages.map(pkg => (
-              <span key={pkg} className="px-2 py-0.5 bg-zinc-700 rounded text-xs text-zinc-300">
-                {pkg}
-              </span>
-            ))}
-          </div>
-          <div className="mt-3 text-xs text-zinc-500">
-            Note: Not all PyPI packages work with Pyodide. Pure Python packages and those with Pyodide wheels are supported.
-            <a href="https://pyodide.org/en/stable/usage/packages-in-pyodide.html" target="_blank" rel="noopener" className="text-blue-400 ml-1 hover:underline">
-              See supported packages →
-            </a>
-          </div>
-        </div>
-      ) : (
-        <div className="p-4 font-mono text-sm min-h-[100px] max-h-[50vh] overflow-auto">
-          {isLoading ? (
-            <div className="flex items-center gap-2 text-zinc-400">
-              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-              Loading Python environment...
-            </div>
-          ) : error ? (
-            <div className="text-red-400 whitespace-pre-wrap">{error}</div>
-          ) : output ? (
-            <div className="text-green-400 whitespace-pre-wrap">{output}</div>
-          ) : (
-            <div className="text-zinc-500">Click "Run" to execute the code</div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-});
 
 // Tool citation data
 interface ToolCitation {
@@ -658,187 +14,6 @@ interface ToolCitation {
   result_summary?: string;
   result_url?: string;
   success: boolean;
-}
-
-// Thinking tokens - fetch fresh on each component mount (with short cache)
-interface ThinkingTokensState {
-  begin: string;
-  end: string;
-  loadedAt: number;
-}
-
-let thinkingTokensCache: ThinkingTokensState | null = null;
-const CACHE_TTL = 30000; // 30 second cache - allows admin changes to take effect quickly
-
-async function fetchThinkingTokens(): Promise<{ begin: string; end: string }> {
-  try {
-    const res = await api.get('/utils/thinking-tokens');
-    const tokens = {
-      begin: res.data.think_begin_token || '',
-      end: res.data.think_end_token || '',
-    };
-    // Debug logging
-    if (tokens.begin || tokens.end) {
-      console.debug('[ThinkingTokens] Loaded:', { begin: tokens.begin, end: tokens.end });
-    }
-    return tokens;
-  } catch (e) {
-    console.warn('Failed to load thinking tokens:', e);
-    return { begin: '', end: '' };
-  }
-}
-
-function useThinkingTokens() {
-  const [tokens, setTokens] = useState<{ begin: string; end: string } | null>(null);
-  
-  useEffect(() => {
-    let cancelled = false;
-    
-    async function load() {
-      // Check if cache is still valid
-      const now = Date.now();
-      if (thinkingTokensCache && (now - thinkingTokensCache.loadedAt) < CACHE_TTL) {
-        setTokens({ begin: thinkingTokensCache.begin, end: thinkingTokensCache.end });
-        return;
-      }
-      
-      // Fetch fresh tokens
-      const freshTokens = await fetchThinkingTokens();
-      
-      if (!cancelled) {
-        thinkingTokensCache = { ...freshTokens, loadedAt: now };
-        setTokens(freshTokens);
-      }
-    }
-    
-    load();
-    
-    return () => { cancelled = true; };
-  }, []);
-  
-  return tokens;
-}
-
-// Extract thinking blocks from content
-interface ThinkingBlock {
-  thinking: string;
-  afterContent: string;
-}
-
-function extractThinkingBlocks(content: string, beginToken: string, endToken: string): { blocks: ThinkingBlock[]; finalContent: string } {
-  if (!beginToken || !endToken) {
-    return { blocks: [], finalContent: content };
-  }
-  
-  const blocks: ThinkingBlock[] = [];
-  let remaining = content;
-  let result = '';
-  
-  while (remaining) {
-    const beginIdx = remaining.indexOf(beginToken);
-    if (beginIdx === -1) {
-      result += remaining;
-      break;
-    }
-    
-    // Add content before the thinking block
-    result += remaining.slice(0, beginIdx);
-    
-    const afterBegin = remaining.slice(beginIdx + beginToken.length);
-    const endIdx = afterBegin.indexOf(endToken);
-    
-    if (endIdx === -1) {
-      // No end token found - treat the rest as thinking (incomplete)
-      blocks.push({ thinking: afterBegin, afterContent: '' });
-      break;
-    }
-    
-    const thinking = afterBegin.slice(0, endIdx);
-    remaining = afterBegin.slice(endIdx + endToken.length);
-    
-    blocks.push({ thinking, afterContent: '' });
-  }
-  
-  // Debug logging when thinking is found
-  if (blocks.length > 0) {
-    console.debug(`[ThinkingBlocks] Found ${blocks.length} thinking block(s)`);
-  }
-  
-  return { blocks, finalContent: result };
-}
-
-// Collapsible tool result component
-function ToolResultPanel({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(false);
-  
-  // Parse tool result content to get summary
-  let toolSummary = 'Tool Result';
-  try {
-    const parsed = JSON.parse(content);
-    if (parsed.tool_name) {
-      toolSummary = `${parsed.tool_name}`;
-      if (parsed.operation) toolSummary += `: ${parsed.operation}`;
-    }
-  } catch {
-    // Not JSON, use first 50 chars as summary
-    toolSummary = content.slice(0, 50) + (content.length > 50 ? '...' : '');
-  }
-  
-  return (
-    <div className="py-2 pl-4 mx-4 max-w-3xl">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors w-full text-left"
-      >
-        <span className={`transform transition-transform ${expanded ? 'rotate-90' : ''}`}>
-          ▶
-        </span>
-        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-        </svg>
-        <span className="truncate">{toolSummary}</span>
-      </button>
-      {expanded && (
-        <div className="mt-2 pl-5 border-l-2 border-[var(--color-border)]">
-          <pre className="text-xs text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono max-h-64 overflow-y-auto">
-            {content}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Collapsible thinking block component
-function ThinkingBlockPanel({ thinking, isStreaming }: { thinking: string; isStreaming?: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  
-  return (
-    <div className="mb-3">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors"
-      >
-        <span className={`transform transition-transform ${expanded ? 'rotate-90' : ''}`}>
-          ▶
-        </span>
-        <span className="flex items-center gap-1.5">
-          🧠 {isStreaming ? 'Thinking...' : 'Thinking'}
-          {isStreaming && (
-            <span className="inline-block w-1.5 h-3 bg-[var(--color-primary)] animate-pulse" />
-          )}
-        </span>
-      </button>
-      {expanded && (
-        <div className="mt-2 pl-5 border-l-2 border-[var(--color-border)]">
-          <div className="text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap opacity-75 italic">
-            {thinking}
-          </div>
-        </div>
-      )}
-    </div>
-  );
 }
 
 /**
@@ -1035,7 +210,6 @@ interface MessageProps {
   onReadAloud?: (content: string) => void;
   onImageRetry?: (prompt: string, width?: number, height?: number, seed?: number) => void;
   onImageEdit?: (prompt: string) => void;
-  onPythonError?: (messageId: string, error: string, code: string) => void;
   isReadingAloud?: boolean;
   isLastAssistant?: boolean;
   onArtifactClick?: (artifact: Artifact) => void;
@@ -1053,11 +227,6 @@ function arePropsEqual(prevProps: MessageProps, nextProps: MessageProps): boolea
   if (prevProps.message.id !== nextProps.message.id) return false;
   if (prevProps.message.content !== nextProps.message.content) return false;
   if (prevProps.message.current_branch !== nextProps.message.current_branch) return false;
-  
-  // Check attachments changes
-  const prevAttachments = prevProps.message.attachments?.length ?? 0;
-  const nextAttachments = nextProps.message.attachments?.length ?? 0;
-  if (prevAttachments !== nextAttachments) return false;
   
   // Check metadata changes (especially for image generation)
   const prevMeta = prevProps.message.metadata;
@@ -1100,7 +269,6 @@ function MessageBubbleInner({
   onReadAloud,
   onImageRetry,
   onImageEdit,
-  onPythonError,
   isReadingAloud,
   isLastAssistant,
   onArtifactClick,
@@ -1237,7 +405,20 @@ function MessageBubbleInner({
   }
   
   if (isTool) {
-    return <ToolResultPanel content={message.content} />;
+    return (
+      <div className="py-2 pl-6 border-l-2 border-[var(--color-border)] mx-4 max-w-3xl">
+        <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)] mb-1">
+          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+          Tool Result
+        </div>
+        <pre className="text-xs text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono">
+          {message.content}
+        </pre>
+      </div>
+    );
   }
   
   // Check if content has artifact references
@@ -1246,21 +427,12 @@ function MessageBubbleInner({
     ? message.content.replace(/\[📦 Artifact: [^\]]+\]/g, '') 
     : message.content;
   
-  // Get thinking tokens for extracting thinking blocks
-  const thinkingTokens = useThinkingTokens();
-  
-  // Extract thinking blocks from content
-  const { blocks: thinkingBlocks, finalContent: contentAfterThinking } = 
-    thinkingTokens && thinkingTokens.begin && thinkingTokens.end
-      ? extractThinkingBlocks(contentWithoutArtifacts, thinkingTokens.begin, thinkingTokens.end)
-      : { blocks: [], finalContent: contentWithoutArtifacts };
-  
   // Preprocess content: fix nested code fences and extract filenames
-  const processedContent = preprocessContent(contentAfterThinking);
+  const processedContent = preprocessContent(contentWithoutArtifacts);
   
   return (
-    <div className={`group py-4 md:py-4 overflow-hidden ${isUser && !isFileContent ? 'bg-[var(--color-surface)]/30' : ''} ${isFileContent ? 'bg-blue-500/5 border-l-2 border-blue-500/50' : ''}`}>
-      <div className="max-w-3xl mx-auto px-3 md:px-4 overflow-hidden">
+    <div className={`group py-4 md:py-4 ${isUser && !isFileContent ? 'bg-[var(--color-surface)]/30' : ''} ${isFileContent ? 'bg-blue-500/5 border-l-2 border-blue-500/50' : ''}`}>
+      <div className="max-w-3xl mx-auto px-3 md:px-4">
         {/* Role label with branch navigation */}
         <div className="flex items-center gap-2 mb-2">
           <span className={`flex items-center gap-1.5 text-sm md:text-xs font-medium uppercase tracking-wide ${
@@ -1278,9 +450,6 @@ function MessageBubbleInner({
           {message.input_tokens != null && message.output_tokens != null && (
             <span className="text-sm md:text-xs text-[var(--color-text-secondary)]">
               · {message.input_tokens + message.output_tokens} tokens
-              {message.time_to_first_token != null && message.time_to_complete != null && message.output_tokens > 0 && (
-                <> · {(message.time_to_first_token / 1000).toFixed(2)}s TTFT · {(message.time_to_complete / 1000).toFixed(2)}s total · {(message.output_tokens / (message.time_to_complete / 1000)).toFixed(1)} t/s</>
-              )}
             </span>
           )}
           
@@ -1378,135 +547,21 @@ function MessageBubbleInner({
             </div>
           </div>
         ) : processedContent ? (
-          <>
-            {/* Render thinking blocks */}
-            {thinkingBlocks.length > 0 && (
-              <div className="mb-3">
-                {thinkingBlocks.map((block, idx) => (
-                  <ThinkingBlockPanel 
-                    key={idx} 
-                    thinking={block.thinking} 
-                    isStreaming={isStreaming && idx === thinkingBlocks.length - 1}
-                  />
-                ))}
-              </div>
-            )}
-            
-            {isStreaming ? (
-              // During streaming: plain text for performance (skip expensive markdown parsing)
-              <div className="message-content-container max-w-none text-[var(--color-text)] whitespace-pre-wrap leading-relaxed">
-                {processedContent}
-                <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
-              </div>
-            ) : isUser ? (
-              // User messages: render markdown for code blocks, mermaid, svg, latex
-              <div className="message-content-container max-w-none text-[var(--color-text)] leading-relaxed">
-                <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={[rehypeKatex]}
-                components={{
-                  // Preserve paragraph whitespace
-                  p: ({ children }) => <p className="whitespace-pre-wrap">{children}</p>,
-                  code({ node, inline, className, children, ...props }: any) {
-                    const match = /language-(\w+)/.exec(className || '');
-                    const code = String(children).replace(/\n$/, '');
-                    const language = match ? match[1].toLowerCase() : '';
-                    
-                    // Render mermaid diagrams
-                    if (!inline && language === 'mermaid') {
-                      return <MermaidDiagram code={code} />;
-                    }
-                    
-                    // Render SVG with preview
-                    if (!inline && language === 'svg') {
-                      return <SVGPreview code={code} />;
-                    }
-                    
-                    // Render LaTeX blocks
-                    if (!inline && (language === 'latex' || language === 'tex' || language === 'math')) {
-                      return <LaTeXBlock code={code} />;
-                    }
-                    
-                    // Regular code blocks with syntax highlighting
-                    if (!inline && match) {
-                      return (
-                        <div className="relative group/code my-3 overflow-hidden">
-                          <SyntaxHighlighter
-                            style={oneDark}
-                            language={match[1]}
-                            PreTag="div"
-                            customStyle={{
-                              margin: 0,
-                              borderRadius: '0.5rem',
-                              fontSize: '0.8125rem',
-                            }}
-                            {...props}
-                          >
-                            {code}
-                          </SyntaxHighlighter>
-                        </div>
-                      );
-                    }
-                    
-                    // Inline code
-                    return (
-                      <code className="px-1.5 py-0.5 bg-zinc-800 rounded text-sm font-mono" {...props}>
-                        {children}
-                      </code>
-                    );
-                  },
-                }}
-                >
-                  {processedContent}
-                </ReactMarkdown>
-              </div>
-            ) : (
-              // After streaming complete: full markdown rendering with CSS containment
-              <div className="message-content-container max-w-none text-[var(--color-text)] leading-relaxed">
-                <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={[rehypeKatex]}
+          isStreaming ? (
+            // During streaming: plain text for performance (skip expensive markdown parsing)
+            <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)] whitespace-pre-wrap">
+              {processedContent}
+              <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
+            </div>
+          ) : (
+            // After streaming complete: full markdown rendering
+            <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)]">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
                 components={{
                   code({ node, inline, className, children, ...props }: any) {
                     const match = /language-(\w+)/.exec(className || '');
                     const code = String(children).replace(/\n$/, '');
-                    const language = match ? match[1].toLowerCase() : '';
-                    
-                    // Render mermaid diagrams
-                    // Errors are shown to user but NOT auto-reported to LLM
-                    // User can manually ask for fixes if needed
-                    if (!inline && language === 'mermaid') {
-                      return (
-                        <MermaidDiagram 
-                          code={code} 
-                        />
-                      );
-                    }
-                    
-                    // Render SVG with preview
-                    if (!inline && language === 'svg') {
-                      return (
-                        <SVGPreview 
-                          code={code} 
-                        />
-                      );
-                    }
-                    
-                    // Render Python with runner
-                    // User can check "Inform model of errors" to report errors
-                    if (!inline && (language === 'python' || language === 'py')) {
-                      return (
-                        <PythonRunner 
-                          code={code}
-                          onError={!isStreaming && onPythonError ? (error, pythonCode) => onPythonError(message.id, error, pythonCode) : undefined}
-                        />
-                      );
-                    }
-                    
-                    // Render LaTeX blocks
-                    if (!inline && (language === 'latex' || language === 'tex' || language === 'math')) {
-                      return <LaTeXBlock code={code} />;
-                    }
                     
                     // Extract filename from meta or first line comment
                     // Pattern: ```lang::/path/to/file or ```lang filename="/path/to/file"
@@ -1518,7 +573,7 @@ function MessageBubbleInner({
                     
                     if (!inline && match) {
                       return (
-                        <div className="relative group/code my-3 overflow-hidden">
+                        <div className="relative group/code my-3">
                           {/* Filename header */}
                           {filename && (
                             <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800 border-b border-zinc-700 rounded-t-lg">
@@ -1550,8 +605,6 @@ function MessageBubbleInner({
                               margin: 0,
                               borderRadius: filename ? '0 0 0.5rem 0.5rem' : '0.5rem',
                               fontSize: '0.8125rem',
-                              maxHeight: '70vh',
-                              overflow: 'auto',
                             }}
                             {...props}
                           >
@@ -1624,9 +677,6 @@ function MessageBubbleInner({
                   ol({ children }) {
                     return <ol className="list-decimal list-outside ml-4 mb-2 space-y-0.5">{children}</ol>;
                   },
-                  li({ children }) {
-                    return <li className="text-[var(--color-text)] pl-1">{children}</li>;
-                  },
                   a({ href, children }) {
                     return (
                       <a
@@ -1646,42 +696,12 @@ function MessageBubbleInner({
                       </blockquote>
                     );
                   },
-                  // Headings with proper sizes
-                  h1({ children }) {
-                    return <h1 className="text-2xl font-bold mt-6 mb-3 text-[var(--color-text)]">{children}</h1>;
-                  },
-                  h2({ children }) {
-                    return <h2 className="text-xl font-bold mt-5 mb-2 text-[var(--color-text)]">{children}</h2>;
-                  },
-                  h3({ children }) {
-                    return <h3 className="text-lg font-semibold mt-4 mb-2 text-[var(--color-text)]">{children}</h3>;
-                  },
-                  h4({ children }) {
-                    return <h4 className="text-base font-semibold mt-3 mb-1 text-[var(--color-text)]">{children}</h4>;
-                  },
-                  h5({ children }) {
-                    return <h5 className="text-sm font-semibold mt-2 mb-1 text-[var(--color-text)]">{children}</h5>;
-                  },
-                  h6({ children }) {
-                    return <h6 className="text-sm font-medium mt-2 mb-1 text-[var(--color-text-secondary)]">{children}</h6>;
-                  },
-                  // Text formatting
-                  strong({ children }) {
-                    return <strong className="font-bold text-[var(--color-text)]">{children}</strong>;
-                  },
-                  em({ children }) {
-                    return <em className="italic">{children}</em>;
-                  },
-                  hr() {
-                    return <hr className="my-4 border-t border-[var(--color-border)]" />;
-                  },
                 }}
               >
                 {processedContent}
               </ReactMarkdown>
             </div>
-            )}
-          </>
+          )
         ) : isStreaming ? (
           <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse" />
         ) : null}

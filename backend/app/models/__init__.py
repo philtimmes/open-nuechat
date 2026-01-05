@@ -9,7 +9,7 @@ Module Structure:
 - chat.py: Chat, Message, ChatParticipant
 - document.py: Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare
 - assistant.py: CustomAssistant, AssistantConversation, assistant_knowledge_stores
-- billing.py: TokenUsage, Subscription, PaymentMethod, Transaction
+- billing.py: TokenUsage
 - tool.py: Tool, ToolUsage
 - filter.py: ChatFilter
 - upload.py: UploadedFile, UploadedArchive
@@ -40,24 +40,16 @@ from .base import (
 from .user import User, OAuthAccount, APIKey
 
 # Chat and message models
-from .chat import Chat, Message, ChatParticipant, SharedChat
+from .chat import Chat, Message, ChatParticipant
 
 # Document and knowledge store models
 from .document import Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare
 
 # Assistant models
-from .assistant import CustomAssistant, AssistantConversation, assistant_knowledge_stores
+from .assistant import CustomAssistant, AssistantConversation, AssistantCategory, assistant_knowledge_stores
 
-# Billing and payment models
-from .billing import (
-    TokenUsage,
-    Subscription,
-    PaymentMethod,
-    Transaction,
-    PaymentProvider,
-    PaymentStatus,
-    SubscriptionStatus,
-)
+# Billing models
+from .billing import TokenUsage
 
 # Tool models
 from .tool import Tool, ToolUsage
@@ -89,9 +81,6 @@ __all__ = [
     "ToolType",
     "FilterType",
     "FilterPriority",
-    "PaymentProvider",
-    "PaymentStatus",
-    "SubscriptionStatus",
     # User
     "User",
     "OAuthAccount",
@@ -108,12 +97,10 @@ __all__ = [
     # Assistant
     "CustomAssistant",
     "AssistantConversation",
+    "AssistantCategory",
     "assistant_knowledge_stores",
-    # Billing & Payments
+    # Billing
     "TokenUsage",
-    "Subscription",
-    "PaymentMethod",
-    "Transaction",
     # Tool
     "Tool",
     "ToolUsage",

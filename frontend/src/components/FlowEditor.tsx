@@ -87,6 +87,7 @@ const STEP_TYPES: Record<string, { icon: string; label: string; color: string; c
   to_tool: { icon: '🔧', label: 'Run Tool', color: '#F59E0B', category: 'Tools' },
   
   // Flow Control
+  keyword_check: { icon: '🔑', label: 'Keyword Check', color: '#10B981', category: 'Flow' },
   go_to_llm: { icon: '➡️', label: 'Send to Main AI', color: '#10B981', category: 'Flow' },
   filter_complete: { icon: '✅', label: 'Complete', color: '#10B981', category: 'Flow' },
   stop: { icon: '⛔', label: 'Stop', color: '#EF4444', category: 'Flow' },
@@ -872,6 +873,82 @@ function ConfigPanel({ step, stepIndex, allSteps, onUpdate, onDelete, availableT
             >
               <span>+</span> Add Output
             </button>
+          </div>
+        )}
+
+        {step.type === 'keyword_check' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">
+                Keywords (one per line)
+              </label>
+              <textarea
+                value={Array.isArray(step.config?.keywords) ? (step.config.keywords as string[]).join('\n') : ''}
+                onChange={(e) => updateConfig('keywords', e.target.value.split('\n').filter(k => k.trim()))}
+                rows={4}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] font-mono"
+                placeholder="Enter keywords, one per line"
+              />
+            </div>
+            
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Match Mode</label>
+                <select
+                  value={getConfigStr('mode', 'any')}
+                  onChange={(e) => updateConfig('mode', e.target.value)}
+                  className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                >
+                  <option value="any">Any keyword</option>
+                  <option value="all">All keywords</option>
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Match Type</label>
+                <select
+                  value={getConfigStr('match_type', 'contains')}
+                  onChange={(e) => updateConfig('match_type', e.target.value)}
+                  className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                >
+                  <option value="contains">Contains</option>
+                  <option value="word">Whole word</option>
+                  <option value="exact">Exact match</option>
+                  <option value="starts_with">Starts with</option>
+                  <option value="ends_with">Ends with</option>
+                  <option value="regex">Regex</option>
+                </select>
+              </div>
+            </div>
+            
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">On No Match</label>
+              <select
+                value={getConfigStr('on_no_match', 'skip_chain')}
+                onChange={(e) => updateConfig('on_no_match', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+              >
+                <option value="skip_chain">Skip entire chain (quick exit)</option>
+                <option value="go_to_llm">Go to main AI</option>
+                <option value="continue">Continue to next step</option>
+              </select>
+              <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                "Skip chain" is fastest - exits immediately if keywords don't match
+              </p>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id={`case-sensitive-${step.id}`}
+                checked={Boolean(step.config?.case_sensitive)}
+                onChange={(e) => updateConfig('case_sensitive', e.target.checked)}
+                className="rounded"
+              />
+              <label htmlFor={`case-sensitive-${step.id}`} className="text-xs text-[var(--color-text)]">
+                Case sensitive
+              </label>
+            </div>
           </div>
         )}
 

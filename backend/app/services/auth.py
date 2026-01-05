@@ -99,19 +99,6 @@ class AuthService:
         full_name: Optional[str] = None,
         avatar_url: Optional[str] = None,
     ) -> User:
-        from app.models import KnowledgeStore
-        import uuid
-        
-        # Create user's chat knowledge store
-        store_id = str(uuid.uuid4())
-        store = KnowledgeStore(
-            id=store_id,
-            owner_id=None,  # Will be updated after user is created
-            name="My Chat History",
-            description="Automatically indexed knowledge from all your conversations",
-            is_public=False,
-        )
-        
         user = User(
             email=email,
             username=username,
@@ -120,16 +107,9 @@ class AuthService:
             avatar_url=avatar_url,
             tier=UserTier.FREE,
             tokens_limit=settings.FREE_TIER_TOKENS,
-            chat_knowledge_store_id=store_id,
         )
         db.add(user)
         await db.flush()
-        
-        # Now set the owner_id on the store
-        store.owner_id = user.id
-        db.add(store)
-        await db.flush()
-        
         return user
     
     @staticmethod
@@ -174,8 +154,8 @@ class OAuth2Service:
         )
     
     @staticmethod
-    async def get_google_auth_url(redirect_uri: str, state: str, db: AsyncSession = None, code_challenge: str = None) -> str:
-        """Get Google authorization URL with PKCE support. Reads credentials from DB if available."""
+    async def get_google_auth_url(redirect_uri: str, state: str, db: AsyncSession = None) -> str:
+        """Get Google authorization URL. Reads credentials from DB if available."""
         from app.services.settings_service import SettingsService
         
         client_id = None
@@ -188,16 +168,9 @@ class OAuth2Service:
                 client_secret = oauth_settings["client_secret"]
         
         client = OAuth2Service.get_google_client(redirect_uri, client_id, client_secret)
-        
-        # Build authorization URL with optional PKCE
-        auth_params = {"state": state}
-        if code_challenge:
-            auth_params["code_challenge"] = code_challenge
-            auth_params["code_challenge_method"] = "S256"
-        
         url, _ = client.create_authorization_url(
             OAuth2Service.GOOGLE_AUTHORIZE_URL,
-            **auth_params,
+            state=state,
         )
         return url
     
@@ -226,10 +199,9 @@ class OAuth2Service:
     async def handle_google_callback(
         db: AsyncSession, 
         code: str, 
-        redirect_uri: str,
-        code_verifier: str = None
+        redirect_uri: str
     ) -> Tuple[User, str, str]:
-        """Handle Google OAuth callback with PKCE, return user and tokens"""
+        """Handle Google OAuth callback, return user and tokens"""
         from app.services.settings_service import SettingsService
         
         # Get OAuth settings from database
@@ -240,14 +212,10 @@ class OAuth2Service:
         
         client = OAuth2Service.get_google_client(redirect_uri, client_id, client_secret)
         
-        # Exchange code for token with PKCE verifier
-        token_params = {"code": code}
-        if code_verifier:
-            token_params["code_verifier"] = code_verifier
-        
+        # Exchange code for token
         token = await client.fetch_token(
             OAuth2Service.GOOGLE_TOKEN_URL,
-            **token_params,
+            code=code,
         )
         
         # Get user info

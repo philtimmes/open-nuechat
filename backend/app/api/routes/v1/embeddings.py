@@ -73,10 +73,6 @@ async def create_embeddings(
     
     Compatible with OpenAI's /v1/embeddings endpoint.
     
-    **Authentication:**
-    - Header: `Authorization: Bearer nxs_...`
-    - Query parameter: `?api_key=nxs_...`
-    
     **Model:**
     Uses the locally configured embedding model (sentence-transformers).
     The model parameter is accepted for compatibility but the local model is used.

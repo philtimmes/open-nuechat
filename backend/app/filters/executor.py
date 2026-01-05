@@ -545,6 +545,24 @@ class ChainExecutor:
             logger.info(f"[FILTER_DEBUG:{chain_name}] Variables: {dict(ctx.variables)}")
             logger.info(f"[FILTER_DEBUG:{chain_name}] ════════════════════════════════════════════════════════")
         
+        # Execute steps
+        ctx = await self._execute_steps(steps, ctx, max_iter)
+        
+        # Determine final content
+        if ctx.final_message:
+            final_content = ctx.final_message
+        elif ctx.context_items:
+            # Inject context into query
+            context_str = ctx.get_context_string()
+            final_content = f"Context:\n{context_str}\n\nQuery: {ctx.original_query}"
+        else:
+            final_content = ctx.current_value or ctx.original_query
+        
+        ctx.debug_log("Chain execution complete")
+        ctx.debug_log("Final signal", ctx.signal.name)
+        ctx.debug_log("Proceed to LLM", ctx.proceed_to_llm)
+        ctx.debug_log("Final content", final_content)
+        
         return ExecutionResult(
             content=str(final_content),
             context=ctx,
@@ -1348,77 +1366,89 @@ class ChainExecutor:
         
         return ctx
     
-    async def _prim_call_tool(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+    async def _prim_keyword_check(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
         """
-        Simplified tool call primitive.
+        Check if query contains/matches keywords. Quick exit if no match.
         
-        Supports two formats:
-        1. String format: "tool_name" - calls tool with $Query as default param
-        2. Object format: {"name": "tool_name", "query": "...", "param1": "value1"}
-        
-        Config options:
-        - name/tool: Tool name (required)
-        - query: Query parameter (defaults to $Query or $PreviousResult)
-        - Any other keys become tool parameters
-        - output_var: Variable to store result
-        - add_to_context: Add result to context for LLM
-        - context_label: Label for context
-        
-        Example usage in chain:
-        {"type": "call_tool", "config": "web_search"}
-        {"type": "call_tool", "config": {"name": "web_search", "query": "{Query}"}}
+        Config:
+            keywords: list of keywords to check for
+            mode: "any" (default) or "all" - whether any or all keywords must match
+            match_type: "contains" (default), "exact", "starts_with", "ends_with", "regex"
+            case_sensitive: bool (default False)
+            on_no_match: "skip_chain" (default), "continue", "go_to_llm"
+            input_var: variable to check (default: $Query)
         """
-        if not self._tool_func:
-            raise RuntimeError("Tool function not configured")
+        keywords = config.get("keywords", [])
+        mode = config.get("mode", "any")  # "any" or "all"
+        match_type = config.get("match_type", "contains")
+        case_sensitive = config.get("case_sensitive", False)
+        on_no_match = config.get("on_no_match", "skip_chain")
+        input_var = config.get("input_var", "$Query")
         
-        # Handle string config (just tool name)
-        if isinstance(config, str):
-            config = {"name": config}
-        
-        tool_name = config.get("name") or config.get("tool") or config.get("tool_name")
-        if not tool_name:
-            ctx.debug_log("  call_tool - SKIPPED (no tool name)")
+        if not keywords:
+            ctx.debug_log("  keyword_check - no keywords specified, continuing")
             return ctx
         
-        output_var = config.get("output_var")
-        add_to_context = config.get("add_to_context", False)
-        context_label = config.get("context_label", tool_name)
+        # Get the text to check
+        text = ctx.resolve_variable(input_var)
+        if text is None:
+            text = ctx.original_query
+        text = str(text)
         
-        ctx.debug_log("  call_tool - tool", tool_name)
+        if not case_sensitive:
+            text = text.lower()
+            keywords = [k.lower() for k in keywords]
         
-        # Build params from remaining config keys
-        params = {}
-        reserved_keys = {"name", "tool", "tool_name", "output_var", "add_to_context", "context_label"}
+        ctx.debug_log("  keyword_check - text", text[:100])
+        ctx.debug_log("  keyword_check - keywords", keywords)
+        ctx.debug_log("  keyword_check - mode", mode)
+        ctx.debug_log("  keyword_check - match_type", match_type)
         
-        for key, value in config.items():
-            if key not in reserved_keys:
-                if isinstance(value, str):
-                    params[key] = ctx.interpolate(value)
-                else:
-                    params[key] = value
+        # Check each keyword
+        matches = []
+        for keyword in keywords:
+            matched = False
+            if match_type == "contains":
+                matched = keyword in text
+            elif match_type == "exact":
+                matched = text == keyword
+            elif match_type == "starts_with":
+                matched = text.startswith(keyword)
+            elif match_type == "ends_with":
+                matched = text.endswith(keyword)
+            elif match_type == "regex":
+                import re
+                try:
+                    matched = bool(re.search(keyword, text))
+                except re.error:
+                    ctx.debug_log("  keyword_check - invalid regex", keyword)
+                    matched = False
+            elif match_type == "word":
+                # Match whole word only
+                import re
+                matched = bool(re.search(r'\b' + re.escape(keyword) + r'\b', text))
+            
+            matches.append(matched)
+            ctx.debug_log(f"  keyword_check - '{keyword}' matched: {matched}")
         
-        # If no query param, use previous result or original query
-        if "query" not in params:
-            if ctx.previous_result:
-                params["query"] = str(ctx.previous_result)
-            else:
-                params["query"] = ctx.original_query
+        # Determine overall result based on mode
+        if mode == "all":
+            result = all(matches)
+        else:  # "any"
+            result = any(matches)
         
-        ctx.debug_log("  call_tool - params", params)
+        ctx.debug_log("  keyword_check - overall result", result)
+        ctx.set_variable("keyword_matched", result)
         
-        # Call tool
-        result = await self._tool_func(tool_name, params)
-        
-        ctx.previous_result = result
-        
-        if output_var:
-            ctx.set_variable(output_var, result)
-        else:
-            ctx.current_value = result
-        
-        if add_to_context and result:
-            ctx.add_context(str(result), context_label, tool_name)
-        
-        ctx.debug_log("  call_tool - result", str(result)[:200] if result else None)
+        if not result:
+            ctx.debug_log(f"  keyword_check - no match, action: {on_no_match}")
+            if on_no_match == "skip_chain":
+                # Skip this entire chain, pass query through unchanged
+                ctx.signal = FlowSignal.FILTER_COMPLETE
+                ctx.proceed_to_llm = True
+                ctx.final_message = ctx.original_query
+            elif on_no_match == "go_to_llm":
+                ctx = await self._prim_go_to_llm({}, ctx)
+            # "continue" does nothing special
         
         return ctx

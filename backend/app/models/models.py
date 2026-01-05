@@ -64,9 +64,6 @@ from .upload import UploadedFile, UploadedArchive
 # Settings models
 from .settings import SystemSetting, Theme
 
-# Agent Flow models
-from .agent_flow import AgentFlow
-
 # Export all for "from app.models.models import *"
 __all__ = [
     # Base
@@ -112,6 +109,4 @@ __all__ = [
     # Settings
     "SystemSetting",
     "Theme",
-    # Agent Flow
-    "AgentFlow",
 ]

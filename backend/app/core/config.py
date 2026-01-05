@@ -99,25 +99,6 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     
-    # Flag to track if SECRET_KEY was auto-generated (insecure for production)
-    _secret_key_generated: bool = False
-    
-    def validate_secret_key(self) -> None:
-        """
-        Warn if SECRET_KEY appears to be auto-generated in production.
-        Auto-generated keys change on restart, invalidating all sessions.
-        """
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        # Check if key looks auto-generated (same length as secrets.token_urlsafe(32))
-        if len(self.SECRET_KEY) == 43 and not self.DEBUG:  # 32 bytes base64 = 43 chars
-            logger.warning(
-                "⚠️  SECRET_KEY appears to be auto-generated. "
-                "Set a stable SECRET_KEY in production to prevent session invalidation on restart. "
-                "Generate one with: openssl rand -hex 32"
-            )
-    
     # Administrator Account (created on startup if set)
     ADMIN_EMAIL: str = "admin@localhost"
     ADMIN_PASS: Optional[str] = None  # If set, creates/updates admin account on startup
@@ -161,39 +142,18 @@ class Settings(BaseSettings):
     RAG_CONTEXT_PROMPT: str = "The following information has been retrieved from the user's documents to help answer their question:"
     
     # ===========================================
-    # BILLING & PAYMENTS
+    # BILLING
     # ===========================================
     
-    # Stripe configuration
     STRIPE_API_KEY: Optional[str] = None
     STRIPE_WEBHOOK_SECRET: Optional[str] = None
-    STRIPE_PUBLISHABLE_KEY: Optional[str] = None
-    
-    # PayPal configuration
-    PAYPAL_CLIENT_ID: Optional[str] = None
-    PAYPAL_CLIENT_SECRET: Optional[str] = None
-    PAYPAL_WEBHOOK_ID: Optional[str] = None
-    PAYPAL_MODE: str = "sandbox"  # "sandbox" or "live"
-    
-    # Google Pay configuration (uses Stripe as processor)
-    GOOGLE_PAY_MERCHANT_ID: Optional[str] = None
-    GOOGLE_PAY_MERCHANT_NAME: str = "NueChat"
-    
-    # Payment settings
-    PAYMENT_CURRENCY: str = "USD"
-    PAYMENT_SUCCESS_URL: str = "/billing?status=success"
-    PAYMENT_CANCEL_URL: str = "/billing?status=cancelled"
     
     # Pricing tiers (tokens per tier)
     FREE_TIER_TOKENS: int = 100_000
     PRO_TIER_TOKENS: int = 1_000_000
     ENTERPRISE_TIER_TOKENS: int = 10_000_000
     
-    # Tier pricing (monthly, in USD)
-    PRO_TIER_PRICE: float = 20.00
-    ENTERPRISE_TIER_PRICE: float = 100.00
-    
-    # Token pricing (per 1M tokens for overage)
+    # Token pricing (per 1M tokens)
     INPUT_TOKEN_PRICE: float = 3.00
     OUTPUT_TOKEN_PRICE: float = 15.00
     

@@ -20,16 +20,6 @@ class ToolRegistry:
         self._tools: Dict[str, Dict[str, Any]] = {}
         self._handlers: Dict[str, Callable] = {}
         self._register_builtin_tools()
-        self._register_artifact_tools()
-    
-    def _register_artifact_tools(self):
-        """Register artifact/file editing tools"""
-        try:
-            from app.tools.artifact_tools import register_artifact_tools
-            register_artifact_tools(self)
-        except ImportError as e:
-            import logging
-            logging.getLogger(__name__).warning(f"Could not load artifact tools: {e}")
     
     def register(
         self,
@@ -266,72 +256,6 @@ class ToolRegistry:
             },
             handler=FileViewingTools.view_signature,
         )
-        
-        # Agent memory search tool - allows LLM to search archived context
-        self.register(
-            name="search_archived_context",
-            description="""Search through archived conversation history stored in {AgentNNNN}.md files. 
-Use this when you need to find information from earlier in a long conversation that may have been archived.
-Also use this to search large project summaries that were too big to fit in context.""",
-            parameters={
-                "query": {
-                    "type": "string",
-                    "description": "Search terms to find in archived content",
-                    "required": True,
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return. Default: 3",
-                    "required": False,
-                }
-            },
-            handler=self._search_agent_files_handler,
-        )
-        
-        # Alias: "find" -> search_archived_context (some LLMs use this name)
-        self.register(
-            name="find",
-            description="""Search through project files and archived context. Use this to find specific code, functions, or content.
-Alias for search_archived_context.""",
-            parameters={
-                "query": {
-                    "type": "string",
-                    "description": "Search terms to find",
-                    "required": True,
-                },
-            },
-            handler=self._search_agent_files_handler,
-        )
-    
-    async def _search_agent_files_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
-        """Search agent memory files"""
-        query = args.get("query", "")
-        max_results = args.get("max_results", 3)
-        
-        if not query:
-            return {"error": "Query is required"}
-        
-        if not context or "db" not in context or "chat_id" not in context:
-            return {"error": "No chat context available"}
-        
-        from app.services.agent_memory import AgentMemoryService
-        
-        db = context["db"]
-        chat_id = context["chat_id"]
-        
-        service = AgentMemoryService()
-        results = await service.search_agent_files(db, chat_id, query, max_results)
-        
-        if not results:
-            return {
-                "found": False,
-                "message": "No matching content found in archived history",
-            }
-        
-        return {
-            "found": True,
-            "results": results,
-        }
     
     async def _calculator_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Safe mathematical expression evaluator"""
@@ -410,29 +334,129 @@ Alias for search_archived_context.""",
         }
     
     async def _document_search_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
-        """Search documents using RAG"""
+        """Search documents using RAG - searches all available knowledge sources"""
         if not context or "db" not in context or "user" not in context:
             return {"error": "Document search requires authentication context"}
         
+        db = context["db"]
+        user = context["user"]
+        chat_id = context.get("chat_id")
+        query = args.get("query", "")
+        document_ids = args.get("document_ids")
+        
         rag_service = RAGService()
-        results = await rag_service.search(
-            db=context["db"],
-            user=context["user"],
-            query=args.get("query", ""),
-            document_ids=args.get("document_ids"),
-            top_k=5,
-        )
+        all_results = []
+        sources_searched = []
+        
+        # 1. Search Global Knowledge Stores (same as automatic RAG)
+        try:
+            global_results, global_store_names = await rag_service.search_global_stores(
+                db, query, chat_id=chat_id
+            )
+            if global_results:
+                sources_searched.append(f"Global KBs: {', '.join(global_store_names)}")
+                for r in global_results:
+                    r["source_type"] = "global_kb"
+                all_results.extend(global_results)
+        except Exception as e:
+            logger.warning(f"[TOOL_SEARCH] Global KB search failed: {e}")
+        
+        # 2. Search Custom GPT Knowledge Stores (if in a GPT conversation)
+        if chat_id:
+            try:
+                from app.models.models import Chat, CustomAssistant
+                from app.models.assistant import AssistantConversation
+                from sqlalchemy import select
+                from sqlalchemy.orm import selectinload
+                
+                # Check if this chat has an active assistant conversation
+                chat_result = await db.execute(
+                    select(Chat).where(Chat.id == chat_id)
+                )
+                chat = chat_result.scalar_one_or_none()
+                
+                if chat:
+                    conv_result = await db.execute(
+                        select(AssistantConversation)
+                        .where(AssistantConversation.chat_id == chat_id)
+                        .order_by(AssistantConversation.created_at.desc())
+                        .limit(1)
+                    )
+                    assistant_conv = conv_result.scalar_one_or_none()
+                    
+                    if assistant_conv:
+                        # Get assistant with knowledge stores
+                        assistant_result = await db.execute(
+                            select(CustomAssistant)
+                            .options(selectinload(CustomAssistant.knowledge_stores))
+                            .where(CustomAssistant.id == assistant_conv.assistant_id)
+                        )
+                        assistant = assistant_result.scalar_one_or_none()
+                        
+                        if assistant and assistant.knowledge_stores:
+                            assistant_ks_ids = [str(ks.id) for ks in assistant.knowledge_stores]
+                            ks_names = [ks.name for ks in assistant.knowledge_stores]
+                            
+                            kb_results = await rag_service.search_knowledge_stores(
+                                db=db,
+                                user=user,
+                                query=query,
+                                knowledge_store_ids=assistant_ks_ids,
+                                bypass_access_check=True,
+                            )
+                            
+                            if kb_results:
+                                sources_searched.append(f"GPT KBs: {', '.join(ks_names)}")
+                                for r in kb_results:
+                                    r["source_type"] = "assistant_kb"
+                                all_results.extend(kb_results)
+            except Exception as e:
+                logger.warning(f"[TOOL_SEARCH] Assistant KB search failed: {e}")
+        
+        # 3. Search User's Documents (original behavior)
+        try:
+            user_results = await rag_service.search(
+                db=db,
+                user=user,
+                query=query,
+                document_ids=document_ids,
+                top_k=5,
+            )
+            if user_results:
+                sources_searched.append("User Documents")
+                for r in user_results:
+                    r["source_type"] = "user_docs"
+                all_results.extend(user_results)
+        except Exception as e:
+            logger.warning(f"[TOOL_SEARCH] User doc search failed: {e}")
+        
+        # Deduplicate by content (same chunk might appear from different sources)
+        seen_content = set()
+        unique_results = []
+        for r in all_results:
+            content_key = r.get("content", "")[:200]  # First 200 chars as key
+            if content_key not in seen_content:
+                seen_content.add(content_key)
+                unique_results.append(r)
+        
+        # Sort by relevance
+        unique_results.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+        
+        # Limit total results
+        unique_results = unique_results[:10]
         
         return {
-            "query": args.get("query"),
-            "results_count": len(results),
+            "query": query,
+            "sources_searched": sources_searched,
+            "results_count": len(unique_results),
             "results": [
                 {
-                    "document": r["document_name"],
-                    "content": r["content"][:500] + "..." if len(r["content"]) > 500 else r["content"],
-                    "relevance": round(r["similarity"], 3),
+                    "document": r.get("document_name", "Unknown"),
+                    "source_type": r.get("source_type", "unknown"),
+                    "content": r["content"][:500] + "..." if len(r.get("content", "")) > 500 else r.get("content", ""),
+                    "relevance": round(r.get("similarity", 0), 3),
                 }
-                for r in results
+                for r in unique_results
             ]
         }
     

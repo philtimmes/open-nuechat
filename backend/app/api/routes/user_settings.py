@@ -7,11 +7,11 @@ Includes:
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, text
+from sqlalchemy import select, update
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 
 from app.db.database import get_db, sync_session_maker
 from app.api.dependencies import get_current_user
@@ -162,8 +162,7 @@ async def export_user_data(
         "user": {
             "id": user.id,
             "email": user.email,
-            "username": user.username,
-            "full_name": user.full_name,
+            "display_name": user.display_name,
             "created_at": user.created_at.isoformat() if user.created_at else None,
         }
     }
@@ -335,185 +334,6 @@ Only metadata and text content is exported.
     )
 
 
-class ImportResult(BaseModel):
-    """Result of data import"""
-    success: bool
-    chats_imported: int
-    messages_imported: int
-    errors: List[str] = []
-
-
-@router.post("/import-data", response_model=ImportResult)
-async def import_user_data(
-    file: UploadFile = File(...),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Import user data from a previously exported ZIP file.
-    
-    Imports chats and messages into the current user's account.
-    Original IDs are remapped to new UUIDs to avoid conflicts.
-    """
-    import json
-    import zipfile
-    import io
-    import uuid
-    
-    logger.info(f"[IMPORT] Starting data import for user {user.id}")
-    
-    errors = []
-    chats_imported = 0
-    messages_imported = 0
-    
-    try:
-        # Read the uploaded file
-        contents = await file.read()
-        
-        # Open as zip file
-        try:
-            zip_buffer = io.BytesIO(contents)
-            with zipfile.ZipFile(zip_buffer, 'r') as zf:
-                # Look for export.json
-                if 'export.json' not in zf.namelist():
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Invalid export file: missing export.json"
-                    )
-                
-                # Parse export data
-                export_json = zf.read('export.json').decode('utf-8')
-                export_data = json.loads(export_json)
-                
-        except zipfile.BadZipFile:
-            # Maybe it's just a JSON file directly
-            try:
-                export_data = json.loads(contents.decode('utf-8'))
-            except:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid file format. Expected ZIP or JSON file."
-                )
-        
-        # Validate export format
-        if 'export_version' not in export_data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid export format: missing version"
-            )
-        
-        # Import chats
-        chats_data = export_data.get('chats', [])
-        
-        # Map old IDs to new IDs for parent_id references
-        message_id_map = {}
-        
-        for chat_data in chats_data:
-            try:
-                # Create new chat with new ID
-                new_chat_id = str(uuid.uuid4())
-                
-                # Parse dates
-                created_at = None
-                if chat_data.get('created_at'):
-                    try:
-                        created_at = datetime.fromisoformat(chat_data['created_at'].replace('Z', '+00:00'))
-                    except:
-                        created_at = datetime.now(timezone.utc)
-                
-                updated_at = None
-                if chat_data.get('updated_at'):
-                    try:
-                        updated_at = datetime.fromisoformat(chat_data['updated_at'].replace('Z', '+00:00'))
-                    except:
-                        updated_at = datetime.now(timezone.utc)
-                
-                new_chat = Chat(
-                    id=new_chat_id,
-                    owner_id=user.id,
-                    title=chat_data.get('title', 'Imported Chat'),
-                    system_prompt=chat_data.get('system_prompt'),
-                    model_id=chat_data.get('model_id'),
-                    created_at=created_at or datetime.now(timezone.utc),
-                    updated_at=updated_at or datetime.now(timezone.utc),
-                    import_source='nuechat_export',
-                )
-                db.add(new_chat)
-                
-                # Import messages for this chat
-                messages_data = chat_data.get('messages', [])
-                
-                # First pass: create all messages and map old IDs to new IDs
-                for msg_data in messages_data:
-                    old_msg_id = msg_data.get('id')
-                    new_msg_id = str(uuid.uuid4())
-                    message_id_map[old_msg_id] = new_msg_id
-                
-                # Second pass: create messages with correct parent_id references
-                for msg_data in messages_data:
-                    old_msg_id = msg_data.get('id')
-                    new_msg_id = message_id_map[old_msg_id]
-                    
-                    # Map parent_id to new ID
-                    old_parent_id = msg_data.get('parent_id')
-                    new_parent_id = message_id_map.get(old_parent_id) if old_parent_id else None
-                    
-                    # Parse message created_at
-                    msg_created_at = None
-                    if msg_data.get('created_at'):
-                        try:
-                            msg_created_at = datetime.fromisoformat(msg_data['created_at'].replace('Z', '+00:00'))
-                        except:
-                            msg_created_at = datetime.now(timezone.utc)
-                    
-                    # Determine role
-                    role_str = msg_data.get('role', 'user')
-                    from app.models.chat import MessageRole
-                    try:
-                        role = MessageRole(role_str)
-                    except:
-                        role = MessageRole.USER
-                    
-                    new_msg = Message(
-                        id=new_msg_id,
-                        chat_id=new_chat_id,
-                        role=role,
-                        content=msg_data.get('content', ''),
-                        parent_id=new_parent_id,
-                        attachments=msg_data.get('attachments'),
-                        created_at=msg_created_at or datetime.now(timezone.utc),
-                    )
-                    db.add(new_msg)
-                    messages_imported += 1
-                
-                chats_imported += 1
-                
-            except Exception as e:
-                error_msg = f"Failed to import chat '{chat_data.get('title', 'Unknown')}': {str(e)}"
-                errors.append(error_msg)
-                logger.warning(f"[IMPORT] {error_msg}")
-        
-        await db.commit()
-        
-        logger.info(f"[IMPORT] Import complete for user {user.id}: {chats_imported} chats, {messages_imported} messages")
-        
-        return ImportResult(
-            success=True,
-            chats_imported=chats_imported,
-            messages_imported=messages_imported,
-            errors=errors,
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[IMPORT] Import failed for user {user.id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Import failed: {str(e)}"
-        )
-
-
 def index_user_chats_sync(user_id: str):
     """Synchronous background task to index all user chats into knowledge base"""
     import uuid
@@ -583,11 +403,7 @@ def index_user_chats_sync(user_id: str):
                 ).order_by(Message.created_at).all()
                 
                 if not messages:
-                    # Use raw SQL to avoid triggering updated_at onupdate
-                    db.execute(
-                        text("UPDATE chats SET is_knowledge_indexed = 1 WHERE id = :chat_id"),
-                        {"chat_id": chat.id}
-                    )
+                    chat.is_knowledge_indexed = True
                     db.commit()
                     continue
                 
@@ -637,7 +453,6 @@ def index_user_chats_sync(user_id: str):
                         continue
                     
                     # Store chunk in database - linked to Document, not KnowledgeStore
-                    # Include assistant_id for filtering by assistant context
                     chunk = DocumentChunk(
                         id=chunk_id,
                         document_id=doc_id,
@@ -647,9 +462,7 @@ def index_user_chats_sync(user_id: str):
                         chunk_metadata={
                             "chat_id": chat.id,
                             "chat_title": chat.title,
-                            "source": "chat_history",
-                            "assistant_id": chat.assistant_id,  # Track which assistant (if any)
-                            "assistant_name": chat.assistant_name,
+                            "source": "chat_history"
                         }
                     )
                     db.add(chunk)
@@ -661,11 +474,8 @@ def index_user_chats_sync(user_id: str):
                 # Update document chunk count
                 doc.chunk_count = len(chunks)
                 
-                # Mark chat as indexed using raw SQL to avoid triggering onupdate for updated_at
-                db.execute(
-                    text("UPDATE chats SET is_knowledge_indexed = 1 WHERE id = :chat_id"),
-                    {"chat_id": chat.id}
-                )
+                # Mark chat as indexed
+                chat.is_knowledge_indexed = True
                 db.commit()
                 
                 logger.info(f"[CHAT_KNOWLEDGE] Indexed chat {chat.id} ({len(chunks)} chunks)")
@@ -691,19 +501,6 @@ def index_user_chats_sync(user_id: str):
             user.chat_knowledge_status = "completed"
             user.chat_knowledge_last_indexed = datetime.now(timezone.utc)
             db.commit()
-            
-            # Repair updated_at for all chats - set to latest message timestamp
-            logger.info(f"[CHAT_KNOWLEDGE] Repairing chat updated_at timestamps...")
-            db.execute(text("""
-                UPDATE chats 
-                SET updated_at = (
-                    SELECT MAX(created_at) FROM messages WHERE messages.chat_id = chats.id
-                )
-                WHERE owner_id = :user_id
-                AND EXISTS (SELECT 1 FROM messages WHERE messages.chat_id = chats.id)
-            """), {"user_id": user_id})
-            db.commit()
-            logger.info(f"[CHAT_KNOWLEDGE] Repaired chat timestamps")
             
             logger.info(f"[CHAT_KNOWLEDGE] Completed indexing for user {user_id}")
             
@@ -767,11 +564,7 @@ def index_single_chat_sync(user_id: str, chat_id: str):
         ).order_by(Message.created_at).all()
         
         if not messages:
-            # Use raw SQL to avoid triggering updated_at onupdate
-            db.execute(
-                text("UPDATE chats SET is_knowledge_indexed = 1 WHERE id = :chat_id"),
-                {"chat_id": chat_id}
-            )
+            chat.is_knowledge_indexed = True
             db.commit()
             return
         
@@ -826,7 +619,6 @@ def index_single_chat_sync(user_id: str, chat_id: str):
                 continue
             
             # Store chunk in database
-            # Include assistant_id for filtering by assistant context
             chunk = DocumentChunk(
                 id=chunk_id,
                 document_id=doc_id,
@@ -836,9 +628,7 @@ def index_single_chat_sync(user_id: str, chat_id: str):
                 chunk_metadata={
                     "chat_id": chat_id,
                     "chat_title": chat.title,
-                    "source": "chat_history",
-                    "assistant_id": chat.assistant_id,  # Track which assistant (if any)
-                    "assistant_name": chat.assistant_name,
+                    "source": "chat_history"
                 }
             )
             db.add(chunk)
@@ -849,11 +639,8 @@ def index_single_chat_sync(user_id: str, chat_id: str):
         # Update document chunk count
         doc.chunk_count = len(chunks)
         
-        # Mark chat as indexed using raw SQL to avoid triggering onupdate for updated_at
-        db.execute(
-            text("UPDATE chats SET is_knowledge_indexed = 1 WHERE id = :chat_id"),
-            {"chat_id": chat_id}
-        )
+        # Mark chat as indexed
+        chat.is_knowledge_indexed = True
         db.commit()
         
         # Rebuild FAISS index with all chunks from this store
@@ -894,33 +681,3 @@ def index_single_chat_sync(user_id: str, chat_id: str):
     finally:
         db.close()
     
-
-@router.post("/repair-chat-timestamps")
-async def repair_chat_timestamps(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Repair chat updated_at timestamps.
-    Sets updated_at to the timestamp of the most recent message in each chat.
-    This fixes chats whose timestamps were corrupted by other operations.
-    """
-    logger.info(f"[REPAIR] Repairing chat timestamps for user {user.id}")
-    
-    # Update all chats to have updated_at = MAX(message.created_at)
-    result = await db.execute(text("""
-        UPDATE chats 
-        SET updated_at = (
-            SELECT MAX(created_at) FROM messages WHERE messages.chat_id = chats.id
-        )
-        WHERE owner_id = :user_id
-        AND EXISTS (SELECT 1 FROM messages WHERE messages.chat_id = chats.id)
-    """), {"user_id": user.id})
-    
-    await db.commit()
-    
-    # Get count of affected rows (SQLite doesn't return rowcount reliably, so just report success)
-    logger.info(f"[REPAIR] Repaired chat timestamps for user {user.id}")
-    
-    return {"status": "success", "message": "Chat timestamps repaired. Please refresh the page."}
-

@@ -3,9 +3,7 @@ WebSocket endpoint for real-time features
 """
 import asyncio
 import uuid
-import hashlib
-from datetime import datetime, timezone
-from collections import OrderedDict
+from datetime import datetime, timezone, timezone
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, text
@@ -39,75 +37,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["WebSocket"])
 
-# Message deduplication - prevent processing same message twice
-# Uses LRU-style dict with max size to prevent memory growth
-class MessageDeduplicator:
-    def __init__(self, max_size: int = 100, ttl_seconds: float = 5.0):
-        self._seen: OrderedDict[str, float] = OrderedDict()
-        self._max_size = max_size
-        self._ttl = ttl_seconds
-    
-    def _hash_message(self, msg_type: str, payload: dict) -> str:
-        """Generate hash for message deduplication"""
-        # Include type and key payload fields
-        key_parts = [msg_type]
-        if 'chat_id' in payload:
-            key_parts.append(payload['chat_id'])
-        if 'content' in payload:
-            # Hash content to keep key short
-            content_hash = hashlib.md5(payload['content'].encode()).hexdigest()[:8]
-            key_parts.append(content_hash)
-        if 'parent_id' in payload:
-            key_parts.append(str(payload.get('parent_id', ''))[:8])
-        return ':'.join(key_parts)
-    
-    def is_duplicate(self, msg_type: str, payload: dict) -> bool:
-        """Check if message was recently processed"""
-        now = datetime.now().timestamp()
-        msg_hash = self._hash_message(msg_type, payload)
-        
-        # Clean expired entries
-        expired = [k for k, v in self._seen.items() if now - v > self._ttl]
-        for k in expired:
-            del self._seen[k]
-        
-        # Check if seen
-        if msg_hash in self._seen:
-            logger.warning(f"[DEDUP] Duplicate message detected: {msg_type} hash={msg_hash}")
-            return True
-        
-        # Mark as seen
-        self._seen[msg_hash] = now
-        
-        # Enforce max size
-        while len(self._seen) > self._max_size:
-            self._seen.popitem(last=False)
-        
-        return False
-
-
-def _get_allowed_origins() -> list[str]:
-    """Get list of allowed WebSocket origins from settings"""
-    origins = []
-    
-    # Add PUBLIC_URL if configured
-    if settings.PUBLIC_URL:
-        host = settings.PUBLIC_URL.replace("https://", "").replace("http://", "").split("/")[0]
-        origins.append(host)
-    
-    # Add localhost variants for development
-    if settings.DEBUG or not settings.PUBLIC_URL:
-        origins.extend(["localhost", "127.0.0.1", "localhost:8000", "127.0.0.1:8000", "localhost:5173", "127.0.0.1:5173"])
-    
-    # Add any additional origins from CORS settings
-    if hasattr(settings, 'CORS_ORIGINS'):
-        for origin in settings.CORS_ORIGINS:
-            host = origin.replace("https://", "").replace("http://", "").split("/")[0]
-            if host not in origins:
-                origins.append(host)
-    
-    return origins
-
 
 @router.websocket("/ws")
 async def websocket_endpoint(
@@ -117,12 +46,7 @@ async def websocket_endpoint(
     """
     WebSocket endpoint for real-time features.
     
-    Authentication:
-    - Option 1: Token in query string (?token=xxx) - for backwards compatibility
-    - Option 2: Send {"type": "auth", "token": "xxx"} as first message (preferred)
-    
     Message types:
-    - auth: Authenticate with token (if not provided in query)
     - subscribe: Subscribe to a chat room
     - unsubscribe: Unsubscribe from a chat room
     - chat_message: Send a message to AI
@@ -130,51 +54,20 @@ async def websocket_endpoint(
     - ping: Keep-alive ping
     """
     
-    # Validate Origin header to prevent cross-site WebSocket hijacking
-    origin = websocket.headers.get("origin", "")
-    allowed_origins = _get_allowed_origins()
-    
-    if allowed_origins and origin:
-        origin_host = origin.replace("https://", "").replace("http://", "").split("/")[0]
-        if not any(origin_host == allowed or origin_host.endswith(f".{allowed}") for allowed in allowed_origins):
-            logger.warning(f"WebSocket connection rejected: invalid origin {origin}")
-            await websocket.close(code=4003, reason="Origin not allowed")
-            return
-    
     # Accept the connection first so we can send proper close codes
     await websocket.accept()
     
-    # Try to authenticate with query token first
-    user_id = None
-    if token:
-        payload = AuthService.decode_token(token)
-        if payload and payload.get("type") == "access":
-            user_id = payload.get("sub")
+    # Authenticate after accepting
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
     
-    # If no query token, wait for auth message
-    if not user_id:
-        try:
-            # Wait for auth message with timeout
-            auth_data = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
-            auth_msg = json.loads(auth_data)
-            
-            if auth_msg.get("type") != "auth" or not auth_msg.get("token"):
-                await websocket.close(code=4001, reason="Authentication required - send auth message")
-                return
-            
-            payload = AuthService.decode_token(auth_msg["token"])
-            if not payload or payload.get("type") != "access":
-                await websocket.close(code=4001, reason="Invalid token")
-                return
-            
-            user_id = payload.get("sub")
-            
-        except asyncio.TimeoutError:
-            await websocket.close(code=4001, reason="Authentication timeout")
-            return
-        except json.JSONDecodeError:
-            await websocket.close(code=4001, reason="Invalid auth message")
-            return
+    payload = AuthService.decode_token(token)
+    if not payload or payload.get("type") != "access":
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+    
+    user_id = payload.get("sub")
     
     # Get user from database
     async with async_session_maker() as db:
@@ -186,9 +79,6 @@ async def websocket_endpoint(
     # Register connection with manager (already accepted)
     connection = await ws_manager.connect(websocket, user_id, already_accepted=True)
     streaming_handler = StreamingHandler(ws_manager, connection)
-    
-    # Message deduplicator for this connection
-    deduplicator = MessageDeduplicator()
     
     # Log connection
     log_websocket_event("connect", user_id)
@@ -209,14 +99,6 @@ async def websocket_endpoint(
             
             msg_type = message.get("type")
             payload = message.get("payload", {})
-            
-            # Skip auth messages after initial auth
-            if msg_type == "auth":
-                continue
-            
-            # Check for duplicate messages (prevents double-processing from React StrictMode etc)
-            if msg_type in ("chat_message", "regenerate_message") and deduplicator.is_duplicate(msg_type, payload):
-                continue  # Skip duplicate
             
             # Only log important message types (not ping)
             if msg_type != "ping":
@@ -254,64 +136,50 @@ async def websocket_endpoint(
                     logger.debug(f"chat_message content head: {content[:100]}")
                     logger.debug(f"chat_message content tail: {content[-100:]}")
                 
-                # Generate task ID for tracking
-                task_id = str(uuid.uuid4())
+                # Stop any existing stream before starting new one
+                # This prevents content from two concurrent requests mixing together
+                if streaming_handler.is_streaming():
+                    logger.warning("Stopping existing stream before starting new chat message")
+                    await streaming_handler.request_stop()
                 
                 # Run in background task so we can still receive stop_generation
-                # This task will CONTINUE running even if client disconnects
                 async def run_chat_message():
                     try:
                         await handle_chat_message(connection, streaming_handler, user_id, payload)
                     except asyncio.CancelledError:
-                        # Only cancelled by explicit stop_generation request, not by disconnect
-                        logger.info("Chat message task cancelled by user stop request")
+                        logger.info("Chat message task cancelled by user")
                     except Exception as e:
                         logger.exception(f"Error in chat message handler: {e}")
-                        # Try to send error, but don't fail if client disconnected
                         try:
-                            if not connection.is_disconnected:
-                                await ws_manager.send_to_connection(connection, {
-                                    "type": "stream_error",
-                                    "payload": {"error": str(e)},
-                                })
+                            await ws_manager.send_to_connection(connection, {
+                                "type": "stream_error",
+                                "payload": {"error": str(e)},
+                            })
                         except Exception:
                             pass
                 
                 task = asyncio.create_task(run_chat_message())
                 streaming_handler.set_streaming_task(task)
-                
-                # Register as detached task so it continues if client disconnects
-                from app.services.websocket import register_detached_task
-                await register_detached_task(task_id, task)
             
             elif msg_type == "regenerate_message":
-                # Generate task ID for tracking
-                regen_task_id = str(uuid.uuid4())
-                
                 # Run in background task so we can still receive stop_generation
-                # This task will CONTINUE running even if client disconnects
                 async def run_regenerate():
                     try:
                         await handle_regenerate_message(connection, streaming_handler, user_id, payload)
                     except asyncio.CancelledError:
-                        logger.info("Regenerate task cancelled by user stop request")
+                        logger.info("Regenerate task cancelled by user")
                     except Exception as e:
                         logger.exception(f"Error in regenerate handler: {e}")
                         try:
-                            if not connection.is_disconnected:
-                                await ws_manager.send_to_connection(connection, {
-                                    "type": "stream_error",
-                                    "payload": {"error": str(e)},
-                                })
+                            await ws_manager.send_to_connection(connection, {
+                                "type": "stream_error",
+                                "payload": {"error": str(e)},
+                            })
                         except Exception:
                             pass
                 
                 task = asyncio.create_task(run_regenerate())
                 streaming_handler.set_streaming_task(task)
-                
-                # Register as detached task
-                from app.services.websocket import register_detached_task
-                await register_detached_task(regen_task_id, task)
             
             elif msg_type == "stop_generation":
                 chat_id = payload.get("chat_id")
@@ -337,19 +205,14 @@ async def websocket_endpoint(
                 })
     
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for user {user_id} - streaming tasks will continue in background")
+        logger.debug(f"WebSocket disconnected for user {user_id}")
         log_websocket_event("disconnect", user_id)
-        # Don't cancel streaming tasks - they will continue and save to DB
-        # The StreamingHandler will detect the disconnection and skip client sends
     except Exception as e:
         logger.exception(f"WebSocket error for user {user_id}: {e}")
         log_websocket_event("error", user_id, error=str(e))
-        try:
-            await ws_manager.send_to_connection(connection, 
-                create_error(str(e))
-            )
-        except Exception:
-            pass  # Client may already be disconnected
+        await ws_manager.send_to_connection(connection, 
+            create_error(str(e))
+        )
     finally:
         await ws_manager.disconnect(connection)
 
@@ -432,53 +295,7 @@ async def handle_chat_message(
             return
         
         # Check if this is an image generation request (with LLM confirmation)
-        try:
-            logger.info(f"[IMAGE_DETECT] Checking if image request: '{content[:60]}...'")
-            
-            # Import and call with inline debugging
-            from app.services.image_gen import detect_image_request_regex, extract_image_prompt, confirm_image_request_with_llm
-            from app.api.routes.admin import get_system_setting
-            
-            # Get LLM confirmation setting from admin panel (not env var)
-            image_llm_confirm_setting = await get_system_setting(db, "image_confirm_with_llm")
-            use_llm_confirm = image_llm_confirm_setting.lower() == "true" if image_llm_confirm_setting else True  # Default to True
-            logger.info(f"[IMAGE_DETECT] LLM confirmation enabled: {use_llm_confirm}")
-            
-            # Step 1: Regex check
-            regex_match, regex_prompt = detect_image_request_regex(content)
-            logger.info(f"[IMAGE_DETECT] Regex result: match={regex_match}")
-            
-            if not regex_match:
-                is_image_request = False
-                image_prompt = None
-            else:
-                # Step 2: LLM confirmation if enabled
-                if use_llm_confirm:
-                    logger.info("[IMAGE_DETECT] Calling LLM for confirmation...")
-                    llm_result, llm_prompt, was_error = await confirm_image_request_with_llm(content, db)
-                    logger.info(f"[IMAGE_DETECT] LLM result: {llm_result}, error={was_error}")
-                    
-                    if was_error:
-                        # LLM error - fall back to regex result
-                        is_image_request = True
-                        image_prompt = extract_image_prompt(regex_prompt)
-                    elif llm_result:
-                        is_image_request = True
-                        image_prompt = llm_prompt if llm_prompt else extract_image_prompt(regex_prompt)
-                    else:
-                        is_image_request = False
-                        image_prompt = None
-                else:
-                    logger.info("[IMAGE_DETECT] LLM disabled, using regex result")
-                    is_image_request = True
-                    image_prompt = extract_image_prompt(regex_prompt)
-            
-            logger.info(f"[IMAGE_DETECT] Final result: is_image_request={is_image_request}, prompt_len={len(image_prompt) if image_prompt else 0}")
-        except Exception as e:
-            logger.error(f"[IMAGE_DETECT] Exception during detection: {e}", exc_info=True)
-            is_image_request = False
-            image_prompt = None
-        
+        is_image_request, image_prompt = await detect_image_request_async(content, db)
         if is_image_request:
             logger.debug(f"Image generation request detected: {content[:100]}...")
             
@@ -721,7 +538,7 @@ async def handle_chat_message(
                 assistant_parent_id = None
         
         # Create user message only if save_user_message is True
-        logger.info(f"[SAVE_USER_MSG_CHECK] save_user_message={save_user_message}, chat_id={chat_id}, content_len={len(content)}, parent_id_from_payload={parent_id}")
+        logger.info(f"[SAVE_USER_MSG_CHECK] save_user_message={save_user_message}, chat_id={chat_id}, content_len={len(content)}")
         if save_user_message:
             # Build message kwargs, using client ID if provided
             msg_kwargs = {
@@ -753,8 +570,7 @@ async def handle_chat_message(
             logger.debug(f"User message saved: {user_message.id} with parent_id={parent_id}")
             
             # Assistant message will be child of this user message
-            assistant_parent_id = str(user_message.id)  # Ensure it's a string
-            logger.info(f"[ASSISTANT_PARENT] Set to user_message.id: {assistant_parent_id}")
+            assistant_parent_id = user_message.id
             
             # Send confirmation with parent_id for frontend tree tracking
             await ws_manager.send_to_connection(connection, {
@@ -765,37 +581,9 @@ async def handle_chat_message(
                 },
             })
         else:
-            # Tool/file content continuation - don't create user message
-            # CRITICAL: For linear conversation flow, we need to find the correct parent
-            
-            # First, try to use the parent_id from frontend if it's valid
-            if parent_id:
-                parent_check = await db.execute(
-                    select(Message.id).where(Message.id == parent_id, Message.chat_id == chat_id)
-                )
-                if parent_check.scalar_one_or_none():
-                    assistant_parent_id = str(parent_id)
-                    logger.info(f"[TOOL_CONTINUATION] Using frontend parent_id: {assistant_parent_id[:8]}")
-                else:
-                    logger.warning(f"[TOOL_CONTINUATION] Frontend parent_id {parent_id[:8] if parent_id else 'None'} invalid, finding latest")
-                    parent_id = None
-            
-            # If no valid parent_id from frontend, find the latest message
-            if not parent_id:
-                latest_msg_result = await db.execute(
-                    select(Message.id)
-                    .where(Message.chat_id == chat_id)
-                    .order_by(Message.created_at.desc())
-                    .limit(1)
-                )
-                latest_msg_id = latest_msg_result.scalar_one_or_none()
-                
-                if latest_msg_id:
-                    assistant_parent_id = str(latest_msg_id)
-                    logger.info(f"[TOOL_CONTINUATION] Using latest message as parent: {assistant_parent_id[:8]}")
-                else:
-                    logger.warning(f"[TOOL_CONTINUATION] No messages found in chat {chat_id}, parent will be None")
-                    assistant_parent_id = None
+            # File content continuation - don't create user message
+            logger.info(f"File content continuation mode (save_user_message=False), content_len={len(content)}, assistant_parent_id={assistant_parent_id}")
+            # Keep assistant_parent_id as-is for tree structure
         
         # ==== SYSTEM PROMPT SETUP ====
         from app.api.routes.admin import get_system_setting
@@ -807,10 +595,9 @@ async def handle_chat_message(
         rag_had_results = False
         import time
         
-        # Determine if this is a tool result continuation vs a regenerate/retry
-        # Tool continuations have is_tool_continuation=True in payload
-        # Regenerates have save_user_message=False but are NOT tool continuations
-        is_tool_result = payload.get("is_tool_continuation", False)
+        # Skip RAG for tool result continuations (save_user_message=False)
+        # These are system-generated responses that don't need knowledge retrieval
+        is_tool_result = not save_user_message
         
         # 1. Global Knowledge Base search (automatic, independent of user RAG settings)
         # Skip for tool results to avoid unnecessary searches and potential GPU issues
@@ -827,7 +614,7 @@ async def handle_chat_message(
                 if has_global_stores:
                     global_kb_start = time.time()
                     rag_service = RAGService()
-                    global_results, global_store_names = await rag_service.search_global_stores(db, content)
+                    global_results, global_store_names = await rag_service.search_global_stores(db, content, chat_id=chat_id)
                     global_kb_search_time = time.time() - global_kb_start
                     
                     logger.info(f"[GLOBAL_RAG_DEBUG] Search completed in {global_kb_search_time:.3f}s - Found {len(global_results)} results from stores: {global_store_names}")
@@ -851,8 +638,14 @@ async def handle_chat_message(
                         global_context = "\n\n---\n\n".join(global_context_parts)
                         global_stores_list = ", ".join(global_store_names)
                         
-                        # Build the authoritative knowledge addendum
-                        knowledge_addendum = f"""
+                        # Get custom prompt or use default
+                        custom_global_prompt = await get_system_setting(db, "rag_prompt_global_kb")
+                        if custom_global_prompt:
+                            # Use custom prompt with {context} and {sources} placeholders
+                            knowledge_addendum = custom_global_prompt.replace("{context}", global_context).replace("{sources}", global_stores_list)
+                        else:
+                            # Default authoritative prompt
+                            knowledge_addendum = f"""
 
 ## AUTHORITATIVE KNOWLEDGE BASE
 
@@ -872,7 +665,6 @@ When answering questions related to the above topics, you MUST use this authorit
                 logger.warning(f"[GLOBAL_RAG_DEBUG] Failed to search global stores: {e}")
         
         # 2. User's Chat History Knowledge Base search (also skip for tool results)
-        # Filter by current assistant context to prevent knowledge leakage between different GPTs
         if not is_tool_result:
             try:
                 chat_kb_enabled = getattr(user, 'all_chats_knowledge_enabled', False)
@@ -880,20 +672,25 @@ When answering questions related to the above topics, you MUST use this authorit
                 if chat_kb_enabled and chat_kb_store:
                     chat_kb_start = time.time()
                     rag_service = RAGService()
-                    # Use chat.assistant_id to filter results to matching assistant context
-                    # This prevents knowledge from Assistant A appearing when using Assistant B
-                    chat_kb_results = await rag_service.get_chat_knowledge_context(
+                    chat_kb_results = await rag_service.get_knowledge_store_context(
                         db=db,
                         user=user,
                         query=content,
-                        chat_knowledge_store_id=chat_kb_store,
-                        current_assistant_id=chat.assistant_id,  # None if no assistant
+                        knowledge_store_ids=[chat_kb_store],
+                        bypass_access_check=True,  # User owns this KB
+                        chat_id=chat_id,  # For context-aware query enhancement
                     )
                     chat_kb_time = time.time() - chat_kb_start
                     
                     if chat_kb_results:
                         rag_had_results = True
-                        chat_kb_addendum = f"""
+                        
+                        # Get custom prompt or use default
+                        custom_chat_prompt = await get_system_setting(db, "rag_prompt_chat_history")
+                        if custom_chat_prompt:
+                            chat_kb_addendum = custom_chat_prompt.replace("{context}", chat_kb_results)
+                        else:
+                            chat_kb_addendum = f"""
 
 ## YOUR CHAT HISTORY KNOWLEDGE
 
@@ -904,7 +701,7 @@ The following is relevant information from your previous conversations:
 </chat_history_context>
 """
                         system_prompt = f"{system_prompt}{chat_kb_addendum}"
-                        logger.info(f"[CHAT_KB_DEBUG] Found chat history context in {chat_kb_time:.3f}s (assistant_id={chat.assistant_id})")
+                        logger.info(f"[CHAT_KB_DEBUG] Found chat history context in {chat_kb_time:.3f}s")
             except Exception as e:
                 logger.warning(f"[CHAT_KB_DEBUG] Failed to search chat history KB: {e}")
         
@@ -942,8 +739,20 @@ The following is relevant information from your previous conversations:
                         query=content,
                         knowledge_store_ids=assistant_ks_ids,
                         bypass_access_check=True,
+                        chat_id=chat_id,  # For context-aware query enhancement
                     )
                     logger.debug(f"Using assistant knowledge stores for chat {chat_id}: {assistant_ks_ids}")
+                    
+                    if context:
+                        rag_had_results = True
+                        # Get custom GPT KB prompt or fall back to legacy
+                        custom_gpt_prompt = await get_system_setting(db, "rag_prompt_gpt_kb")
+                        if custom_gpt_prompt:
+                            rag_addendum = custom_gpt_prompt.replace("{context}", context)
+                        else:
+                            rag_prompt = await get_system_setting(db, "rag_context_prompt")
+                            rag_addendum = f"{rag_prompt}\n\n{context}"
+                        system_prompt = f"{system_prompt}\n\n{rag_addendum}"
                 else:
                     # Regular user documents
                     context = await rag_service.get_context_for_query(
@@ -951,12 +760,19 @@ The following is relevant information from your previous conversations:
                         user=user,
                         query=content,
                         document_ids=document_ids,
+                        chat_id=chat_id,  # For context-aware query enhancement
                     )
-                
-                if context:
-                    rag_had_results = True
-                    rag_prompt = await get_system_setting(db, "rag_context_prompt")
-                    system_prompt = f"{system_prompt}\n\n{rag_prompt}\n\n{context}"
+                    
+                    if context:
+                        rag_had_results = True
+                        # Get user docs prompt or fall back to legacy
+                        custom_docs_prompt = await get_system_setting(db, "rag_prompt_user_docs")
+                        if custom_docs_prompt:
+                            rag_addendum = custom_docs_prompt.replace("{context}", context)
+                        else:
+                            rag_prompt = await get_system_setting(db, "rag_context_prompt")
+                            rag_addendum = f"{rag_prompt}\n\n{context}"
+                        system_prompt = f"{system_prompt}\n\n{rag_addendum}"
         
         logger.info(f"[RAG_SUMMARY] rag_had_results={rag_had_results}, is_tool_result={is_tool_result}")
         
@@ -1165,170 +981,58 @@ The following is relevant information from your previous conversations:
                 logger.warning(f"Failed to get procedural memory context: {e}")
         
         # Inject zip manifest if provided in payload (preferred) or from DB (fallback)
-        # Large manifests are saved to {AgentNNNN}.md files
         zip_context = payload.get("zip_context")
-        if not zip_context:
+        if zip_context:
+            system_prompt = f"{system_prompt}\n\n{zip_context}"
+            logger.debug(f"Injected zip context from payload for chat {chat_id} ({len(zip_context)} chars)")
+        else:
             # Fallback to database
             from app.api.routes.chats import get_zip_manifest_from_db
-            zip_context = await get_zip_manifest_from_db(db, chat_id)
-        
-        if zip_context:
-            from app.services.agent_memory import (
-                AgentMemoryService, estimate_tokens,
-                AGENT_FILE_PREFIX, AGENT_FILE_SUFFIX
-            )
-            from app.models.models import UploadedFile
-            
-            zip_tokens = estimate_tokens(zip_context)
-            max_zip_tokens = 12800  # ~50KB limit
-            
-            if zip_tokens > max_zip_tokens:
-                # Save full manifest to agent file
-                service = AgentMemoryService()
-                file_num = await service.get_next_agent_number(db, chat_id)
-                agent_filename = f"{AGENT_FILE_PREFIX}{file_num:04d}{AGENT_FILE_SUFFIX}"
-                
-                # Check if zip manifest agent file already exists
-                existing = await db.execute(
-                    select(UploadedFile)
-                    .where(UploadedFile.chat_id == chat_id)
-                    .where(UploadedFile.filepath.like(f"{AGENT_FILE_PREFIX}%"))
-                    .where(UploadedFile.content.like("%PROJECT FILES%"))
-                    .limit(1)
-                )
-                agent_file = existing.scalar_one_or_none()
-                
-                if not agent_file:
-                    agent_file = UploadedFile(
-                        chat_id=chat_id,
-                        filepath=agent_filename,
-                        filename=agent_filename,
-                        extension=".md",
-                        size=len(zip_context),
-                        content=zip_context,
-                    )
-                    db.add(agent_file)
-                    await db.commit()
-                    logger.info(f"[ZIP_MANIFEST] Saved full manifest to {agent_filename} ({zip_tokens} tokens)")
-                else:
-                    agent_filename = agent_file.filepath
-                
-                # Inject truncated manifest with notice
-                truncated = zip_context[:20000]  # First ~5K tokens
-                if len(zip_context) > 20000:
-                    truncated += f"\n\n... [TRUNCATED - Full manifest ({zip_tokens} tokens) saved to {agent_filename}]\n"
-                    truncated += "Use search_archived_context tool to find specific files/code."
-                
-                system_prompt = f"{system_prompt}\n\n{truncated}"
-                logger.debug(f"Injected truncated zip manifest for chat {chat_id} ({len(truncated)} chars, full={zip_tokens} tokens)")
+            zip_manifest = await get_zip_manifest_from_db(db, chat_id)
+            if zip_manifest:
+                system_prompt = f"{system_prompt}\n\n{zip_manifest}"
+                logger.debug(f"Injected zip manifest from DB for chat {chat_id} ({len(zip_manifest)} chars)")
             else:
-                system_prompt = f"{system_prompt}\n\n{zip_context}"
-                logger.debug(f"Injected zip manifest for chat {chat_id} ({len(zip_context)} chars)")
+                logger.debug(f"No zip context found for chat {chat_id}")
         
         # Inject code summary if available (provides overview of project structure)
-        # Large summaries are stored in {AgentNNNN}.md files for LLM to search
         if chat.code_summary:
             try:
-                from app.services.agent_memory import (
-                    AgentMemoryService, estimate_tokens, 
-                    AGENT_FILE_PREFIX, AGENT_FILE_SUFFIX
-                )
-                from app.models.models import UploadedFile
-                
                 summary = chat.code_summary
+                summary_lines = ["[PROJECT_CODE_SUMMARY]"]
+                
+                # Include file signatures
                 files = summary.get("files", [])
-                
-                # Build full summary text
-                full_summary_lines = ["# Project Code Summary\n"]
-                full_summary_lines.append(f"Total files: {len(files)}\n")
-                
-                for file_entry in files:
-                    fname = file_entry.get("filename") or file_entry.get("path", "unknown")
-                    sigs = file_entry.get("signatures", [])
-                    full_summary_lines.append(f"\n## {fname}")
-                    for sig in sigs:
-                        kind = sig.get("kind") or sig.get("type", "")
-                        name = sig.get("name", "")
-                        line = sig.get("line", 0)
-                        full_summary_lines.append(f"- {kind} {name} (line {line})")
-                
-                # Add warnings
-                if summary.get("warnings"):
-                    full_summary_lines.append("\n## Warnings")
-                    for warning in summary.get("warnings", []):
-                        full_summary_lines.append(f"- {warning.get('message', 'Unknown')}")
-                
-                full_summary = "\n".join(full_summary_lines)
-                full_tokens = estimate_tokens(full_summary)
-                
-                # Max 10% of context for code summary
-                max_summary_tokens = 12800  # ~50KB - reasonable limit
-                
-                if full_tokens > max_summary_tokens:
-                    # Store full summary in agent file with number
-                    service = AgentMemoryService()
-                    file_num = await service.get_next_agent_number(db, chat_id)
-                    agent_filename = f"{AGENT_FILE_PREFIX}{file_num:04d}{AGENT_FILE_SUFFIX}"
-                    
-                    # Check if code summary agent file already exists
-                    existing = await db.execute(
-                        select(UploadedFile)
-                        .where(UploadedFile.chat_id == chat_id)
-                        .where(UploadedFile.filepath.like(f"{AGENT_FILE_PREFIX}%"))
-                        .where(UploadedFile.content.like("%# Project Code Summary%"))
-                        .limit(1)
-                    )
-                    agent_file = existing.scalar_one_or_none()
-                    
-                    if not agent_file:
-                        # Create agent file
-                        agent_file = UploadedFile(
-                            chat_id=chat_id,
-                            filepath=agent_filename,
-                            filename=agent_filename,
-                            extension=".md",
-                            size=len(full_summary),
-                            content=full_summary,
-                        )
-                        db.add(agent_file)
-                        await db.commit()
-                        logger.info(f"[CODE_SUMMARY] Saved full summary to {agent_filename} ({full_tokens} tokens)")
-                    
-                    # Inject truncated summary with notice about agent file
-                    truncated_lines = ["[PROJECT_CODE_SUMMARY]"]
-                    truncated_lines.append(f"\nThis project has {len(files)} files with code signatures.")
-                    truncated_lines.append(f"Full summary is stored in {agent_filename} ({full_tokens} tokens).")
-                    truncated_lines.append("Use search_archived_context tool to find specific functions/classes.")
-                    truncated_lines.append("\nTop files preview:")
-                    
-                    # Add first few files
-                    for file_entry in files[:10]:
+                if files:
+                    summary_lines.append("\nFiles with signatures:")
+                    for file_entry in files[:20]:  # Limit to 20 files
+                        # Support both "filename" and "path" field names
                         fname = file_entry.get("filename") or file_entry.get("path", "unknown")
                         sigs = file_entry.get("signatures", [])
                         if sigs:
-                            truncated_lines.append(f"\n  {fname}:")
-                            for sig in sigs[:5]:
+                            summary_lines.append(f"\n  {fname}:")
+                            for sig in sigs[:10]:  # Limit signatures per file
+                                # Support both "kind" and "type" field names
                                 kind = sig.get("kind") or sig.get("type", "")
                                 name = sig.get("name", "")
-                                truncated_lines.append(f"    - {kind} {name}")
-                            if len(sigs) > 5:
-                                truncated_lines.append(f"    ... and {len(sigs) - 5} more")
-                    
-                    if len(files) > 10:
-                        truncated_lines.append(f"\n  ... and {len(files) - 10} more files")
-                    
-                    truncated_lines.append("\n[END_PROJECT_CODE_SUMMARY]")
-                    summary_context = "\n".join(truncated_lines)
-                else:
-                    # Small enough to include directly
-                    summary_context = f"[PROJECT_CODE_SUMMARY]\n{full_summary}\n[END_PROJECT_CODE_SUMMARY]"
+                                line = sig.get("line", 0)
+                                summary_lines.append(f"    - {kind} {name} (line {line})")
+                            if len(sigs) > 10:
+                                summary_lines.append(f"    ... and {len(sigs) - 10} more")
                 
+                # Include warnings
+                if summary.get("warnings"):
+                    summary_lines.append("\nCode warnings detected:")
+                    for warning in summary.get("warnings", [])[:10]:
+                        summary_lines.append(f"  - {warning.get('message', 'Unknown warning')}")
+                
+                summary_lines.append("\n[END_PROJECT_CODE_SUMMARY]")
+                
+                summary_context = "\n".join(summary_lines)
                 system_prompt = f"{system_prompt}\n\n{summary_context}"
-                logger.debug(f"Injected code summary for chat {chat_id} ({len(summary_context)} chars, full={full_tokens} tokens)")
+                logger.debug(f"Injected code summary for chat {chat_id} ({len(summary_context)} chars)")
             except Exception as e:
                 logger.warning(f"Failed to inject code summary: {e}")
-                import traceback
-                logger.warning(traceback.format_exc())
         
         # ==== PROCESS LARGE FILE ATTACHMENTS ====
         # If attachments are too large for context, store as searchable artifacts
@@ -1442,44 +1146,9 @@ The following is relevant information from your previous conversations:
             logger.debug(f"Tool executed, result length: {len(str(result))}")
             return result
         
-        # ============================================================
-        # PRE-GENERATE ASSISTANT MESSAGE ID (or use existing for continuations)
-        # This ID is generated BEFORE streaming starts.
-        # Frontend receives it BEFORE any content.
-        # Tool continuations use this as parent_id.
-        # If continue_message_id is provided, APPEND to that message instead.
-        # ============================================================
-        import uuid
-        
-        continue_message_id = payload.get("continue_message_id")
-        is_continuation = bool(continue_message_id and is_tool_result)
-        
-        if is_continuation:
-            # Validate the message exists and belongs to this chat
-            existing_msg = await db.execute(
-                select(Message).where(Message.id == continue_message_id, Message.chat_id == chat_id)
-            )
-            existing_message = existing_msg.scalar_one_or_none()
-            
-            if existing_message:
-                assistant_message_id = continue_message_id
-                logger.info(f"[TOOL_CONTINUATION] Appending to existing message: {assistant_message_id[:8]}")
-            else:
-                logger.warning(f"[TOOL_CONTINUATION] continue_message_id {continue_message_id[:8]} not found, creating new")
-                assistant_message_id = str(uuid.uuid4())
-                is_continuation = False
-        else:
-            assistant_message_id = str(uuid.uuid4())
-        
-        logger.info(f"[PRE_STREAM] Generated assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}, is_continuation={is_continuation}")
-        
-        # Notify frontend of the message ID BEFORE streaming starts
-        # Pass execute_tool for inline tool call detection (e.g., <$web_search>)
-        await streaming_handler.start_stream(assistant_message_id, chat_id, tool_executor=execute_tool)
-        
         try:
             # Log content being sent to LLM
-            logger.info(f"[LLM_CALL] Sending to LLM: content_len={len(content)}, chat={chat_id}, assistant_message_id={assistant_message_id[:8]}, parent_id={assistant_parent_id[:8] if assistant_parent_id else 'None'}, is_continuation={is_continuation}")
+            logger.info(f"[LLM_CALL] Sending to LLM: content_len={len(content)}, chat={chat_id}")
             if len(content) > 200:
                 logger.debug(f"[LLM_CALL] Content head: {content[:100]}")
                 logger.debug(f"[LLM_CALL] Content tail: {content[-100:]}")
@@ -1493,11 +1162,9 @@ The following is relevant information from your previous conversations:
                 tools=tools,
                 tool_executor=execute_tool if tools else None,
                 parent_id=assistant_parent_id,  # For conversation branching
-                message_id=assistant_message_id,  # PRE-GENERATED ID
                 cancel_check=streaming_handler.is_stop_requested,  # Allow LLM to check cancellation
                 stream_setter=streaming_handler.set_active_stream,  # Allow direct stream cancellation
                 is_file_content=not save_user_message,  # Skip injection filter for user-uploaded files
-                is_continuation=is_continuation,  # Append to existing message for tool continuations
             ):
                 # Check if stop was requested (backup check)
                 if streaming_handler.is_stop_requested():
@@ -1508,6 +1175,7 @@ The following is relevant information from your previous conversations:
                         "payload": {
                             "chat_id": chat_id,
                             "message_id": streaming_handler._current_message_id,
+                            "parent_id": assistant_parent_id,  # For conversation tree tracking
                             "message": "Generation stopped by user",
                         },
                     })
@@ -1517,9 +1185,10 @@ The following is relevant information from your previous conversations:
                 event_type = event.get("type")
                 logger.debug(f"LLM event: {event_type}")
                 
-                # NOTE: message_start is handled BEFORE this loop with pre-generated ID
+                if event_type == "message_start":
+                    await streaming_handler.start_stream(event["message_id"], chat_id)
                 
-                if event_type == "text_delta":
+                elif event_type == "text_delta":
                     await streaming_handler.send_chunk(event["text"])
                 
                 elif event_type == "message_end":
@@ -1575,46 +1244,22 @@ The following is relevant information from your previous conversations:
                     logger.error(f"LLM error: {event['error']}")
                     await streaming_handler.send_error(event["error"])
         except asyncio.CancelledError:
-            logger.info(f"Streaming task cancelled for chat {chat_id}")
-            
-            # CRITICAL: Commit any pending changes to save the message content
-            # This ensures the LLM response is saved even if client disconnected
-            try:
-                await db.commit()
-                logger.info(f"[CANCELLED] Committed partial content to database for chat {chat_id}")
-            except Exception as commit_err:
-                logger.warning(f"[CANCELLED] Failed to commit partial content: {commit_err}")
-            
-            # Try to notify client (will fail silently if disconnected)
-            try:
-                await ws_manager.send_to_connection(connection, {
-                    "type": "stream_stopped",
-                    "payload": {
-                        "chat_id": chat_id,
-                        "message_id": streaming_handler._current_message_id,
-                        "message": "Generation stopped",
-                    },
-                })
-            except Exception:
-                pass  # Client may be disconnected
-            
+            logger.debug(f"Streaming task cancelled for chat {chat_id}")
+            await ws_manager.send_to_connection(connection, {
+                "type": "stream_stopped",
+                "payload": {
+                    "chat_id": chat_id,
+                    "message_id": streaming_handler._current_message_id,
+                    "message": "Generation stopped by user",
+                },
+            })
             streaming_handler.reset_stop()
         except Exception as e:
             logger.exception(f"Exception during LLM streaming: {e}")
-            
-            # Still try to commit any partial content
+            await streaming_handler.send_error(str(e))
+            # Rollback to clear any pending transaction issues
             try:
-                await db.commit()
-                logger.info(f"[ERROR] Committed partial content despite error for chat {chat_id}")
-            except Exception:
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
-            
-            # Try to send error (will fail silently if disconnected)
-            try:
-                await streaming_handler.send_error(str(e))
+                await db.rollback()
             except Exception:
                 pass
         
@@ -1670,46 +1315,34 @@ The following is relevant information from your previous conversations:
                 )
                 logger.debug(f"Generated title for chat {chat_id}: {generated_title}")
                 
-                # Try to notify frontend about title update (may fail if disconnected)
-                try:
-                    await ws_manager.send_to_connection(connection, {
-                        "type": "chat_updated",
-                        "payload": {
-                            "chat_id": chat_id,
-                            "title": generated_title,
-                        }
-                    })
-                except Exception:
-                    pass  # Client may be disconnected
+                # Notify frontend about title update
+                await ws_manager.send_to_connection(connection, {
+                    "type": "chat_updated",
+                    "payload": {
+                        "chat_id": chat_id,
+                        "title": generated_title,
+                    }
+                })
             except Exception as e:
                 logger.warning(f"Failed to generate title: {e}")
                 fallback_title = content[:50] + ("..." if len(content) > 50 else "")
                 await db.execute(
                     update(Chat).where(Chat.id == chat_id).values(title=fallback_title)
                 )
-                # Try to notify with fallback title (may fail if disconnected)
-                try:
-                    await ws_manager.send_to_connection(connection, {
-                        "type": "chat_updated",
-                        "payload": {
-                            "chat_id": chat_id,
-                            "title": fallback_title,
-                        }
-                    })
-                except Exception:
-                    pass
+                # Still notify with fallback title
+                await ws_manager.send_to_connection(connection, {
+                    "type": "chat_updated",
+                    "payload": {
+                        "chat_id": chat_id,
+                        "title": fallback_title,
+                    }
+                })
         
-        # CRITICAL: Final commit to ensure all content is saved
-        # This runs even if client has disconnected
         try:
             await db.commit()
-            logger.debug(f"[FINAL_COMMIT] Successfully committed chat {chat_id}")
         except Exception as e:
             logger.warning(f"Failed to commit at end of handle_chat_message: {e}")
-            try:
-                await db.rollback()
-            except Exception:
-                pass
+            await db.rollback()
 
 
 async def handle_regenerate_message(

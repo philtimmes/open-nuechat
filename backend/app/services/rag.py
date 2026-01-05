@@ -373,8 +373,6 @@ class RAGService:
     _model = None
     _model_loaded = False
     _model_load_failed = False  # Track if model loading permanently failed
-    _model_load_last_attempt = 0  # Timestamp of last load attempt
-    _model_retry_delay = 60  # Retry after 60 seconds on failure
     _index_manager = None
     
     @classmethod
@@ -384,38 +382,22 @@ class RAGService:
         cls._model = None
         cls._model_loaded = False
         cls._model_load_failed = False
-        cls._model_load_last_attempt = 0
     
     @classmethod
     def get_model_status(cls) -> dict:
         """Get current model status for debugging"""
-        import time
-        retry_in = 0
-        if cls._model_load_failed:
-            elapsed = time.time() - cls._model_load_last_attempt
-            retry_in = max(0, cls._model_retry_delay - elapsed)
         return {
             "loaded": cls._model_loaded,
             "failed": cls._model_load_failed,
             "model_exists": cls._model is not None,
-            "retry_in_seconds": round(retry_in, 1) if cls._model_load_failed else None,
         }
     
     @classmethod
     def get_model(cls):
         """Lazy load the embedding model with GPU support"""
-        import time
-        
-        # If model loading already failed, check if we should retry
+        # If model loading already failed, don't retry (avoid repeated slow failures)
         if cls._model_load_failed:
-            elapsed = time.time() - cls._model_load_last_attempt
-            if elapsed < cls._model_retry_delay:
-                # Too soon to retry
-                return None
-            else:
-                # Enough time has passed, reset and retry
-                logger.info(f"[RAG] Retrying model load after {elapsed:.0f}s...")
-                cls._model_load_failed = False
+            return None
         
         if not cls._model_loaded:
             try:
@@ -488,7 +470,6 @@ class RAGService:
                 if model is None:
                     logger.error("All loading strategies failed")
                     cls._model_load_failed = True
-                    cls._model_load_last_attempt = time.time()
                     cls._model = None
                     return None
                 
@@ -516,8 +497,6 @@ class RAGService:
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 cls._model = None
-                cls._model_load_failed = True
-                cls._model_load_last_attempt = time.time()
         return cls._model
     
     @classmethod
@@ -1050,13 +1029,133 @@ class RAGService:
         
         return final_results
     
+    async def _enhance_query_with_context(
+        self,
+        db: AsyncSession,
+        query: str,
+        chat_id: Optional[str] = None,
+        max_context_messages: int = 3,
+    ) -> str:
+        """
+        Enhance a vague query with context from recent conversation.
+        
+        When user asks follow-up questions like "Where did it come from?" or 
+        "Tell me more about that", this extracts keywords from recent messages
+        to make the RAG search more effective.
+        
+        Args:
+            query: The current user query
+            chat_id: Optional chat ID to get context from
+            max_context_messages: Number of recent messages to consider
+            
+        Returns:
+            Enhanced query string combining original query with context keywords
+        """
+        # Only enhance short/vague queries (likely follow-ups)
+        if len(query.split()) > 10 or not chat_id:
+            return query
+        
+        # Common follow-up indicators
+        follow_up_words = {
+            'it', 'that', 'this', 'they', 'them', 'those', 'these',
+            'there', 'where', 'when', 'how', 'why', 'what', 'who',
+            'more', 'also', 'too', 'another', 'other', 'same',
+        }
+        
+        query_words = set(query.lower().split())
+        is_likely_followup = len(query_words & follow_up_words) > 0 or len(query_words) <= 5
+        
+        if not is_likely_followup:
+            return query
+        
+        try:
+            from app.models.models import Message
+            
+            # Get recent messages from this chat
+            result = await db.execute(
+                select(Message)
+                .where(Message.chat_id == chat_id)
+                .order_by(Message.created_at.desc())
+                .limit(max_context_messages * 2)  # Get more to filter
+            )
+            messages = result.scalars().all()
+            
+            if not messages:
+                return query
+            
+            # Extract keywords from recent messages (both user and assistant)
+            # Focus on nouns and proper nouns - words that are likely topics
+            import re
+            context_keywords = set()
+            
+            # Skip common words that don't add search value
+            stop_words = {
+                'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+                'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+                'would', 'could', 'should', 'may', 'might', 'must', 'shall',
+                'can', 'need', 'dare', 'ought', 'used', 'to', 'of', 'in',
+                'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through',
+                'during', 'before', 'after', 'above', 'below', 'between', 'under',
+                'again', 'further', 'then', 'once', 'here', 'there', 'when',
+                'where', 'why', 'how', 'all', 'each', 'few', 'more', 'most',
+                'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own',
+                'same', 'so', 'than', 'too', 'very', 'just', 'and', 'but',
+                'if', 'or', 'because', 'until', 'while', 'about', 'against',
+                'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves',
+                'you', 'your', 'yours', 'yourself', 'yourselves', 'he', 'him',
+                'his', 'himself', 'she', 'her', 'hers', 'herself', 'it', 'its',
+                'itself', 'they', 'them', 'their', 'theirs', 'themselves',
+                'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those',
+                'am', 'tell', 'know', 'think', 'want', 'see', 'look', 'make',
+                'go', 'get', 'come', 'take', 'give', 'say', 'said', 'like',
+            }
+            
+            for msg in messages[:max_context_messages]:
+                if not msg.content:
+                    continue
+                    
+                # Extract words, focusing on capitalized words (likely proper nouns/topics)
+                # and longer words (more likely to be meaningful)
+                words = re.findall(r'\b[A-Za-z][A-Za-z0-9-]{2,}\b', msg.content)
+                
+                for word in words:
+                    lower_word = word.lower()
+                    # Include if: capitalized (proper noun), longer than 5 chars, or contains numbers
+                    if (lower_word not in stop_words and 
+                        (word[0].isupper() or len(word) > 5 or any(c.isdigit() for c in word))):
+                        context_keywords.add(word)
+            
+            if not context_keywords:
+                return query
+            
+            # Take top keywords (prefer proper nouns/capitalized, then by length)
+            sorted_keywords = sorted(
+                context_keywords,
+                key=lambda w: (not w[0].isupper(), -len(w))
+            )[:5]
+            
+            # Combine query with context keywords
+            enhanced_query = f"{query} {' '.join(sorted_keywords)}"
+            logger.info(f"[RAG_CONTEXT] Enhanced query: '{query}' -> '{enhanced_query}'")
+            
+            return enhanced_query
+            
+        except Exception as e:
+            logger.warning(f"[RAG_CONTEXT] Failed to enhance query: {e}")
+            return query
+    
     async def search_global_stores(
         self,
         db: AsyncSession,
         query: str,
+        chat_id: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Search all global knowledge stores for relevant context.
+        
+        Args:
+            query: The search query
+            chat_id: Optional chat ID for context-aware query enhancement
         
         Returns:
             Tuple of (results, store_names) where results are filtered by 
@@ -1070,6 +1169,10 @@ class RAGService:
         
         total_start = time.time()
         
+        # Enhance query with conversation context (for follow-up questions)
+        if chat_id:
+            query = await self._enhance_query_with_context(db, query, chat_id)
+        
         # Check if global knowledge stores are enabled
         setting_start = time.time()
         result = await db.execute(
@@ -1077,11 +1180,15 @@ class RAGService:
         )
         setting = result.scalar_one_or_none()
         setting_time = time.time() - setting_start
-        logger.debug(f"[GLOBAL_RAG_TIMING] Setting check took {setting_time:.3f}s")
         
-        if setting and setting.value.lower() != "true":
-            logger.debug("[GLOBAL_RAG] Global knowledge stores disabled")
-            return [], []
+        # Log whether setting exists and its value
+        if setting:
+            logger.info(f"[GLOBAL_RAG] Setting 'global_knowledge_store_enabled' = '{setting.value}'")
+            if setting.value.lower() != "true":
+                logger.info("[GLOBAL_RAG] Global knowledge stores disabled by setting")
+                return [], []
+        else:
+            logger.info("[GLOBAL_RAG] Setting 'global_knowledge_store_enabled' not found, defaulting to enabled")
         
         # Find all global knowledge stores
         stores_start = time.time()
@@ -1339,6 +1446,7 @@ class RAGService:
         query: str,
         document_ids: Optional[List[str]] = None,
         top_k: int = 5,
+        chat_id: Optional[str] = None,
     ) -> str:
         """
         Get formatted context from user's UNITEMIZED documents for LLM prompt.
@@ -1350,7 +1458,14 @@ class RAGService:
         - The user explicitly provides document_ids
         
         This prevents searching subscribed GPTs' knowledge stores when no GPT is selected.
+        
+        Args:
+            chat_id: Optional chat ID for context-aware query enhancement.
         """
+        # Enhance query with conversation context (for follow-up questions)
+        if chat_id:
+            query = await self._enhance_query_with_context(db, query, chat_id)
+        
         # If specific document IDs provided, search only those
         if document_ids:
             results = await self.search(db, user, query, document_ids, top_k)
@@ -1377,6 +1492,7 @@ class RAGService:
         knowledge_store_ids: List[str],
         top_k: int = 5,
         bypass_access_check: bool = False,
+        chat_id: Optional[str] = None,
     ) -> str:
         """
         Get formatted context from knowledge stores for LLM prompt.
@@ -1384,7 +1500,12 @@ class RAGService:
         Args:
             bypass_access_check: If True, skip ownership/permission checks.
                                 Used when accessing KB through a public GPT.
+            chat_id: Optional chat ID for context-aware query enhancement.
         """
+        # Enhance query with conversation context (for follow-up questions)
+        if chat_id:
+            query = await self._enhance_query_with_context(db, query, chat_id)
+        
         results = await self.search_knowledge_stores(
             db, user, query, knowledge_store_ids, top_k,
             bypass_access_check=bypass_access_check,
@@ -1412,63 +1533,6 @@ class RAGService:
             )
         
         return context
-    
-    async def get_chat_knowledge_context(
-        self,
-        db: AsyncSession,
-        user: User,
-        query: str,
-        chat_knowledge_store_id: str,
-        current_assistant_id: Optional[str] = None,
-        top_k: int = 5,
-    ) -> str:
-        """
-        Get formatted context from user's chat history knowledge store.
-        
-        Filters results to match current assistant context:
-        - If current_assistant_id is None: only return results from chats without an assistant
-        - If current_assistant_id is set: only return results from chats with that specific assistant
-        
-        This prevents knowledge leakage between different assistant contexts.
-        """
-        # First get all results from the chat knowledge store
-        results = await self.search_knowledge_stores(
-            db, user, query, [chat_knowledge_store_id], top_k * 3,  # Get more to filter
-            bypass_access_check=True,  # User owns this KB
-        )
-        
-        if not results:
-            return ""
-        
-        # Filter by assistant context
-        filtered_results = []
-        for result in results:
-            # Note: _get_chunks_by_ids returns 'metadata' not 'chunk_metadata'
-            chunk_metadata = result.get("metadata", {}) or {}
-            result_assistant_id = chunk_metadata.get("assistant_id")
-            
-            # Match assistant context:
-            # - Both None: chat without assistant matches query without assistant
-            # - Both same ID: chat with assistant X matches query with assistant X
-            if result_assistant_id == current_assistant_id:
-                filtered_results.append(result)
-                if len(filtered_results) >= top_k:
-                    break
-        
-        if not filtered_results:
-            logger.debug(f"[CHAT_KB] No results after assistant filter (current_assistant_id={current_assistant_id})")
-            return ""
-        
-        logger.info(f"[CHAT_KB] Filtered {len(results)} -> {len(filtered_results)} results for assistant_id={current_assistant_id}")
-        
-        context_parts = []
-        for i, result in enumerate(filtered_results, 1):
-            chat_title = (result.get("metadata") or {}).get("chat_title", "Previous Chat")
-            context_parts.append(
-                f"[From: {chat_title}]\n{result['content']}"
-            )
-        
-        return "\n\n---\n\n".join(context_parts)
     
     async def rebuild_all_indexes(self, db: AsyncSession) -> Dict[str, int]:
         """Rebuild all knowledge store FAISS indexes"""

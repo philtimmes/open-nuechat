@@ -221,24 +221,12 @@ STEP_TYPE_SCHEMA = {
         ],
     },
     "to_tool": {
-        "label": "Call Tool (Advanced)",
-        "description": "Execute a tool with full parameter control",
+        "label": "Call Tool",
+        "description": "Execute a tool",
         "category": "tool",
         "fields": [
             {"name": "tool_name", "type": "tool_select", "label": "Tool", "required": True},
             {"name": "params", "type": "key_value", "label": "Parameters", "placeholder": "Use {$Var[Name]} for variables"},
-            {"name": "output_var", "type": "text", "label": "Store Result As"},
-            {"name": "add_to_context", "type": "checkbox", "label": "Add result to context", "default": True},
-            {"name": "context_label", "type": "text", "label": "Context Label"},
-        ],
-    },
-    "call_tool": {
-        "label": "Call Tool",
-        "description": "Simple tool call - uses query from previous step or original query",
-        "category": "tool",
-        "fields": [
-            {"name": "name", "type": "tool_select", "label": "Tool", "required": True},
-            {"name": "query", "type": "textarea", "label": "Query (optional)", "placeholder": "Leave empty to use previous result or {$Query}"},
             {"name": "output_var", "type": "text", "label": "Store Result As"},
             {"name": "add_to_context", "type": "checkbox", "label": "Add result to context", "default": True},
             {"name": "context_label", "type": "text", "label": "Context Label"},

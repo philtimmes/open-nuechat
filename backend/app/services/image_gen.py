@@ -19,56 +19,67 @@ IMAGE_CONFIRM_WITH_LLM = os.getenv("IMAGE_CONFIRM_WITH_LLM", "true").lower() == 
 logger.info(f"Image gen service URL: {IMAGE_GEN_SERVICE_URL}, timeout: {IMAGE_GEN_TIMEOUT}s, LLM confirm: {IMAGE_CONFIRM_WITH_LLM}")
 
 # Pattern detection for image generation requests (quick pre-filter)
-# Simple patterns: verb + image word anywhere in the text
+# Includes full words and common short forms
+# IMPORTANT: Patterns must be specific enough to avoid matching legal/technical text
 IMAGE_GEN_PATTERNS = [
-    r"\bgenerate\b.*\bimage\b",
-    r"\bmake\b.*\bimage\b",
-    r"\bmake\b.*\bpicture\b",
-    r"\bmake\b.*\bpic\b",
-    r"\bgenerate\b.*\bpic\b",
-    r"\bcreate\b.*\bimage\b",
-    r"\bcreate\b.*\bpic\b",
-    r"\bcreate\b.*\bpicture\b",
-    # Also match reverse order (image/pic first, then verb)
-    r"\bimage\b.*\bgenerate\b",
-    r"\bimage\b.*\bmake\b",
-    r"\bimage\b.*\bcreate\b",
-    r"\bpicture\b.*\bmake\b",
-    r"\bpicture\b.*\bcreate\b",
-    r"\bpic\b.*\bmake\b",
-    r"\bpic\b.*\bcreate\b",
-    r"\bpic\b.*\bgenerate\b",
+    # Direct creation requests - require image-related word within 20 chars
+    r"\b(create|make|generate|design|produce|render|gen)\b.{0,20}\b(image|picture|photo|illustration|artwork|graphic|icon|logo|banner|poster|avatar|thumbnail|pic|img|gfx)\b",
+    # Image word followed by "of/for/showing" - indicates describing what to create
+    r"\b(image|picture|photo|illustration|artwork|graphic|icon|logo|banner|poster|avatar|thumbnail|pic|img|gfx)\b.{0,20}\b(of|for|showing|depicting|with)\b",
+    # Art verbs that strongly imply visual creation - require "me" or direct object pattern
+    r"\b(paint|sketch|draw)\s+me\s+(a\s+|an\s+)?",  # "paint me a sunset"
+    r"\b(paint|sketch|draw)\s+(a|an)\s+\w+\s+(of|for|with)\b",  # "draw a picture of"
+    # Logo and design requests - specific context required
+    r"\b(logo|icon|badge|emblem|logotype)\s+(for|design|idea)\b",
+    r"\b(design|create|make)\s+(a\s+|an\s+|my\s+)?(logo|icon|badge|emblem)\b",
+    # Portrait and character requests
+    r"\b(portrait|headshot|character\s+art|avatar|pfp|profile\s*pic)\s+(of|for)\b",
+    # Style-based requests - art style references
+    r"\b(in the style of|like a|as a)\b.{0,30}\b(painting|drawing|photograph|illustration)\b",
+    # Explicit image generation requests
+    r"\bgenerate\s+(a\s+|an\s+)?(image|picture|photo|pic|img)\b",
+    r"\bgen\s+(a\s+|an\s+)?(image|picture|photo|pic|img)\b",
+    r"\bcan\s+you\s+(create|make|draw|generate).{0,15}(image|picture|photo|logo|pic|img)\b",
+    r"\bi\s+(want|need|would\s+like)\s+(a\s+|an\s+)?(image|picture|photo|logo|illustration|pic|img)\b",
+    # Short form requests - very specific patterns
+    r"\b(make|create|gen)\s+me\s+(a\s+)?pic\b",
+    r"\b(make|create|gen)\s+(a\s+)?pic\s+of\b",
+    r"\bpic\s+of\s+(a\s+|an\s+|the\s+|my\s+)?\w+",  # "pic of a cat"
+    r"\bimg\s+of\s+(a\s+|an\s+|the\s+|my\s+)?\w+",  # "img of a sunset"
 ]
 
 # Compile patterns for efficiency
 COMPILED_PATTERNS = [re.compile(p, re.IGNORECASE) for p in IMAGE_GEN_PATTERNS]
 
+# Negative patterns - these indicate NOT an image generation request
+NEGATIVE_PATTERNS = [
+    r"\b(analyze|describe|explain|what is|tell me about|look at|what's in)\b.{0,20}\b(this|the|my)\b.{0,10}\b(image|picture|photo|pic|img)\b",
+    r"\b(upload|attach|send|share)\b.{0,20}\b(image|picture|photo|pic|img)\b",
+    r"\b(image|picture|photo|pic|img)\b.{0,10}\b(you (sent|shared|uploaded))\b",
+    r"\b(this|the)\s+(image|picture|photo|pic|img)\b",
+]
+COMPILED_NEGATIVE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in NEGATIVE_PATTERNS]
 
-async def confirm_image_request_with_llm(text: str, db: "AsyncSession") -> Tuple[bool, Optional[str], bool]:
+
+async def confirm_image_request_with_llm(text: str, db: "AsyncSession") -> Tuple[bool, Optional[str]]:
     """
     Use the LLM to confirm if this is an image generation request.
     
-    Uses admin-configurable prompt and expected response from system_settings:
-    - image_classification_prompt: The system prompt for the classifier
-    - image_classification_true_response: What response indicates YES (default: "YES")
+    Uses LLMService.simple_completion which:
+    - Does NOT track token usage against the user's quota
+    - Uses admin panel LLM settings (not .env)
     
     Returns:
-        Tuple of (is_image_request, extracted_prompt, was_error)
-        - was_error: True if there was an error (should fall back to regex)
+        Tuple of (is_image_request, extracted_prompt)
     """
     from app.services.llm import LLMService
-    from app.api.routes.admin import get_system_setting
-    
-    logger.info(f"[IMAGE_LLM] Starting LLM confirmation for: '{text[:60]}...'")
     
     try:
-        # Get admin-configured prompt and expected response
-        custom_prompt = await get_system_setting(db, "image_classification_prompt")
-        true_response = await get_system_setting(db, "image_classification_true_response")
+        # Get LLM service with admin panel settings
+        llm_service = await LLMService.from_database(db)
         
-        # Default prompt if not configured
-        if not custom_prompt:
-            custom_prompt = """You are a classifier that determines if the user wants to generate/create an image.
+        # Use a fast, focused prompt
+        system_prompt = """You are a classifier that determines if the user wants to generate/create an image.
 Answer with ONLY "YES" or "NO" followed by the image prompt if YES.
 
 Format:
@@ -91,51 +102,45 @@ Answer: NO
 User: "Draw a cute cat wearing a hat"
 Answer: YES: a cute cat wearing a hat
 
-User: "Make an image: 1280x720 A surreal landscape"
-Answer: YES: A surreal landscape"""
-        
-        # Default true response
-        if not true_response:
-            true_response = "YES"
-        
-        true_response = true_response.strip().upper()
-        
-        # Get LLM service with admin panel settings
-        llm_service = await LLMService.from_database(db)
-        
+User: "How do I upload an image?"
+Answer: NO
+
+User: "gen me a pic of a dragon"
+Answer: YES: a dragon
+
+User: "make a pfp for my discord"
+Answer: YES: a profile picture for discord
+
+User: "make a picture of a mouse on a unicycle"
+Answer: YES: a mouse on a unicycle"""
+
         result = await llm_service.simple_completion(
             prompt=text,
-            system_prompt=custom_prompt,
-            max_tokens=200,
+            system_prompt=system_prompt,
+            max_tokens=100,
         )
         
         result = result.strip()
-        logger.info(f"[IMAGE_LLM] LLM response: '{result[:100]}', checking for '{true_response}'")
+        logger.info(f"LLM image classification result: {result[:100]}")
         
-        # Check for empty result (indicates LLM error)
-        if not result:
-            logger.warning("[IMAGE_LLM] LLM returned empty result")
-            return False, None, True  # Error - should fall back
-        
-        # Check if response starts with the expected true response
-        if result.upper().startswith(true_response):
-            # Extract the prompt after the true response and colon
-            prompt = text.strip()
+        if result.upper().startswith("YES"):
+            # Extract the prompt after "YES:"
             if ":" in result:
-                # Try to extract prompt from "YES: <prompt>" format
-                after_marker = result.split(":", 1)
-                if len(after_marker) > 1 and after_marker[1].strip():
-                    prompt = after_marker[1].strip()
-            
-            logger.info(f"[IMAGE_LLM] Confirmed as image request, prompt: '{prompt[:50]}...'")
-            return True, prompt, False
+                prompt = result.split(":", 1)[1].strip()
+            else:
+                prompt = text.strip()
+            logger.info(f"LLM confirmed image request, prompt: {prompt[:50]}...")
+            return True, prompt
         else:
-            logger.info(f"[IMAGE_LLM] Not an image request (response didn't start with '{true_response}')")
-            return False, None, False  # Genuine NO
+            logger.info("LLM determined this is NOT an image generation request")
+            return False, None
             
     except Exception as e:
-        logger.error(f"[IMAGE_LLM] Exception: {e}")
-        return False, None, True  # Error - should fall back
+        logger.error(f"LLM image confirmation failed: {e}")
+        # SAFE DEFAULT: If we can't confirm with LLM, don't generate image
+        # This prevents false positives from regex triggering on non-image text
+        logger.warning("Falling back to SAFE DEFAULT: not generating image")
+        return False, None
 
 
 def detect_image_request_regex(text: str) -> Tuple[bool, Optional[str]]:
@@ -150,15 +155,19 @@ def detect_image_request_regex(text: str) -> Tuple[bool, Optional[str]]:
     
     text_lower = text.lower().strip()
     
-    # Check positive patterns - if any match, it's potentially an image request
-    # LLM confirmation (if enabled) handles false positives
+    # Check negative patterns first (describing/analyzing existing images)
+    for pattern in COMPILED_NEGATIVE_PATTERNS:
+        if pattern.search(text_lower):
+            logger.debug(f"Negative pattern matched, not an image request: {text[:50]}")
+            return False, None
+    
+    # Check positive patterns
     for pattern in COMPILED_PATTERNS:
         match = pattern.search(text_lower)
         if match:
-            logger.info(f"[IMAGE_REGEX] Pattern matched: '{match.group()}' in text: '{text[:60]}...'")
+            logger.info(f"Image generation pattern matched: {pattern.pattern}")
             return True, text.strip()
     
-    logger.debug(f"[IMAGE_REGEX] No pattern matched for: '{text[:60]}...'")
     return False, None
 
 
@@ -178,12 +187,7 @@ def detect_image_request(text: str) -> Tuple[bool, Optional[str]]:
 
 async def detect_image_request_async(text: str, db: "AsyncSession" = None, use_llm: bool = None) -> Tuple[bool, Optional[str]]:
     """
-    Detect if text is an image generation request.
-    
-    Order:
-    1. Regex pre-filter (must contain verb + image word like "make image", "create pic", etc.)
-    2. If regex matches AND LLM confirmation enabled: LLM confirms
-    3. If LLM says no, reject. If LLM errors, use regex result.
+    Detect if text is an image generation request, optionally using LLM confirmation.
     
     Args:
         text: The user's message
@@ -196,36 +200,25 @@ async def detect_image_request_async(text: str, db: "AsyncSession" = None, use_l
     if use_llm is None:
         use_llm = IMAGE_CONFIRM_WITH_LLM
     
-    # Step 1: Regex pre-filter - must contain verb + image word
+    # First do quick regex pre-filter
     regex_match, regex_prompt = detect_image_request_regex(text)
     
     if not regex_match:
-        # Regex didn't match - not an image request
-        logger.info("[IMAGE_DETECT] Regex did not match, not an image request")
+        # Regex didn't match, definitely not an image request
         return False, None
     
-    logger.info("[IMAGE_DETECT] Regex matched")
+    if not use_llm:
+        # LLM confirmation disabled, use regex result
+        logger.info("Image request detected via regex (LLM confirmation disabled)")
+        return regex_match, regex_prompt
     
-    # Step 2: If LLM confirmation enabled, ask LLM to confirm
-    if use_llm and db is not None:
-        logger.info("[IMAGE_DETECT] Confirming with LLM...")
-        llm_result, llm_prompt, was_error = await confirm_image_request_with_llm(text, db)
-        
-        if was_error:
-            # LLM error - fall back to regex result (generate image)
-            logger.warning("[IMAGE_DETECT] LLM error, using regex result")
-            return True, extract_image_prompt(regex_prompt)
-        
-        if llm_result:
-            logger.info("[IMAGE_DETECT] LLM confirmed")
-            return True, llm_prompt if llm_prompt else extract_image_prompt(regex_prompt)
-        else:
-            logger.info("[IMAGE_DETECT] LLM rejected")
-            return False, None
+    if db is None:
+        logger.warning("LLM confirmation requested but no db session provided, falling back to regex")
+        return regex_match, regex_prompt
     
-    # LLM disabled or no db - use regex result
-    logger.info("[IMAGE_DETECT] LLM disabled, using regex result")
-    return True, extract_image_prompt(regex_prompt)
+    # Regex matched, now confirm with LLM
+    logger.info("Regex matched image pattern, confirming with LLM...")
+    return await confirm_image_request_with_llm(text, db)
 
 
 def extract_image_prompt(text: str) -> str:

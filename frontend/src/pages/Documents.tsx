@@ -517,6 +517,9 @@ export default function Documents() {
                           <div className="flex-1 text-left">
                             <div className="flex items-center gap-2">
                               <h3 className="font-medium text-[var(--color-text)]">{ks.name}</h3>
+                              {ks.is_global && (
+                                <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/10 text-purple-400" title="Auto-searched on every query">Global</span>
+                              )}
                               {ks.is_public ? (
                                 <span className="px-1.5 py-0.5 text-xs rounded bg-[var(--color-success)]/10 text-[var(--color-success)]">Public</span>
                               ) : (
@@ -907,6 +910,11 @@ export default function Documents() {
                           Add Docs
                         </span>
                       </label>
+                      {ks.is_global && (
+                        <span className="px-2 py-1 text-xs rounded-full bg-purple-500/10 text-purple-400" title="Auto-searched on every query">
+                          Global
+                        </span>
+                      )}
                       {ks.is_public ? (
                         <span className="px-2 py-1 text-xs rounded-full bg-[var(--color-success)]/10 text-[var(--color-success)]">
                           Public

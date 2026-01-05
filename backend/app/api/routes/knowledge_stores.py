@@ -996,7 +996,12 @@ async def set_store_global(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Set a knowledge store as global (admin only)"""
+    """Set a knowledge store as global (admin only)
+    
+    When a store is marked as global:
+    - It's automatically searched on every chat query for all users
+    - It's also made public so users can see it exists
+    """
     if not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1018,6 +1023,12 @@ async def set_store_global(
     store.global_min_score = min_score
     store.global_max_results = max_results
     
+    # Global stores should also be public so users can see they exist
+    # (they're being searched on their behalf, so they should know about it)
+    if is_global:
+        store.is_public = True
+        store.is_discoverable = True
+    
     await db.commit()
     
     action = "enabled" if is_global else "disabled"
@@ -1026,6 +1037,7 @@ async def set_store_global(
         "store_id": store_id,
         "store_name": store.name,
         "is_global": is_global,
+        "is_public": store.is_public,
         "global_min_score": min_score,
         "global_max_results": max_results,
     }
@@ -1063,115 +1075,3 @@ async def list_all_stores_admin(
         responses.append(response)
     
     return responses
-
-
-# === Search Endpoint (for LLM tool use) ===
-
-class KBSearchRequest(BaseModel):
-    """Request to search knowledge bases"""
-    query: str = Field(..., min_length=1, max_length=2000)
-    knowledge_store_ids: Optional[List[str]] = None  # If None, search all accessible
-    top_k: int = Field(default=5, ge=1, le=20)
-
-
-class KBSearchResult(BaseModel):
-    """Single search result"""
-    content: str
-    document_name: str
-    knowledge_store_name: str
-    score: float
-
-
-class KBSearchResponse(BaseModel):
-    """Response from knowledge base search"""
-    results: List[KBSearchResult]
-    query: str
-    stores_searched: int
-
-
-@router.post("/search", response_model=KBSearchResponse)
-async def search_knowledge_bases(
-    request: KBSearchRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Search across user's accessible knowledge bases.
-    
-    Used by LLM tool: <kb_search query="...">
-    
-    If knowledge_store_ids is provided, search only those stores.
-    Otherwise, search all stores the user has access to.
-    """
-    rag_service = RAGService()
-    
-    # Get accessible knowledge stores
-    if request.knowledge_store_ids:
-        # Verify user has access to specified stores
-        store_ids = request.knowledge_store_ids
-    else:
-        # Get all stores user has access to (owned + shared + public)
-        # Owned stores
-        owned_result = await db.execute(
-            select(KnowledgeStore.id)
-            .where(KnowledgeStore.owner_id == current_user.id)
-        )
-        owned_ids = [str(r) for r in owned_result.scalars().all()]
-        
-        # Shared stores
-        shared_result = await db.execute(
-            select(KnowledgeStoreShare.knowledge_store_id)
-            .where(KnowledgeStoreShare.shared_with_user_id == current_user.id)
-        )
-        shared_ids = [str(r) for r in shared_result.scalars().all()]
-        
-        # Public stores
-        public_result = await db.execute(
-            select(KnowledgeStore.id)
-            .where(KnowledgeStore.is_public == True)
-        )
-        public_ids = [str(r) for r in public_result.scalars().all()]
-        
-        store_ids = list(set(owned_ids + shared_ids + public_ids))
-    
-    if not store_ids:
-        return KBSearchResponse(
-            results=[],
-            query=request.query,
-            stores_searched=0,
-        )
-    
-    # Get store names for results
-    store_result = await db.execute(
-        select(KnowledgeStore).where(KnowledgeStore.id.in_(store_ids))
-    )
-    store_names = {str(s.id): s.name for s in store_result.scalars().all()}
-    
-    # Search
-    raw_results = await rag_service.search_knowledge_stores(
-        db=db,
-        user=current_user,
-        query=request.query,
-        knowledge_store_ids=store_ids,
-        top_k=request.top_k,
-    )
-    
-    # Format results
-    results = []
-    for r in raw_results:
-        # Get knowledge store name from chunk metadata or store lookup
-        kb_id = r.get('knowledge_store_id', '')
-        kb_name = store_names.get(kb_id, 'Unknown')
-        
-        results.append(KBSearchResult(
-            content=r.get('content', ''),
-            document_name=r.get('document_name', 'Unknown'),
-            knowledge_store_name=kb_name,
-            score=r.get('score', 0.0),
-        ))
-    
-    return KBSearchResponse(
-        results=results,
-        query=request.query,
-        stores_searched=len(store_ids),
-    )

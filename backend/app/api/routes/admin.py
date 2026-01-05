@@ -1,16 +1,11 @@
 """
 Admin routes for system settings management
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from pathlib import Path
 import json
-import uuid
-import shutil
-import logging
 
 from app.api.dependencies import get_current_user, get_db
 from app.models.models import User, SystemSetting, UserTier, Chat, Message
@@ -18,52 +13,7 @@ from app.core.config import settings
 from app.services.billing import BillingService
 from sqlalchemy import select, func, or_
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/admin", tags=["admin"])
-
-
-def get_branding_dir() -> Path:
-    """
-    Get the branding assets directory, located in the same directory as the database.
-    This ensures branding images persist with the database.
-    """
-    # Parse database path from DATABASE_URL
-    # Format: sqlite+aiosqlite:///./data/nuechat.db or sqlite+aiosqlite:////absolute/path/nuechat.db
-    db_url = settings.DATABASE_URL
-    
-    if "sqlite" in db_url:
-        # Extract path after sqlite+aiosqlite:///
-        if ":///" in db_url:
-            db_path = db_url.split(":///", 1)[1]
-            # Handle relative vs absolute paths
-            if db_path.startswith("/"):
-                # Absolute path (4 slashes total: sqlite+aiosqlite:////path)
-                db_dir = Path(db_path).parent
-            else:
-                # Relative path (3 slashes: sqlite+aiosqlite:///./data/db)
-                db_dir = Path(db_path).parent
-        else:
-            # Fallback to default
-            db_dir = Path("./data")
-    else:
-        # Non-SQLite database - use a default data directory
-        db_dir = Path("./data")
-    
-    branding_dir = db_dir / "branding_assets"
-    branding_dir.mkdir(parents=True, exist_ok=True)
-    return branding_dir
-
-
-# Directory for branding assets - lazily initialized
-_branding_dir: Optional[Path] = None
-
-def get_branding_assets_dir() -> Path:
-    """Get or create the branding assets directory."""
-    global _branding_dir
-    if _branding_dir is None:
-        _branding_dir = get_branding_dir()
-    return _branding_dir
 
 
 # Default tier configuration
@@ -157,36 +107,6 @@ SETTING_DEFAULTS = {
     "max_knowledge_stores_free": "3",
     "max_knowledge_stores_pro": "20",
     "max_knowledge_stores_enterprise": "100",
-    
-    # Billing API Settings - Stripe
-    "stripe_enabled": "false",
-    "stripe_api_key": settings.STRIPE_API_KEY or "",
-    "stripe_webhook_secret": settings.STRIPE_WEBHOOK_SECRET or "",
-    "stripe_publishable_key": settings.STRIPE_PUBLISHABLE_KEY or "",
-    "stripe_pro_price_id": "",
-    "stripe_enterprise_price_id": "",
-    
-    # Billing API Settings - PayPal
-    "paypal_enabled": "false",
-    "paypal_client_id": settings.PAYPAL_CLIENT_ID or "",
-    "paypal_client_secret": settings.PAYPAL_CLIENT_SECRET or "",
-    "paypal_webhook_id": settings.PAYPAL_WEBHOOK_ID or "",
-    "paypal_mode": settings.PAYPAL_MODE or "sandbox",
-    "paypal_pro_plan_id": "",
-    "paypal_enterprise_plan_id": "",
-    
-    # Billing API Settings - Google Pay
-    "google_pay_enabled": "false",
-    "google_pay_merchant_id": settings.GOOGLE_PAY_MERCHANT_ID or "",
-    "google_pay_merchant_name": settings.GOOGLE_PAY_MERCHANT_NAME or "NueChat",
-    
-    # Branding
-    "app_name": "Open-NueChat",
-    "app_tagline": "AI-Powered Chat",
-    "favicon_url": "",
-    "logo_url": "",
-    "custom_css": "",
-    "custom_themes": "[]",
 }
 
 
@@ -241,12 +161,13 @@ class SystemSettingsSchema(BaseModel):
     default_system_prompt: str
     all_models_prompt: str = ""  # Appended to all system prompts including Custom GPTs
     title_generation_prompt: str
-    rag_context_prompt: str
+    rag_context_prompt: str  # Legacy - used for user documents if specific prompt not set
     
-    # Image classification
-    image_confirm_with_llm: bool = True  # Whether to use LLM to confirm image requests
-    image_classification_prompt: str = ""
-    image_classification_true_response: str = "YES"
+    # RAG Context Prompts (per source type)
+    rag_prompt_global_kb: str = ""  # Global Knowledge Stores (authoritative)
+    rag_prompt_gpt_kb: str = ""  # Custom GPT Knowledge Stores
+    rag_prompt_user_docs: str = ""  # User's uploaded documents
+    rag_prompt_chat_history: str = ""  # User's chat history knowledge
     
     # Pricing
     input_token_price: float
@@ -293,9 +214,6 @@ class LLMSettingsSchema(BaseModel):
     llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     llm_stream_default: bool = True
     llm_multimodal: bool = False  # Whether legacy model supports vision/images
-    # Thinking tokens (for models that output reasoning)
-    think_begin_token: str = ""
-    think_end_token: str = ""
     # History compression settings
     history_compression_enabled: bool = True
     history_compression_threshold: int = Field(default=20, ge=5, le=100)
@@ -311,47 +229,12 @@ class FeatureFlagsSchema(BaseModel):
     enable_safety_filters: bool = False  # Prompt injection & content moderation filters
 
 
-class BillingApiSettingsSchema(BaseModel):
-    """Payment provider API settings"""
-    # Stripe
-    stripe_enabled: bool = False
-    stripe_api_key: str = ""
-    stripe_webhook_secret: str = ""
-    stripe_publishable_key: str = ""
-    stripe_pro_price_id: str = ""
-    stripe_enterprise_price_id: str = ""
-    
-    # PayPal
-    paypal_enabled: bool = False
-    paypal_client_id: str = ""
-    paypal_client_secret: str = ""
-    paypal_webhook_id: str = ""
-    paypal_mode: str = "sandbox"  # "sandbox" or "live"
-    paypal_pro_plan_id: str = ""
-    paypal_enterprise_plan_id: str = ""
-    
-    # Google Pay
-    google_pay_enabled: bool = False
-    google_pay_merchant_id: str = ""
-    google_pay_merchant_name: str = "NueChat"
-
-
 class APIRateLimitsSchema(BaseModel):
     """API rate limit settings (requests per minute)"""
     api_rate_limit_completions: int = Field(default=60, ge=1, le=1000, description="Chat completions per minute")
     api_rate_limit_embeddings: int = Field(default=200, ge=1, le=1000, description="Embeddings per minute")
     api_rate_limit_images: int = Field(default=10, ge=1, le=100, description="Image generations per minute")
     api_rate_limit_models: int = Field(default=100, ge=1, le=1000, description="Model list requests per minute")
-
-
-class BrandingSettingsSchema(BaseModel):
-    """Branding and customization settings"""
-    app_name: str = Field(default="Open-NueChat", description="Application name")
-    app_tagline: str = Field(default="AI-Powered Chat", description="Application tagline")
-    favicon_url: str = Field(default="", description="URL to favicon")
-    logo_url: str = Field(default="", description="URL to logo image")
-    custom_css: str = Field(default="", description="Custom CSS rules")
-    custom_themes: str = Field(default="[]", description="JSON array of custom themes")
 
 
 class TiersSchema(BaseModel):
@@ -442,15 +325,15 @@ async def get_admin_settings(
     db: AsyncSession = Depends(get_db),
 ):
     """Get all system settings"""
-    image_confirm_setting = await get_system_setting(db, "image_confirm_with_llm")
     return SystemSettingsSchema(
         default_system_prompt=await get_system_setting(db, "default_system_prompt"),
         all_models_prompt=await get_system_setting(db, "all_models_prompt"),
         title_generation_prompt=await get_system_setting(db, "title_generation_prompt"),
         rag_context_prompt=await get_system_setting(db, "rag_context_prompt"),
-        image_confirm_with_llm=image_confirm_setting.lower() == "true" if image_confirm_setting else True,
-        image_classification_prompt=await get_system_setting(db, "image_classification_prompt") or "",
-        image_classification_true_response=await get_system_setting(db, "image_classification_true_response") or "YES",
+        rag_prompt_global_kb=await get_system_setting(db, "rag_prompt_global_kb"),
+        rag_prompt_gpt_kb=await get_system_setting(db, "rag_prompt_gpt_kb"),
+        rag_prompt_user_docs=await get_system_setting(db, "rag_prompt_user_docs"),
+        rag_prompt_chat_history=await get_system_setting(db, "rag_prompt_chat_history"),
         input_token_price=await get_system_setting_float(db, "input_token_price"),
         output_token_price=await get_system_setting_float(db, "output_token_price"),
         token_refill_interval_hours=await get_system_setting_int(db, "token_refill_interval_hours"),
@@ -476,9 +359,10 @@ async def update_admin_settings(
     await set_setting(db, "all_models_prompt", data.all_models_prompt)
     await set_setting(db, "title_generation_prompt", data.title_generation_prompt)
     await set_setting(db, "rag_context_prompt", data.rag_context_prompt)
-    await set_setting(db, "image_confirm_with_llm", "true" if data.image_confirm_with_llm else "false")
-    await set_setting(db, "image_classification_prompt", data.image_classification_prompt)
-    await set_setting(db, "image_classification_true_response", data.image_classification_true_response)
+    await set_setting(db, "rag_prompt_global_kb", data.rag_prompt_global_kb)
+    await set_setting(db, "rag_prompt_gpt_kb", data.rag_prompt_gpt_kb)
+    await set_setting(db, "rag_prompt_user_docs", data.rag_prompt_user_docs)
+    await set_setting(db, "rag_prompt_chat_history", data.rag_prompt_chat_history)
     await set_setting(db, "input_token_price", str(data.input_token_price))
     await set_setting(db, "output_token_price", str(data.output_token_price))
     await set_setting(db, "token_refill_interval_hours", str(data.token_refill_interval_hours))
@@ -494,165 +378,6 @@ async def update_admin_settings(
     await db.commit()
     
     return data
-
-
-# =============================================================================
-# BRANDING SETTINGS
-# =============================================================================
-
-@router.get("/settings/branding", response_model=BrandingSettingsSchema)
-async def get_branding_settings(
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Get branding settings for admin panel.
-    
-    Shows effective values: DB settings take priority over config defaults.
-    """
-    # Get database settings (may be None if not set)
-    db_app_name = await get_system_setting(db, "app_name")
-    db_app_tagline = await get_system_setting(db, "app_tagline")
-    db_favicon_url = await get_system_setting(db, "favicon_url")
-    db_logo_url = await get_system_setting(db, "logo_url")
-    db_custom_css = await get_system_setting(db, "custom_css")
-    db_custom_themes = await get_system_setting(db, "custom_themes")
-    
-    # Merge: DB settings take priority, fall back to config
-    return BrandingSettingsSchema(
-        app_name=db_app_name if db_app_name else settings.APP_NAME,
-        app_tagline=db_app_tagline if db_app_tagline else settings.APP_TAGLINE,
-        favicon_url=db_favicon_url if db_favicon_url else settings.FAVICON_URL,
-        logo_url=db_logo_url if db_logo_url else settings.LOGO_URL,
-        custom_css=db_custom_css or "",
-        custom_themes=db_custom_themes or "[]",
-    )
-
-
-@router.post("/settings/branding", response_model=BrandingSettingsSchema)
-async def update_branding_settings(
-    data: BrandingSettingsSchema,
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Update branding settings"""
-    await set_setting(db, "app_name", data.app_name)
-    await set_setting(db, "app_tagline", data.app_tagline)
-    await set_setting(db, "favicon_url", data.favicon_url)
-    await set_setting(db, "logo_url", data.logo_url)
-    await set_setting(db, "custom_css", data.custom_css)
-    await set_setting(db, "custom_themes", data.custom_themes)
-    
-    await db.commit()
-    
-    return data
-
-
-@router.post("/settings/branding/favicon")
-async def upload_favicon(
-    file: UploadFile = File(...),
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Upload a favicon image (PNG, JPG, ICO, or SVG)"""
-    # Validate file type
-    allowed_types = ["image/png", "image/jpeg", "image/x-icon", "image/svg+xml", "image/vnd.microsoft.icon"]
-    if file.content_type not in allowed_types:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid file type. Allowed: PNG, JPG, ICO, SVG"
-        )
-    
-    # Validate file size (max 1MB)
-    contents = await file.read()
-    if len(contents) > 1024 * 1024:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File too large. Maximum size is 1MB"
-        )
-    
-    # Determine extension
-    ext_map = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/x-icon": ".ico",
-        "image/vnd.microsoft.icon": ".ico",
-        "image/svg+xml": ".svg",
-    }
-    ext = ext_map.get(file.content_type, ".png")
-    
-    # Save file with unique name
-    filename = f"favicon{ext}"
-    filepath = get_branding_assets_dir() / filename
-    
-    with open(filepath, "wb") as f:
-        f.write(contents)
-    
-    # Update favicon_url setting to point to the uploaded file
-    favicon_url = f"/api/admin/branding/favicon{ext}"
-    await set_setting(db, "favicon_url", favicon_url)
-    await db.commit()
-    
-    return {"url": favicon_url, "filename": filename}
-
-
-@router.post("/settings/branding/logo")
-async def upload_logo(
-    file: UploadFile = File(...),
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Upload a logo image (PNG, JPG, or SVG)"""
-    # Validate file type
-    allowed_types = ["image/png", "image/jpeg", "image/svg+xml"]
-    if file.content_type not in allowed_types:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid file type. Allowed: PNG, JPG, SVG"
-        )
-    
-    # Validate file size (max 2MB)
-    contents = await file.read()
-    if len(contents) > 2 * 1024 * 1024:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="File too large. Maximum size is 2MB"
-        )
-    
-    # Determine extension
-    ext_map = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/svg+xml": ".svg",
-    }
-    ext = ext_map.get(file.content_type, ".png")
-    
-    # Save file
-    filename = f"logo{ext}"
-    filepath = get_branding_assets_dir() / filename
-    
-    with open(filepath, "wb") as f:
-        f.write(contents)
-    
-    # Update logo_url setting
-    logo_url = f"/api/admin/branding/logo{ext}"
-    await set_setting(db, "logo_url", logo_url)
-    await db.commit()
-    
-    return {"url": logo_url, "filename": filename}
-
-
-@router.get("/branding/{filename}")
-async def serve_branding_asset(filename: str):
-    """Serve uploaded branding assets (favicon, logo)"""
-    # Sanitize filename to prevent directory traversal
-    safe_filename = Path(filename).name
-    filepath = get_branding_assets_dir() / safe_filename
-    
-    if not filepath.exists():
-        raise HTTPException(status_code=404, detail="Asset not found")
-    
-    return FileResponse(filepath)
 
 
 # =============================================================================
@@ -717,9 +442,6 @@ async def get_llm_settings(
         llm_temperature=await get_system_setting_float(db, "llm_temperature"),
         llm_stream_default=await get_system_setting_bool(db, "llm_stream_default"),
         llm_multimodal=await get_system_setting_bool(db, "llm_multimodal"),
-        # Thinking tokens
-        think_begin_token=await get_system_setting(db, "think_begin_token") or "",
-        think_end_token=await get_system_setting(db, "think_end_token") or "",
         # History compression
         history_compression_enabled=await get_system_setting_bool(db, "history_compression_enabled"),
         history_compression_threshold=await get_system_setting_int(db, "history_compression_threshold") or 20,
@@ -743,9 +465,6 @@ async def update_llm_settings(
     await set_setting(db, "llm_temperature", str(data.llm_temperature))
     await set_setting(db, "llm_stream_default", str(data.llm_stream_default).lower())
     await set_setting(db, "llm_multimodal", str(data.llm_multimodal).lower())
-    # Thinking tokens
-    await set_setting(db, "think_begin_token", data.think_begin_token)
-    await set_setting(db, "think_end_token", data.think_end_token)
     # History compression
     await set_setting(db, "history_compression_enabled", str(data.history_compression_enabled).lower())
     await set_setting(db, "history_compression_threshold", str(data.history_compression_threshold))
@@ -840,136 +559,6 @@ async def update_feature_flags(
     await db.commit()
     
     return data
-
-
-# =============================================================================
-# BILLING API SETTINGS
-# =============================================================================
-
-@router.get("/billing-api-settings", response_model=BillingApiSettingsSchema)
-async def get_billing_api_settings(
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Get payment provider API settings"""
-    return BillingApiSettingsSchema(
-        # Stripe
-        stripe_enabled=await get_system_setting_bool(db, "stripe_enabled"),
-        stripe_api_key=await get_system_setting(db, "stripe_api_key"),
-        stripe_webhook_secret=await get_system_setting(db, "stripe_webhook_secret"),
-        stripe_publishable_key=await get_system_setting(db, "stripe_publishable_key"),
-        stripe_pro_price_id=await get_system_setting(db, "stripe_pro_price_id"),
-        stripe_enterprise_price_id=await get_system_setting(db, "stripe_enterprise_price_id"),
-        # PayPal
-        paypal_enabled=await get_system_setting_bool(db, "paypal_enabled"),
-        paypal_client_id=await get_system_setting(db, "paypal_client_id"),
-        paypal_client_secret=await get_system_setting(db, "paypal_client_secret"),
-        paypal_webhook_id=await get_system_setting(db, "paypal_webhook_id"),
-        paypal_mode=await get_system_setting(db, "paypal_mode") or "sandbox",
-        paypal_pro_plan_id=await get_system_setting(db, "paypal_pro_plan_id"),
-        paypal_enterprise_plan_id=await get_system_setting(db, "paypal_enterprise_plan_id"),
-        # Google Pay
-        google_pay_enabled=await get_system_setting_bool(db, "google_pay_enabled"),
-        google_pay_merchant_id=await get_system_setting(db, "google_pay_merchant_id"),
-        google_pay_merchant_name=await get_system_setting(db, "google_pay_merchant_name") or "NueChat",
-    )
-
-
-@router.put("/billing-api-settings", response_model=BillingApiSettingsSchema)
-async def update_billing_api_settings(
-    data: BillingApiSettingsSchema,
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Update payment provider API settings"""
-    # Stripe
-    await set_setting(db, "stripe_enabled", str(data.stripe_enabled).lower())
-    await set_setting(db, "stripe_api_key", data.stripe_api_key)
-    await set_setting(db, "stripe_webhook_secret", data.stripe_webhook_secret)
-    await set_setting(db, "stripe_publishable_key", data.stripe_publishable_key)
-    await set_setting(db, "stripe_pro_price_id", data.stripe_pro_price_id)
-    await set_setting(db, "stripe_enterprise_price_id", data.stripe_enterprise_price_id)
-    # PayPal
-    await set_setting(db, "paypal_enabled", str(data.paypal_enabled).lower())
-    await set_setting(db, "paypal_client_id", data.paypal_client_id)
-    await set_setting(db, "paypal_client_secret", data.paypal_client_secret)
-    await set_setting(db, "paypal_webhook_id", data.paypal_webhook_id)
-    await set_setting(db, "paypal_mode", data.paypal_mode)
-    await set_setting(db, "paypal_pro_plan_id", data.paypal_pro_plan_id)
-    await set_setting(db, "paypal_enterprise_plan_id", data.paypal_enterprise_plan_id)
-    # Google Pay
-    await set_setting(db, "google_pay_enabled", str(data.google_pay_enabled).lower())
-    await set_setting(db, "google_pay_merchant_id", data.google_pay_merchant_id)
-    await set_setting(db, "google_pay_merchant_name", data.google_pay_merchant_name)
-    
-    await db.commit()
-    
-    return data
-
-
-@router.post("/billing-api-settings/test-stripe")
-async def test_stripe_connection(
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Test Stripe API connection"""
-    api_key = await get_system_setting(db, "stripe_api_key")
-    if not api_key:
-        return {"success": False, "message": "Stripe API key not configured"}
-    
-    try:
-        import stripe
-        stripe.api_key = api_key
-        # Try to fetch account info
-        account = stripe.Account.retrieve()
-        return {
-            "success": True,
-            "message": f"Connected to Stripe account: {account.get('email', account.get('id', 'Unknown'))}",
-            "account_id": account.get("id"),
-        }
-    except ImportError:
-        return {"success": False, "message": "Stripe library not installed"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
-
-
-@router.post("/billing-api-settings/test-paypal")
-async def test_paypal_connection(
-    user: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Test PayPal API connection"""
-    import httpx
-    
-    client_id = await get_system_setting(db, "paypal_client_id")
-    client_secret = await get_system_setting(db, "paypal_client_secret")
-    mode = await get_system_setting(db, "paypal_mode") or "sandbox"
-    
-    if not client_id or not client_secret:
-        return {"success": False, "message": "PayPal credentials not configured"}
-    
-    base_url = "https://api-m.sandbox.paypal.com" if mode == "sandbox" else "https://api-m.paypal.com"
-    
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            # Get access token
-            response = await client.post(
-                f"{base_url}/v1/oauth2/token",
-                auth=(client_id, client_secret),
-                data={"grant_type": "client_credentials"},
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    "success": True,
-                    "message": f"Connected to PayPal ({mode} mode)",
-                    "app_id": data.get("app_id"),
-                }
-            else:
-                return {"success": False, "message": f"PayPal returned status {response.status_code}"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
 
 
 # =============================================================================
@@ -1069,10 +658,6 @@ async def get_public_tiers(
     return TiersSchema(tiers=[TierConfig(**t) for t in tiers])
 
 
-# NOTE: Public branding is served via /api/branding/config endpoint in branding.py
-# That endpoint includes feature flags and is the single source of truth for frontend branding.
-
-
 # =============================================================================
 # USER MANAGEMENT
 # =============================================================================
@@ -1105,11 +690,6 @@ class UserUpdateRequest(BaseModel):
     is_admin: Optional[bool] = None
     is_active: Optional[bool] = None
     tokens_limit: Optional[int] = None
-
-
-class SetUserPasswordRequest(BaseModel):
-    """Request to set user password (admin only)"""
-    password: str
 
 
 class TokenResetResponse(BaseModel):
@@ -1147,9 +727,14 @@ async def list_users(
         )
     
     # Count total
-    count_result = await db.execute(
-        select(func.count(User.id)).select_from(query.subquery())
-    )
+    count_query = select(func.count()).select_from(User)
+    if search:
+        search_filter = f"%{search}%"
+        count_query = count_query.where(
+            (User.email.ilike(search_filter)) |
+            (User.username.ilike(search_filter))
+        )
+    count_result = await db.execute(count_query)
     total = count_result.scalar() or 0
     
     # Paginate
@@ -1254,43 +839,6 @@ async def update_user(
     }
 
 
-@router.post("/users/{user_id}/set-password")
-async def set_user_password(
-    user_id: str,
-    data: SetUserPasswordRequest,
-    admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Set a user's password (admin only). For non-OAuth users."""
-    from app.services.auth import AuthService
-    
-    result = await db.execute(select(User).where(User.id == user_id))
-    target_user = result.scalar_one_or_none()
-    
-    if not target_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    # Validate password length
-    if len(data.password) < 8:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 8 characters"
-        )
-    
-    # Hash and set the new password
-    target_user.hashed_password = AuthService.hash_password(data.password)
-    
-    await db.commit()
-    
-    return {
-        "message": f"Password updated for user {target_user.email}",
-        "user_id": target_user.id,
-    }
-
-
 @router.post("/users/{user_id}/reset-tokens", response_model=TokenResetResponse)
 async def reset_user_tokens(
     user_id: str,
@@ -1390,9 +938,10 @@ async def list_user_chats(
         query = query.where(Chat.title.ilike(f"%{search}%"))
     
     # Count total
-    count_result = await db.execute(
-        select(func.count(Chat.id)).select_from(query.subquery())
-    )
+    count_query = select(func.count()).select_from(Chat).where(Chat.owner_id == user_id)
+    if search:
+        count_query = count_query.where(Chat.title.ilike(f"%{search}%"))
+    count_result = await db.execute(count_query)
     total = count_result.scalar() or 0
     
     # Paginate
@@ -2015,92 +1564,6 @@ async def update_debug_settings(
         await set_setting(db, "debug_rag", "true" if data.debug_rag else "false")
     if data.debug_filter_chains is not None:
         await set_setting(db, "debug_filter_chains", "true" if data.debug_filter_chains else "false")
-    
-    await db.commit()
-    
-    return {"status": "ok"}
-
-
-# ============================================================
-# SECURITY SETTINGS
-# ============================================================
-
-class SecuritySettingsResponse(BaseModel):
-    """Response for security settings"""
-    secret_key: str  # Masked or actual
-    logging_level: str
-
-
-class SecuritySettingsUpdate(BaseModel):
-    """Update security settings"""
-    secret_key: Optional[str] = None
-    logging_level: Optional[str] = None
-
-
-@router.get("/security-settings", response_model=SecuritySettingsResponse)
-async def get_security_settings(
-    admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Get security settings for the Site Dev tab."""
-    import logging
-    
-    # Get stored SECRET_KEY (or show current from settings)
-    stored_key = await get_system_setting(db, "secret_key")
-    if stored_key:
-        # Show first 8 and last 4 chars, mask the rest
-        if len(stored_key) > 16:
-            masked = stored_key[:8] + "..." + stored_key[-4:]
-        else:
-            masked = stored_key
-    else:
-        # Using env/default - show indicator
-        masked = "(using environment variable or default)"
-    
-    # Get logging level
-    logging_level = await get_system_setting(db, "logging_level") or "INFO"
-    
-    return SecuritySettingsResponse(
-        secret_key=masked,
-        logging_level=logging_level,
-    )
-
-
-@router.put("/security-settings")
-async def update_security_settings(
-    data: SecuritySettingsUpdate,
-    admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Update security settings. SECRET_KEY changes require restart."""
-    import logging
-    
-    if data.secret_key is not None:
-        if len(data.secret_key) < 32:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="SECRET_KEY must be at least 32 characters"
-            )
-        await set_setting(db, "secret_key", data.secret_key)
-        logger.info("SECRET_KEY updated via admin panel - restart required for changes to take effect")
-    
-    if data.logging_level is not None:
-        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
-        if data.logging_level not in valid_levels:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid logging level. Must be one of: {', '.join(valid_levels)}"
-            )
-        await set_setting(db, "logging_level", data.logging_level)
-        
-        # Apply logging level immediately
-        log_level = getattr(logging, data.logging_level)
-        logging.getLogger().setLevel(log_level)
-        # Also update specific loggers
-        for name in ['app', 'uvicorn', 'uvicorn.access', 'uvicorn.error']:
-            logging.getLogger(name).setLevel(log_level)
-        
-        logger.info(f"Logging level changed to {data.logging_level}")
     
     await db.commit()
     

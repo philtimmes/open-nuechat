@@ -140,8 +140,6 @@ class MessageResponse(BaseModel):
     tool_calls: Optional[List[Dict]]
     input_tokens: int
     output_tokens: int
-    time_to_first_token: Optional[int] = None  # milliseconds
-    time_to_complete: Optional[int] = None  # milliseconds
     model: Optional[str]
     is_streaming: bool
     is_error: bool
@@ -168,8 +166,6 @@ class MessageResponse(BaseModel):
                 'tool_calls': obj.tool_calls,
                 'input_tokens': obj.input_tokens,
                 'output_tokens': obj.output_tokens,
-                'time_to_first_token': obj.time_to_first_token,
-                'time_to_complete': obj.time_to_complete,
                 'model': obj.model,
                 'is_streaming': obj.is_streaming,
                 'is_error': obj.is_error,

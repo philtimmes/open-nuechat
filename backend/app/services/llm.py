@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 import json
 import asyncio
 import time
-import re
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -39,34 +38,6 @@ from app.filters import (
 llm_logger = get_logger("llm_service")
 
 
-# Patterns for inline tool tags that should be stripped from saved content
-# These are processed by the frontend and shouldn't be saved in messages
-TOOL_TAG_PATTERNS = [
-    # Self-closing tool tags
-    re.compile(r'<find\s+[^>]*/?>', re.IGNORECASE),
-    re.compile(r'<find_line\s+[^>]*/?>', re.IGNORECASE),
-    re.compile(r'<request_file\s+[^>]*/?>', re.IGNORECASE),
-    re.compile(r'<kb_search\s+[^>]*/?>', re.IGNORECASE),
-    # Multi-line tool tags with closing tags
-    re.compile(r'<search_replace\s+[^>]*>[\s\S]*?</search_replace>', re.IGNORECASE),
-    re.compile(r'<replace_block\s+[^>]*>[\s\S]*?</replace_block>', re.IGNORECASE),
-    re.compile(r'<tool_call[^>]*>[\s\S]*?</tool_call>', re.IGNORECASE),
-]
-
-
-def strip_tool_tags(content: str) -> str:
-    """
-    Remove inline tool tags from LLM response content.
-    These tags are processed by the frontend and shouldn't be saved in messages.
-    """
-    result = content
-    for pattern in TOOL_TAG_PATTERNS:
-        result = pattern.sub('', result)
-    # Clean up any resulting double newlines
-    result = re.sub(r'\n{3,}', '\n\n', result)
-    return result.strip()
-
-
 class LLMService:
     """Handle LLM interactions with OpenAI-compatible APIs and bidirectional filtering"""
     
@@ -79,14 +50,12 @@ class LLMService:
         timeout: Optional[int] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
-        context_size: Optional[int] = None,
     ):
         self.base_url = base_url or settings.LLM_API_BASE_URL
         self.api_key = api_key or settings.LLM_API_KEY
         self.timeout = timeout or settings.LLM_TIMEOUT
         self.max_tokens = max_tokens or settings.LLM_MAX_TOKENS
         self.temperature = temperature or settings.LLM_TEMPERATURE
-        self.context_size = context_size or 128000  # Default 128k
         
         # Use httpx.Timeout for granular control:
         # - connect: initial connection timeout
@@ -131,14 +100,13 @@ class LLMService:
             provider = result.scalar_one_or_none()
             
             if provider:
-                logger.info(f"[LLM] Using provider: {provider.name} ({provider.model_id}), context_size={provider.context_size}")
+                logger.info(f"[LLM] Using provider: {provider.name} ({provider.model_id})")
                 return cls(
                     base_url=provider.base_url,
                     api_key=provider.api_key,
                     timeout=provider.timeout,
                     max_tokens=provider.max_tokens,
                     temperature=float(provider.temperature) if provider.temperature else 0.7,
-                    context_size=provider.context_size,
                 )
         except Exception as e:
             logger.debug(f"[LLM] Provider lookup failed, using legacy settings: {e}")
@@ -269,22 +237,11 @@ class LLMService:
         """
         effective_model = await self._get_effective_model(model)
         
-        # Dynamic max_tokens cap to prevent context overflow
-        from app.services.agent_memory import estimate_message_tokens
-        estimated_input = estimate_message_tokens(messages)
-        model_context_size = self.context_size  # Use provider's context_size
-        requested_max = max_tokens or self.max_tokens
-        available = model_context_size - estimated_input - 1000
-        effective_max_tokens = max(1000, min(requested_max, available))
-        
-        if effective_max_tokens < requested_max:
-            logger.info(f"[LLM_REQUEST] stream_complete capped max_tokens: {requested_max} -> {effective_max_tokens}")
-        
         kwargs = {
             "model": effective_model,
             "messages": messages,
             "temperature": temperature if temperature is not None else self.temperature,
-            "max_tokens": effective_max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "stream": True,
         }
         
@@ -439,24 +396,11 @@ class LLMService:
         # Build messages from chat history (using tree structure)
         messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id)
         
-        # Dynamic max_tokens calculation to prevent context overflow
-        from app.services.agent_memory import estimate_message_tokens
-        estimated_input_tokens = estimate_message_tokens(messages)
-        
-        # Use context_size from LLMService (set from provider or default)
-        model_context_size = self.context_size
-        
-        available_for_output = model_context_size - estimated_input_tokens - 1000
-        effective_max_tokens = max(1000, min(self.max_tokens, available_for_output))
-        
-        if effective_max_tokens < self.max_tokens:
-            logger.info(f"[LLM_REQUEST] Capped max_tokens: {self.max_tokens} -> {effective_max_tokens}")
-        
         # Prepare API call parameters
         api_params = {
             "model": effective_model,
             "messages": messages,
-            "max_tokens": effective_max_tokens,
+            "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
         
@@ -546,11 +490,9 @@ class LLMService:
         tools: Optional[List[Dict]] = None,
         tool_executor: Optional[Callable] = None,
         parent_id: Optional[str] = None,  # For conversation branching - parent of the assistant message
-        message_id: Optional[str] = None,  # Pre-generated message ID (REQUIRED for proper parent tracking)
         cancel_check: Optional[Callable[[], bool]] = None,  # Returns True if generation should be cancelled
         stream_setter: Optional[Callable[[Any], None]] = None,  # Callback to set active stream for cancellation
         is_file_content: bool = False,  # True when content is user-uploaded file (skip injection filters)
-        is_continuation: bool = False,  # True when appending to existing message (tool continuations)
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a message response with prompt-based tool orchestration.
@@ -564,22 +506,12 @@ class LLMService:
         Args:
             parent_id: For new messages, this is the user_message.id.
                        For regeneration, this is the original user message ID.
-            message_id: PRE-GENERATED message ID for the assistant response.
-                       This MUST be generated BEFORE calling stream_message to ensure
-                       proper parent_id tracking in tool continuations.
             cancel_check: Optional callback that returns True if generation should stop.
             stream_setter: Optional callback to pass the stream object for external cancellation.
-            is_continuation: If True, append to existing message instead of creating new.
         """
         import logging
         from app.models.models import CustomAssistant
         logger = logging.getLogger(__name__)
-        
-        # Generate message_id if not provided (legacy support, but logs warning)
-        if not message_id:
-            import uuid
-            message_id = str(uuid.uuid4())
-            logger.warning(f"[LLM_STREAM] message_id not pre-generated! Generated {message_id[:8]}. This may cause parent_id issues.")
         
         # Track timing for structured logging
         stream_start_time = time.time()
@@ -653,43 +585,26 @@ class LLMService:
         # Build messages from chat history (using tree structure)
         messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id)
         
-        # For continuations, load existing message and get its current content
-        existing_content = ""
-        if is_continuation:
-            existing_msg_result = await db.execute(
-                select(Message).where(Message.id == message_id)
-            )
-            existing_msg = existing_msg_result.scalar_one_or_none()
-            if existing_msg:
-                existing_content = existing_msg.content or ""
-                logger.info(f"[LLM_STREAM] Continuing message: id={message_id}, existing_len={len(existing_content)}")
-                assistant_message = existing_msg
-            else:
-                logger.warning(f"[LLM_STREAM] Continuation message {message_id} not found, creating new")
-                is_continuation = False
+        # Create placeholder assistant message
+        assistant_message = Message(
+            chat_id=chat.id,
+            role=MessageRole.ASSISTANT,
+            content="",
+            content_type=ContentType.TEXT,
+            is_streaming=True,
+            model=effective_model,
+            parent_id=parent_id,  # Link to user message for conversation branching
+        )
+        db.add(assistant_message)
+        # Flush to populate ID, then commit to persist
+        # Note: refresh() removed due to SQLAlchemy async/greenlet issues in rapid tool loops
+        await db.flush()
+        await db.commit()
         
-        if not is_continuation:
-            # Create placeholder assistant message with PRE-GENERATED ID
-            logger.info(f"[LLM_STREAM] Creating assistant message: id={message_id}, parent_id={parent_id}")
-            assistant_message = Message(
-                id=message_id,  # USE PRE-GENERATED ID
-                chat_id=chat.id,
-                role=MessageRole.ASSISTANT,
-                content="",
-                content_type=ContentType.TEXT,
-                is_streaming=True,
-                model=effective_model,
-                parent_id=parent_id,  # Link to user message for conversation branching
-            )
-            db.add(assistant_message)
-            # Flush to populate ID, then commit to persist
-            # Note: refresh() removed due to SQLAlchemy async/greenlet issues in rapid tool loops
-            await db.flush()
-            await db.commit()
-            logger.info(f"[LLM_STREAM] Assistant message committed: id={assistant_message.id}, parent_id={assistant_message.parent_id}")
-        
-        # NOTE: message_start is sent by websocket.py BEFORE calling stream_message
-        # with the pre-generated message_id. No need to yield it here.
+        yield {
+            "type": "message_start",
+            "message_id": str(assistant_message.id),
+        }
         
         # Create stream context for filters
         stream_context = FilterContext(
@@ -788,35 +703,10 @@ class LLMService:
                 })
             
             # Stream the final response
-            
-            # Dynamic max_tokens calculation to prevent context overflow
-            # Estimate input tokens and cap max_tokens to fit within context window
-            from app.services.agent_memory import estimate_message_tokens
-            estimated_input_tokens = estimate_message_tokens(messages)
-            
-            # Use context_size from LLMService (set from provider or default)
-            model_context_size = self.context_size
-            
-            # Check if input exceeds context window
-            if estimated_input_tokens > model_context_size:
-                logger.error(f"[LLM_REQUEST] Input ({estimated_input_tokens} tokens) exceeds context window ({model_context_size} tokens)")
-                # Yield error message to user
-                error_msg = f"Error: Message too long. Input is ~{estimated_input_tokens:,} tokens but context window is {model_context_size:,} tokens. Please shorten your message or clear chat history."
-                yield {"type": "text", "content": error_msg}
-                yield {"type": "done", "content": error_msg}
-                return
-            
-            # Calculate available tokens for output (leave 1k buffer for safety)
-            available_for_output = model_context_size - estimated_input_tokens - 1000
-            effective_max_tokens = max(1000, min(self.max_tokens, available_for_output))
-            
-            if effective_max_tokens < self.max_tokens:
-                logger.info(f"[LLM_REQUEST] Capped max_tokens: {self.max_tokens} -> {effective_max_tokens} (input={estimated_input_tokens}, context={model_context_size})")
-            
             api_params = {
                 "model": effective_model,
                 "messages": messages,
-                "max_tokens": effective_max_tokens,
+                "max_tokens": self.max_tokens,
                 "temperature": self.temperature,
                 "stream": True,
             }
@@ -850,18 +740,16 @@ class LLMService:
                 content = msg.get("content", "")
                 if isinstance(content, str):
                     content_len = len(content)
-                    # Only log content details in DEBUG mode to avoid leaking user data
-                    if settings.DEBUG:
-                        if msg.get("role") == "user" and content_len > 500:
-                            logger.debug(f"[LLM_REQUEST] msg[{i}] role=user len={content_len} head={content[:150]!r} tail={content[-150:]!r}")
-                        else:
-                            preview = content[:100] + "..." if len(content) > 100 else content
-                            logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} preview={preview}")
+                    # For user messages, log more detail
+                    if msg.get("role") == "user" and content_len > 500:
+                        logger.info(f"[LLM_REQUEST] msg[{i}] role=user len={content_len} head={content[:150]!r} tail={content[-150:]!r}")
                     else:
-                        logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len}")
+                        preview = content[:100] + "..." if len(content) > 100 else content
+                        logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} preview={preview}")
                 else:
                     content_len = sum(len(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text")
-                    logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} (multimodal)")
+                    text_parts = [p.get("text", "")[:50] for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                    logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} multimodal_parts={text_parts}")
             
             stream = await self.client.chat.completions.create(**api_params)
             
@@ -876,11 +764,6 @@ class LLMService:
             cancelled = False
             chunk_count = 0
             first_content = ""
-            
-            # Timing tracking
-            stream_start_time = time.time()
-            first_token_time = None
-            
             try:
                 async for chunk in stream:
                     chunk_count += 1
@@ -902,17 +785,13 @@ class LLMService:
                     delta = chunk.choices[0].delta
                     
                     if delta.content:
-                        # Record first token time
-                        if first_token_time is None:
-                            first_token_time = time.time()
-                        
                         filtered_content += delta.content
                         
-                        # Only log response content in DEBUG mode
-                        if settings.DEBUG and len(first_content) < 500:
+                        # Log first 500 chars of response
+                        if len(first_content) < 500:
                             first_content += delta.content
                             if len(first_content) >= 500:
-                                logger.debug(f"[LLM_RESPONSE] First 500 chars: {first_content[:500]!r}")
+                                logger.info(f"[LLM_RESPONSE] First 500 chars: {first_content[:500]!r}")
                         
                         yield {
                             "type": "text_delta",
@@ -955,9 +834,6 @@ class LLMService:
                             is_streaming=False,
                         )
                     )
-                    # CRITICAL: Commit to persist the partial content
-                    await db.commit()
-                    logger.info(f"[LLM_CANCELLED] Saved and committed partial content ({len(filtered_content)} chars) for message {message_id[:8]}")
                 except Exception as update_err:
                     logger.warning(f"Failed to save cancelled message (may have been deleted): {update_err}")
                 yield {
@@ -974,10 +850,7 @@ class LLMService:
                 total_output_tokens = self._estimate_tokens(filtered_content)
             
             # Log stream completion summary
-            stream_end_time = time.time()
-            time_to_first_token_ms = int((first_token_time - stream_start_time) * 1000) if first_token_time else None
-            time_to_complete_ms = int((stream_end_time - stream_start_time) * 1000)
-            logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}, ttft={time_to_first_token_ms}ms, total={time_to_complete_ms}ms")
+            logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}")
             
             # Use direct SQL update instead of ORM to avoid stale object issues
             # This is more robust during long streaming sessions
@@ -985,26 +858,15 @@ class LLMService:
             message_id = str(assistant_message.id)
             chat_id = str(chat.id)
             
-            # Strip inline tool tags from content before saving
-            # These are processed by the frontend and shouldn't be in saved messages
-            clean_content = strip_tool_tags(filtered_content)
-            
-            # For continuations, prepend existing content
-            if existing_content:
-                clean_content = existing_content + "\n\n" + clean_content
-                logger.info(f"[LLM_STREAM] Appended to existing content, total len={len(clean_content)}")
-            
             try:
                 # Update message with final content using direct SQL
                 await db.execute(
                     update(Message)
                     .where(Message.id == message_id)
                     .values(
-                        content=clean_content,
+                        content=filtered_content,
                         input_tokens=total_input_tokens,
                         output_tokens=total_output_tokens,
-                        time_to_first_token=time_to_first_token_ms,
-                        time_to_complete=time_to_complete_ms,
                         is_streaming=False,
                     )
                 )
@@ -1053,8 +915,6 @@ class LLMService:
                 "type": "message_end",
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,
-                "time_to_first_token": time_to_first_token_ms,
-                "time_to_complete": time_to_complete_ms,
                 "parent_id": parent_id,  # For conversation tree tracking
             }
             
@@ -1262,23 +1122,7 @@ When you receive search results or external data in the conversation, follow the
 3. Extract the key points and present them clearly
 4. If multiple sources are provided, synthesize them into a coherent answer
 5. Present information as your own knowledge - do not mention "search results" or "according to the data"
-6. Be concise but comprehensive
-
-CRITICAL - When working with artifacts (files you create/edit):
-1. Use create_artifact to create new files - they are tracked and can be edited later
-2. ALWAYS read the tool response carefully - if search_replace fails, it returns the ACTUAL CURRENT content
-3. NEVER retry the exact same search_replace - if it failed, the search text doesn't match the current file
-4. When search_replace fails:
-   - Check 'actual_content' in the response to see what the file currently contains
-   - Check 'similar_matches' to find text similar to what you searched for
-   - The file may have been modified by your earlier edits - search for the CURRENT content, not the original
-5. Use read_artifact if you're unsure what a file contains before editing
-6. After a successful edit, the file content has CHANGED - subsequent edits must use the NEW content as the search target
-
-SEARCHING LARGE PROJECTS:
-When working with large codebases or long conversations, some content may be stored in {AgentNNNN}.md files.
-If you see a message like "[TRUNCATED - Full manifest saved to {AgentNNNN}.md]", use the search_archived_context tool to search for specific files, functions, or code patterns.
-Example: search_archived_context(query="network socket connection") to find networking code."""
+6. Be concise but comprehensive"""
             
             system_prompt = system_prompt + tools_instruction
         
@@ -1377,11 +1221,10 @@ Example: search_archived_context(query="network socket connection") to find netw
             try:
                 from app.services.agent_memory import compress_chat_history, estimate_message_tokens
                 
-                # Use provider's context_size
-                model_context = self.context_size
+                # Get model context size - use dedicated setting or default to 128k
+                # Most modern models (Claude, GPT-4, etc.) have 128k+ context
+                model_context = int(await SettingsService.get(db, "model_context_size") or "128000")
                 keep_recent = int(await SettingsService.get(db, "history_compression_keep_recent") or "10")
-                # Get compression threshold from admin settings
-                threshold_tokens = int(await SettingsService.get(db, "history_compression_target_tokens") or "8000")
                 
                 compressed, was_compressed = await compress_chat_history(
                     db=db,
@@ -1392,7 +1235,6 @@ Example: search_archived_context(query="network socket connection") to find netw
                     api_key=self.api_key,
                     model_context_size=model_context,
                     keep_recent=keep_recent,
-                    threshold_tokens=threshold_tokens,
                 )
                 
                 if was_compressed:
@@ -1474,14 +1316,10 @@ Example: search_archived_context(query="network socket connection") to find netw
             logger.debug(f"[BUILD_CONTENT] Processing attachment type={att_type}, filename={attachment.get('filename')}")
             
             if att_type == "image":
-                # Include full base64 image data for the LLM
-                base64_data = attachment.get('data', '')
-                mime_type = attachment.get('mime_type', 'image/jpeg')
-                logger.info(f"[BUILD_CONTENT] Adding image: {attachment.get('filename')}, mime={mime_type}, base64_len={len(base64_data)}")
                 images.append({
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:{mime_type};base64,{base64_data}",
+                        "url": f"data:{attachment.get('mime_type', 'image/jpeg')};base64,{attachment.get('data', '')[:50]}...",
                     }
                 })
             elif att_type == "file":

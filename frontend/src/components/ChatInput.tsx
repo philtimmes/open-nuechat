@@ -10,18 +10,11 @@ interface ProcessedAttachment {
   content?: string;  // text content for files
 }
 
-interface LogError {
-  filename: string;
-  errorSummary: string;
-  errorCount: number;
-}
-
 interface ChatInputProps {
   onSend: (content: string, attachments?: ProcessedAttachment[]) => void;
   onStop?: () => void;
   onZipUpload?: (file: File) => Promise<void>;
   onFilesUploaded?: (artifacts: Artifact[]) => void;
-  onLogErrors?: (errors: LogError[]) => void;
   onVoiceModeToggle?: () => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -37,7 +30,6 @@ export default function ChatInput({
   onStop, 
   onZipUpload, 
   onFilesUploaded,
-  onLogErrors,
   onVoiceModeToggle,
   disabled, 
   isStreaming, 
@@ -133,25 +125,19 @@ export default function ChatInput({
       
       // Process text files into artifacts
       if (textFiles.length > 0) {
-        console.log(`[ChatInput v3] Processing ${textFiles.length} text files:`, textFiles.map(f => `${f.name} (${f.type})`));
-        const { artifacts, logErrors } = await processFilesToArtifacts(textFiles);
-        console.log(`[ChatInput v3] Created ${artifacts.length} artifacts, ${logErrors.length} log files with errors`);
+        console.log(`[ChatInput v2] Processing ${textFiles.length} text files:`, textFiles.map(f => `${f.name} (${f.type})`));
+        const artifacts = await processFilesToArtifacts(textFiles);
+        console.log(`[ChatInput v2] Created ${artifacts.length} artifacts`);
         
         // Notify parent of new artifacts
         if (onFilesUploaded && artifacts.length > 0) {
-          console.log(`[ChatInput v3] Notifying parent of ${artifacts.length} artifacts`);
+          console.log(`[ChatInput v2] Notifying parent of ${artifacts.length} artifacts`);
           onFilesUploaded(artifacts);
-        }
-        
-        // Notify parent of log errors for summary panel
-        if (onLogErrors && logErrors.length > 0) {
-          console.log(`[ChatInput v3] Notifying parent of ${logErrors.length} log files with errors`);
-          onLogErrors(logErrors);
         }
         
         // Add file content as attachments for LLM context
         for (const artifact of artifacts) {
-          console.log(`[ChatInput v3] Adding artifact to processed attachments: ${artifact.filename}, ${artifact.content.length} chars`);
+          console.log(`[ChatInput v2] Adding artifact to processed attachments: ${artifact.filename}, ${artifact.content.length} chars`);
           newProcessed.push({
             type: 'file',
             filename: artifact.filename || artifact.title,

@@ -36,7 +36,7 @@ backend/app/
 │   ├── user.py          # User, OAuthAccount, APIKey
 │   ├── chat.py          # Chat, Message, ChatParticipant
 │   ├── document.py      # Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare
-│   ├── assistant.py     # CustomAssistant, AssistantConversation
+│   ├── assistant.py     # CustomAssistant, AssistantConversation, AssistantCategory
 │   ├── billing.py       # TokenUsage
 │   ├── tool.py          # Tool, ToolUsage
 │   ├── filter.py        # ChatFilter
@@ -64,10 +64,13 @@ backend/app/
 ```
 frontend/src/
 ├── components/          # React components
-│   ├── MessageBubble.tsx  # Message display with:
-│   │   ├── MermaidDiagram   # Mermaid rendering with Preview/Code toggle
-│   │   ├── LaTeXBlock       # LaTeX rendering with Preview/Code toggle
-│   │   └── PythonRunner     # Browser Python with Args/Packages/Output tabs
+│   ├── admin/           # Admin panel components (NC-0.7.15)
+│   │   ├── index.ts     # Re-exports components & types
+│   │   ├── types.ts     # All admin type definitions
+│   │   ├── SystemTab.tsx    # System settings tab
+│   │   ├── OAuthTab.tsx     # OAuth settings tab
+│   │   ├── FeaturesTab.tsx  # Feature flags tab
+│   │   └── CategoriesTab.tsx # GPT categories tab
 ├── hooks/
 │   ├── useMobile.ts
 │   ├── useVoice.ts
@@ -99,14 +102,12 @@ frontend/src/
 ### app/main.py
 
 ```python
-SCHEMA_VERSION = "NC-0.7.02"  # Current database schema version
+SCHEMA_VERSION = "NC-0.7.15"  # Current database schema version
 
 def parse_version(v: str) -> tuple  # Parse "NC-X.Y.Z" to (X, Y, Z)
 async def run_migrations(conn)  # Run versioned DB migrations
-async def ensure_persistent_secret_key(conn)  # Load/generate SECRET_KEY
 async def lifespan(app: FastAPI)
   # Startup: imports all models, create_all, run_migrations, load filters, warmup STT
-  # Loads: SECRET_KEY (env > admin-set > auto-generated), logging_level
   # Starts: token_reset_checker (hourly), document_queue.worker
   # Shutdown: stops workers
 async def health_check() -> { status, service, version, schema_version }
@@ -116,43 +117,7 @@ async def get_shared_chat(share_id: str) -> { id, title, model, created_at, mess
 async def serve_spa(request: Request, full_path: str)  # SPA catch-all
 ```
 
-### app/api/routes/branding.py
-
-**Single source of truth for frontend branding configuration.**
-
-```python
-# Public endpoints (no auth required)
-GET /api/branding/config
-  # Returns merged branding: DB settings > .env > defaults
-  # Includes: app_name, app_tagline, favicon_url, logo_url, features, welcome
-  -> BrandingConfig
-
-GET /api/branding/manifest.json
-  # PWA manifest with merged branding
-  -> { name, short_name, icons, theme_color, ... }
-
-GET /api/branding/themes
-  # List available themes
-  -> [{ id, name, colors... }]
-```
-
-### app/api/routes/admin.py (Branding Section)
-
-```python
-# Admin branding management (require admin auth)
-GET  /api/admin/settings/branding -> BrandingSettingsSchema
-POST /api/admin/settings/branding -> BrandingSettingsSchema
-POST /api/admin/settings/branding/favicon -> { favicon_url }
-POST /api/admin/settings/branding/logo -> { logo_url }
-GET  /api/admin/branding/{filename}  # Serve uploaded assets
-
-# Security settings
-GET  /api/admin/security-settings -> { secret_key (masked), logging_level }
-PUT  /api/admin/security-settings -> { status: "ok" }
-  # Body: { secret_key?, logging_level? }
-```
-
-### app/api/helpers.py
+### app/api/helpers.py (NEW)
 
 ```python
 class ResourceNotFoundError(HTTPException)
@@ -236,7 +201,7 @@ def create_stream_error(message_id, error) -> dict
 def create_error(message, code?) -> dict
 ```
 
-### app/services/websocket.py (UPDATED NC-0.6.49)
+### app/services/websocket.py (UPDATED NC-0.7.08)
 
 ```python
 class StreamingHandler:
@@ -246,6 +211,8 @@ class StreamingHandler:
     
     def set_streaming_task(self, task: asyncio.Task)
         # Set the current streaming task for cancellation
+        # NC-0.7.08: Now cancels any existing task before setting new one
+        #            to prevent concurrent streams from mixing content
     
     def set_active_stream(self, stream: Any)
         # Set the active LLM stream for direct cancellation
@@ -260,6 +227,9 @@ class StreamingHandler:
     
     def is_stop_requested(self) -> bool
         # Check if stop has been requested
+    
+    def is_streaming(self) -> bool  # NC-0.7.08
+        # Check if currently streaming (task running or _is_streaming flag)
     
     def reset_stop(self)
         # Reset the stop flag for new stream
@@ -1084,43 +1054,7 @@ async def reset_rag_model(user: User = Depends(get_current_user)) -> dict:
 
 ---
 
-## RAG Service (app/services/rag.py) (UPDATED NC-0.6.51)
-
-### Chat Knowledge Context with Assistant Filtering (NEW NC-0.6.51)
-
-```python
-async def get_chat_knowledge_context(
-    self,
-    db: AsyncSession,
-    user: User,
-    query: str,
-    chat_knowledge_store_id: str,
-    current_assistant_id: Optional[str] = None,
-    top_k: int = 5,
-) -> str:
-    """
-    Get context from user's chat history knowledge store with assistant filtering.
-    
-    Filters results to match current assistant context:
-    - If current_assistant_id is None: only return results from chats without an assistant
-    - If current_assistant_id is set: only return results from chats with that specific assistant
-    
-    This prevents knowledge leakage between different assistant contexts.
-    """
-```
-
-### Chunk Metadata for Chat History (UPDATED NC-0.6.51)
-
-```python
-# When indexing chats, chunk_metadata now includes:
-{
-    "chat_id": str,           # ID of the source chat
-    "chat_title": str,        # Title of the source chat
-    "source": "chat_history", # Constant identifier
-    "assistant_id": str|None, # ID of assistant used (None if no assistant)
-    "assistant_name": str|None # Name of assistant used
-}
-```
+## RAG Service (app/services/rag.py) (UPDATED NC-0.6.50)
 
 ### Model Loading Fix
 
@@ -1268,54 +1202,14 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.7.01**
+**NC-0.7.15**
 
 Changes:
-- NC-0.7.01: **Sidebar Accordion Fix + OAuth Fix + Chat Knowledge Default + Mermaid + LaTeX + Python Runner** - Fixed accordion loading, fixed OAuth feature flags, auto-create chat knowledge store for new users, inline Mermaid/LaTeX rendering with Preview/Code toggle, browser-based Python execution via Pyodide
-- NC-0.7.00: **Agent Flows + Claude Import + PDF Fix** - Visual agent workflow builder with persistence (AgentFlow model, /api/agent-flows CRUD), Claude.ai chat import support (thinking blocks, tool use, citations), PDF export fix (save_bytes API), artifact detection for `<artifact= filename>` with spaces
-- NC-0.6.99: **Lazy loading date groups + timezone fix** - Added date_group parameter to /chats endpoint, DELETE /chats/group/{group} for bulk delete, UTC timezone handling in frontend date grouping, enhanced search_replace error messages with line counts and diagnostics
-- NC-0.6.98: **Tool continuation single-leaf fix** - continue_message_id for proper branching, case-insensitive tool detection, null timestamp handling
-- NC-0.6.97: **Chat timestamp fix + Tool tag stripping** - Fixed all chats showing as "Today" via raw SQL for is_knowledge_indexed. Added strip_tool_tags() to backend to remove <find>, <search_replace>, etc. from saved messages. Frontend StreamingBuffer now handles multi-line tool tags properly.
-- NC-0.6.96: **Context overflow + Tool detection overhaul**
-  - Large zip manifests/code summaries saved to {Agent0001}.md files
-  - Fixed context_size reading from LLMProvider.context_size
-  - Backend: Added XML `<tool_call>` detection, error feedback for invalid format
-  - Backend: Added search_archived_context and find tools
-  - Backend: MessageDeduplicator prevents duplicate WebSocket messages
-  - Frontend: Complete rewrite of StreamingBuffer - tool tags detected BEFORE flush, never shown to user
-  - Frontend: Support both attribute orders for find tags
-- NC-0.6.95: **Image detection fix + admin settings** - removed redundant negative regex patterns (caused false negatives when "the image" appeared in prompt), moved IMAGE_CONFIRM_WITH_LLM to admin panel, added image_classification_prompt and image_classification_true_response settings
-- NC-0.6.94: **Global KB retry fix** - regenerate/retry now triggers RAG search (was skipped due to is_tool_result flag), added explicit is_tool_continuation flag for tool results
-- NC-0.6.90: **Inline tool calls** - `<$ToolName>` syntax in streaming, `call_tool` primitive for filter chains
-- NC-0.6.89: **Fix new chat + model validation + API key URL param** - restored missing @router.post, lenient model validation, validation endpoint, Today expanded, v1 APIs accept ?api_key= query param
-- NC-0.6.88: **Auto-load all chats** - increased page_size (500 frontend, 1000 backend max), auto-loads remaining chats after initial fetch, shows loading indicator
-- NC-0.6.87: **All sections expanded** - accordion uses Set<string> for multiple expanded sections, all expand by default, fixed nested button HTML, double-confirm for section delete
-- NC-0.6.86: **Calendar day grouping** - sidebar groups use calendar days (midnight-to-midnight) not hour-based diff, preventing overlap
-- NC-0.6.75: **Context overflow protection** - chunk large tool results (>32k chars) into hidden `{AgentNNNN}.md` files, searchable by LLM
-- NC-0.6.74: **Auto-close incomplete tool tags** - salvage search_replace/replace_block even without closing tag
-- NC-0.6.73: **KaTeX math rendering** - LaTeX notation support ($...$, $$...$$) via remark-math + rehype-katex
-- NC-0.6.72: **Tool call closures** - added streaming detection for replace_block, improved inline closing tag handling
-- NC-0.6.71: **Sidebar right margin** - added 30px padding so delete icon is reachable past scrollbar
-- NC-0.6.70: **Fix filter chain infinite loop** - removed duplicate `_execute_steps()` call in executor.py
-- NC-0.6.69: **Enhanced artifact guidance** - improved system prompt with CRITICAL section for artifact editing rules
-- NC-0.6.68: **Artifact tools with state tracking** - prevents search_replace confusion, returns actual content on failure
-- NC-0.6.67: **Persist LLM on disconnect** - streaming tasks continue when client leaves, content saved to DB, artifacts preserved
-- NC-0.6.66: **Complete payment system** - Stripe/PayPal/Google Pay integration, subscriptions, payment methods, transaction history, webhooks
-- NC-0.6.65: **Fix artifact closing tag** - detect `</artifact>` even when not alone on line (handles inline content before/after)
-- NC-0.6.64: **Gzip & log error support** - client-side gzip decompression (with safety limits), log file error extraction with context, error summary fed to LLM
-- NC-0.6.63: **Shared chat images & formatting** - attachments in shared API, matching formatting, user newlines preserved with whitespace-pre-wrap
-- NC-0.6.62: **RAG embedding model auto-retry** - time-based retry after 60s, background startup load, retry_in_seconds in status
-- NC-0.6.61: **Fix image display & markdown** - setCurrentChat skips clear when same chat (race fix), removed prose classes for explicit styling
-- NC-0.6.60: **Immediate image display & markdown formatting** - images show after upload without refresh, added h1-h6/strong/em/hr handlers
-- NC-0.6.59: **Fix image base64 truncation** - images were only sending first 50 chars to LLM, now sends full data
-- NC-0.6.58: **Fix stream cross-chat contamination** - track streaming chat ID, validate before appending content, clear refs on chat change
-- NC-0.6.57: **Thinking tokens support** - Admin LLM tab has think begin/end tokens, content hidden in collapsible panel, Admin scrolling fix
-- NC-0.6.56: **Pre-generate assistant message IDs BEFORE streaming** - ID generated upfront, sent to frontend before content, used as parent_id for tool continuations
-- NC-0.6.55: **Improved tool continuation parent_id tracking** - validate frontend parent_id, fallback to latest message, comprehensive logging
-- NC-0.6.54: **Add kb_search tool** - LLM can search knowledge bases with `<kb_search query="...">` tag
-- NC-0.6.53: **Fix tool loops creating branches** - backend now uses latest message as parent for tool continuations, ensuring linear flow
-- NC-0.6.52: **Fix artifacts carrying over to New Chat** - added `preserveArtifacts` parameter to `createChat()`
-- NC-0.6.51: **Chat Knowledge assistant context filtering** - filter chat history search by current assistant to prevent knowledge leakage between different GPTs
+- NC-0.7.15: **Source-specific RAG prompts** (global KB, GPT KB, user docs, chat history), **keyword_check filter node** for quick chain exit, **search_documents tool enhancement** to search all sources, **Admin panel partial refactor** (types.ts, SystemTab, OAuthTab, FeaturesTab, CategoriesTab), **Admin panel scroll fix**, **SQLAlchemy cartesian product warning fix**
+- NC-0.7.14: **Migration system fix** - always checks all migrations regardless of stored version, individually validates each change
+- NC-0.7.13: **RAG context-aware query enhancement** - follow-up questions use conversation context for better search results
+- NC-0.7.12: **Interrupt stream tree fix** - interrupted messages maintain proper parent-child relationships
+- NC-0.7.11: **Admin-managed GPT categories** - new AssistantCategory model, admin UI, API endpoints, migration for category column
 - NC-0.6.50: **RAG model loading fix** (meta tensor errors), RAG admin endpoints, artifact streaming detection, tool result notifications with saved file context
 - NC-0.6.49: **Stop button fix** (background tasks), chat deletion removes knowledge index, streaming timeout (httpx.Timeout), All Models Prompt
 - NC-0.6.46: Filter chain skip_if_rag_hit option, RAG search order reorganization (Global KB → Chat History KB → Assistant/User KB → Filter Chains)
@@ -1327,7 +1221,7 @@ Changes:
 - NC-0.6.40: Global KB authoritative injection, unified KB search (Global always, Custom GPT only when active), single-path title generation (websocket.py only)
 - NC-0.6.39: Aggressive stop generation (closes HTTP connection), file persistence to database, DB fallback for LLM file tools, remove KB upload rate limit
 - NC-0.6.38: File upload to artifacts, partial file viewing tools (view_file_lines, search_in_file, view_signature), removed 100K char filter limit
-- NC-0.6.37: LLM confirmation for image generation (NOTE: negative regex patterns were buggy, removed in NC-0.6.95)
+- NC-0.6.37: LLM confirmation for image generation (safe fallback on error - returns False, not regex)
 - NC-0.6.36: API keys table with proper migration, parent_id branching fixes
 - NC-0.6.35: Custom assistant chat association (assistant_id, assistant_name on chats)
 - NC-0.6.34: Message artifacts JSON column

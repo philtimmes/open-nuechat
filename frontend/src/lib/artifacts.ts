@@ -291,16 +291,14 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
       
       // Pattern 4b: <artifact=filename> or <file:filename> etc
       // Can have text before the tag (e.g., "File main.cpp // comment <artifact=src/main.cpp>")
-      // Also handles spaces after = and in filenames: <artifact= Trial Docs.md>
-      const xmlAttrTagMatch = line.match(/^(.*?)<(artifact|file|code)[=:]\s*([^>]+?)>\s*$/i);
+      const xmlAttrTagMatch = line.match(/^(.*?)<(artifact|file|code)[=:]([A-Za-z_][\w\-./]*\.\w+)>\s*$/i);
       if (xmlAttrTagMatch) {
         const prefixText = xmlAttrTagMatch[1].trim();
-        const rawFilename = xmlAttrTagMatch[3].trim();
         activeMethod = 4;
         metadata = {
           tagName: xmlAttrTagMatch[2].toLowerCase(),
-          filepath: rawFilename,
-          filename: rawFilename.split('/').pop() || rawFilename,
+          filepath: xmlAttrTagMatch[3],
+          filename: xmlAttrTagMatch[3].split('/').pop() || xmlAttrTagMatch[3],
           startLine: i,
           prefixText: prefixText, // Store prefix to output later
         };
@@ -322,8 +320,8 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
         continue;
       }
       
-      // Pattern 3: <artifact title="..." type="..."> or <xaiArtifact ...>
-      const xmlArtifactMatch = line.match(/^<(?:artifact|xaiArtifact)\s+(?:title="([^"]*)")?\s*(?:type="([^"]*)")?\s*(?:language="([^"]*)")?\s*(?:filename="([^"]*)")?[^>]*>\s*$/i);
+      // Pattern 3: <artifact title="..." type="...">
+      const xmlArtifactMatch = line.match(/^<artifact\s+(?:title="([^"]*)")?\s*(?:type="([^"]*)")?\s*(?:language="([^"]*)")?\s*(?:filename="([^"]*)")?[^>]*>\s*$/i);
       if (xmlArtifactMatch) {
         activeMethod = 3;
         metadata = {
@@ -393,42 +391,23 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
     
     // Pattern 4: XML-style tags - look for closing tag
     if (activeMethod === 4) {
-      // Check for various closing tag formats (may not be alone on line)
+      // Check for various closing tag formats
       // Escape special regex chars in filepath/filename
       const escapedPath = (metadata.filepath || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const escapedName = (metadata.filename || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const escapedTag = (metadata.tagName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       
-      // Build patterns that can match anywhere in line (capture the tag for position finding)
       const closePatterns = [
-        new RegExp(`<\\/${escapedPath}>`, 'i'),              // </path/to/filename.ext>
-        new RegExp(`<\\/${escapedName}>`, 'i'),              // </filename.ext>
-        new RegExp(`<\\/${escapedTag}>`, 'i'),               // </artifact>, </file>, </code>
-        new RegExp(`<\\/${escapedTag}[=:]${escapedPath}>`, 'i'),  // </file:filename>
-        new RegExp(`<\\/${escapedTag}[=:]${escapedName}>`, 'i'),  // </file:filename> (just name)
+        new RegExp(`^<\\/${escapedPath}>\\s*$`),              // </path/to/filename.ext>
+        new RegExp(`^<\\/${escapedName}>\\s*$`),              // </filename.ext>
+        new RegExp(`^<\\/${escapedTag}>\\s*$`, 'i'),          // </artifact>, </file>, </code>
+        new RegExp(`^<\\/${escapedTag}[=:]${escapedPath}>\\s*$`, 'i'),  // </file:filename>
+        new RegExp(`^<\\/${escapedTag}[=:]${escapedName}>\\s*$`, 'i'),  // </file:filename> (just name)
       ];
       
-      let closeMatch: RegExpMatchArray | null = null;
-      let matchedPattern: RegExp | null = null;
-      for (const p of closePatterns) {
-        const m = line.match(p);
-        if (m) {
-          closeMatch = m;
-          matchedPattern = p;
-          break;
-        }
-      }
+      const isClosing = closePatterns.some(p => p.test(line));
       
-      if (closeMatch && matchedPattern) {
-        const closeIndex = line.search(matchedPattern);
-        const beforeClose = line.substring(0, closeIndex);
-        const afterClose = line.substring(closeIndex + closeMatch[0].length).trim();
-        
-        // Add any content before the closing tag to buffer
-        if (beforeClose.trim()) {
-          buffer.push(beforeClose);
-        }
-        
+      if (isClosing) {
         // Extract artifact
         let code = buffer.join('\n').trim();
         // Strip code fences if present inside
@@ -456,11 +435,6 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
           outputLines.push(`${prefix}[📦 Artifact: ${metadata.filename}]`);
         }
         
-        // Add any content after the closing tag to output
-        if (afterClose) {
-          outputLines.push(afterClose);
-        }
-        
         activeMethod = 0;
         metadata = {};
         buffer = [];
@@ -471,22 +445,9 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
       continue;
     }
     
-    // Pattern 3: <artifact> or <xaiArtifact> tags
+    // Pattern 3: <artifact> tags
     if (activeMethod === 3) {
-      // Check if line contains </artifact> or </xaiArtifact> (may not be alone on line)
-      const closeMatch = line.match(/<\/(?:artifact|xaiArtifact)>/i);
-      if (closeMatch) {
-        const closeIndex = line.search(/<\/(?:artifact|xaiArtifact)>/i);
-        const closeTagMatch = line.match(/<\/(?:artifact|xaiArtifact)>/i);
-        const closeTagLength = closeTagMatch ? closeTagMatch[0].length : 11;
-        const beforeClose = line.substring(0, closeIndex);
-        const afterClose = line.substring(closeIndex + closeTagLength).trim();
-        
-        // Add any content before the closing tag to buffer
-        if (beforeClose.trim()) {
-          buffer.push(beforeClose);
-        }
-        
+      if (line.match(/^<\/artifact>\s*$/i)) {
         const code = buffer.join('\n').trim();
         const artType = normalizeType(metadata.type || 'code');
         
@@ -501,11 +462,6 @@ export function extractArtifacts(content: string): { cleanContent: string; artif
             created_at: new Date().toISOString(),
           });
           outputLines.push(`[📦 Artifact: ${metadata.title}]`);
-        }
-        
-        // Add any content after the closing tag to output
-        if (afterClose) {
-          outputLines.push(afterClose);
         }
         
         activeMethod = 0;
@@ -971,90 +927,4 @@ export function groupArtifactsByFilename(artifacts: Artifact[]): ArtifactGroup[]
 export function getLatestArtifacts(artifacts: Artifact[]): Artifact[] {
   const groups = groupArtifactsByFilename(artifacts);
   return groups.map(g => g.latestVersion);
-}
-
-// ============ FILE TREE STRUCTURE ============
-
-export interface FileTreeNode {
-  name: string;
-  path: string;
-  type: 'file' | 'folder';
-  children?: FileTreeNode[];
-  group?: ArtifactGroup;  // Only for files
-}
-
-/**
- * Build a file tree from artifact groups
- */
-export function buildFileTree(groups: ArtifactGroup[]): FileTreeNode[] {
-  const root: FileTreeNode[] = [];
-  const folderMap = new Map<string, FileTreeNode>();
-  
-  // Helper to ensure a folder exists and return it
-  const ensureFolder = (path: string): FileTreeNode => {
-    if (folderMap.has(path)) {
-      return folderMap.get(path)!;
-    }
-    
-    const parts = path.split('/');
-    const name = parts[parts.length - 1];
-    const parentPath = parts.slice(0, -1).join('/');
-    
-    const folder: FileTreeNode = {
-      name,
-      path,
-      type: 'folder',
-      children: [],
-    };
-    folderMap.set(path, folder);
-    
-    if (parentPath) {
-      const parent = ensureFolder(parentPath);
-      parent.children!.push(folder);
-    } else {
-      root.push(folder);
-    }
-    
-    return folder;
-  };
-  
-  // Add each file to the tree
-  for (const group of groups) {
-    const parts = group.filename.split('/');
-    const fileName = parts[parts.length - 1];
-    
-    const fileNode: FileTreeNode = {
-      name: fileName,
-      path: group.filename,
-      type: 'file',
-      group,
-    };
-    
-    if (parts.length > 1) {
-      // Has a directory path
-      const folderPath = parts.slice(0, -1).join('/');
-      const parent = ensureFolder(folderPath);
-      parent.children!.push(fileNode);
-    } else {
-      // Root level file
-      root.push(fileNode);
-    }
-  }
-  
-  // Sort: folders first, then alphabetically
-  const sortNodes = (nodes: FileTreeNode[]): FileTreeNode[] => {
-    return nodes.sort((a, b) => {
-      if (a.type !== b.type) {
-        return a.type === 'folder' ? -1 : 1;
-      }
-      return a.name.localeCompare(b.name);
-    }).map(node => {
-      if (node.children) {
-        node.children = sortNodes(node.children);
-      }
-      return node;
-    });
-  };
-  
-  return sortNodes(root);
 }

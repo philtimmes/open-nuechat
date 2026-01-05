@@ -16,13 +16,7 @@ export const createArtifactSlice: SliceCreator<ArtifactSlice> = (set, get) => ({
   generatedImages: {},
 
   setSelectedArtifact: (artifact: Artifact | null) => {
-    // Only set the artifact selection - don't automatically close panel
-    // The panel should only close when explicitly closed via setShowArtifacts(false)
-    set({ 
-      selectedArtifact: artifact,
-      // Only auto-OPEN panel when selecting an artifact, never auto-close
-      showArtifacts: artifact !== null ? true : get().showArtifacts
-    });
+    set({ selectedArtifact: artifact, showArtifacts: artifact !== null });
   },
 
   setShowArtifacts: (show: boolean) => {

@@ -14,22 +14,6 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
   chatPage: 1,
   chatSearchQuery: '',
 
-  // Add imported chats to the list without replacing existing ones
-  addImportedChats: (importedChats: Chat[]) => {
-    set((state) => {
-      // Merge imported chats with existing ones, avoiding duplicates
-      const existingIds = new Set(state.chats.map(c => c.id));
-      const newChats = importedChats.filter(c => !existingIds.has(c.id));
-      
-      // Combine and sort by updated_at desc
-      const allChats = [...newChats, ...state.chats].sort(
-        (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-      );
-      
-      return { chats: allChats };
-    });
-  },
-
   fetchChats: async (loadMore = false, search?: string) => {
     const currentState = get();
     
@@ -37,11 +21,8 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
     const searchChanged = search !== undefined && search !== currentState.chatSearchQuery;
     const page = (loadMore && !searchChanged) ? currentState.chatPage : 1;
     
-    console.log(`[fetchChats] loadMore=${loadMore}, page=${page}, hasMoreChats=${currentState.hasMoreChats}, isLoading=${currentState.isLoadingChats}`);
-    
     // Don't fetch if already loading or no more chats (when loading more without search change)
     if (currentState.isLoadingChats || (loadMore && !searchChanged && !currentState.hasMoreChats)) {
-      console.log(`[fetchChats] Skipping - isLoading=${currentState.isLoadingChats}, hasMore=${currentState.hasMoreChats}`);
       return;
     }
     
@@ -68,8 +49,6 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
       // Calculate if there are more chats to load
       const hasMore = page * pageSize < total;
       
-      console.log(`[fetchChats] Got ${newChats.length} chats, total=${total}, page=${page}, pageSize=${pageSize}, hasMore=${hasMore}`);
-      
       set((state) => ({ 
         chats: (loadMore && !searchChanged) ? [...state.chats, ...newChats] : newChats,
         isLoadingChats: false,
@@ -82,7 +61,7 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
     }
   },
 
-  createChat: async (model?: string, systemPrompt?: string, preserveArtifacts = false) => {
+  createChat: async (model?: string, systemPrompt?: string) => {
     try {
       // Use provided model, or selected model from store, or let backend use default
       const modelToUse = model || useModelsStore.getState().selectedModel || undefined;
@@ -92,14 +71,10 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         selectedModel: useModelsStore.getState().selectedModel,
         finalModelToUse: modelToUse,
         isAssistant: modelToUse?.startsWith('gpt:'),
-        preserveArtifacts,
       });
       
-      // Only preserve uploaded artifacts if explicitly requested (e.g., user uploaded files before chat existed)
-      // Do NOT preserve when clicking "New Chat" from an existing chat
-      const preservedArtifacts = preserveArtifacts ? get().uploadedArtifacts : [];
-      const preservedZipResult = preserveArtifacts ? get().zipUploadResult : null;
-      const preservedZipContext = preserveArtifacts ? get().zipContext : null;
+      // Preserve uploaded artifacts - they were uploaded before the chat was created
+      const { uploadedArtifacts: preservedArtifacts, zipUploadResult: preservedZipResult, zipContext: preservedZipContext } = get();
       
       // Check if this is an assistant model (gpt: prefix)
       if (modelToUse && modelToUse.startsWith('gpt:')) {
@@ -123,6 +98,7 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
           selectedArtifact: null,
           showArtifacts: false,
           generatedImages: {},
+          // Preserve uploads from before chat was created
           uploadedArtifacts: preservedArtifacts,
           zipUploadResult: preservedZipResult,
           zipContext: preservedZipContext,
@@ -147,6 +123,7 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         selectedArtifact: null,
         showArtifacts: false,
         generatedImages: {},
+        // Preserve uploads from before chat was created
         uploadedArtifacts: preservedArtifacts,
         zipUploadResult: preservedZipResult,
         zipContext: preservedZipContext,
@@ -162,20 +139,6 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
   },
 
   setCurrentChat: (chat) => {
-    const { currentChat: existingChat, isSending } = get();
-    
-    // If switching to the same chat, don't clear state (prevents losing messages during streaming)
-    if (chat && existingChat && chat.id === existingChat.id) {
-      // Just update the chat metadata if needed, but don't clear messages
-      set({ currentChat: chat });
-      return;
-    }
-    
-    // If currently sending, don't clear state (prevents losing user message with attachments)
-    if (isSending && chat && existingChat && chat.id === existingChat.id) {
-      return;
-    }
-    
     // Clear ALL state when switching chats to prevent cross-chat contamination
     set({ 
       currentChat: chat, 

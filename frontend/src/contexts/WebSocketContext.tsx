@@ -49,13 +49,10 @@ const FIND_LINE_PATTERNS = [
 ];
 
 // <find path="optional/path" search="regex or text"/>
-// <find search="regex or text" path="optional/path"/>
 // <find search="regex or text"/>
 const FIND_PATTERNS = [
   /<find\s+path=["']([^"']+)["']\s+search=["']([^"']+)["']\s*\/?>/gi,
   /<find\s+path=([^\s>\/]+)\s+search=["']([^"']+)["']\s*\/?>/gi,
-  /<find\s+search=["']([^"']+)["']\s+path=["']([^"']+)["']\s*\/?>/gi,  // Reversed order
-  /<find\s+search=["']([^"']+)["']\s+path=([^\s>\/]+)\s*\/?>/gi,  // Reversed, unquoted path
   /<find\s+search=["']([^"']+)["']\s*\/?>/gi,  // No path - search all
 ];
 
@@ -65,35 +62,20 @@ const SEARCH_REPLACE_REGEX = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s
 // ============ STREAMING DETECTION PATTERNS ============
 // These detect COMPLETE tool tags during streaming for immediate execution
 
-// Single-line tool tags - match on closing > or /> (the /? handles self-closing tags)
+// Single-line tool tags - match on closing > or />
 const STREAM_FIND_LINE_PATTERN = /<find_line\s+path=["']([^"']+)["']\s+contains=["']([^"']+)["']\s*\/?>/i;
 const STREAM_FIND_PATTERN_WITH_PATH = /<find\s+path=["']([^"']+)["']\s+search=["']([^"']+)["']\s*\/?>/i;
-const STREAM_FIND_PATTERN_WITH_PATH_REV = /<find\s+search=["']([^"']+)["']\s+path=["']([^"']+)["']\s*\/?>/i;  // Reversed
 const STREAM_FIND_PATTERN_NO_PATH = /<find\s+search=["']([^"']+)["']\s*\/?>/i;
 const STREAM_REQUEST_FILE_PATTERN = /<request_file\s+path=["']([^"']+)["']\s*\/?>/i;
-const STREAM_KB_SEARCH_PATTERN = /<kb_search\s+query=["']([^"']+)["']\s*\/?>/i;
 
 // Multi-line tool tag - match on closing </search_replace>
 const STREAM_SEARCH_REPLACE_PATTERN = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*?)<\/search_replace>/i;
 
-// Multi-line tool tag - match on closing </replace_block> (legacy format)
-const STREAM_REPLACE_BLOCK_PATTERN = /<replace_block\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*REPLACE\s*\n([\s\S]*?)<\/replace_block>/i;
-
-// ============ INCOMPLETE TOOL TAG PATTERNS ============
-// These match tool tags that were started but never closed (LLM stopped mid-output)
-// Used at stream_end to salvage operations even without closing tags
-
-// Incomplete search_replace - has SEARCH and Replace sections but no closing tag
-const INCOMPLETE_SEARCH_REPLACE_PATTERN = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*)$/i;
-
-// Incomplete replace_block - has SEARCH and REPLACE sections but no closing tag
-const INCOMPLETE_REPLACE_BLOCK_PATTERN = /<replace_block\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*REPLACE\s*\n([\s\S]*)$/i;
-
 // Artifact detection patterns for streaming notification
 // Pattern: <artifact title="..." type="...">...</artifact>
 const STREAM_ARTIFACT_XML_PATTERN = /<artifact\s+[^>]*title=["']([^"']+)["'][^>]*>([\s\S]*?)<\/artifact>/gi;
-// Pattern: <artifact=filename>...</artifact> or <artifact= filename>...</artifact>
-const STREAM_ARTIFACT_EQUALS_PATTERN = /<artifact=\s*([^>]+?)>([\s\S]*?)<\/artifact>/gi;
+// Pattern: <artifact=filename>...</artifact>
+const STREAM_ARTIFACT_EQUALS_PATTERN = /<artifact=([^>]+)>([\s\S]*?)<\/artifact>/gi;
 // Pattern: Filename tags like <Menu.cpp>...</Menu.cpp>
 const STREAM_ARTIFACT_FILENAME_PATTERN = /<([A-Za-z_][A-Za-z0-9_]*\.[a-zA-Z]{1,10})>([\s\S]*?)<\/\1>/gi;
 // Pattern: Code fence with filename on preceding line (most common LLM pattern)
@@ -133,92 +115,6 @@ interface SearchReplaceOp {
   path: string;
   search: string;
   replace: string;
-}
-
-// ============ CONTEXT WINDOW CHUNKING ============
-// When tool results exceed 1/4 of context window, split into hidden agent files
-// This prevents overflowing the LLM context while keeping data searchable
-
-// ~32k chars ≈ 8k tokens, which is 1/4 of a 32k context window
-// Adjust based on your typical model context size
-const CONTEXT_CHUNK_THRESHOLD = 32000;
-const CONTEXT_CHUNK_SIZE = 24000; // Size of each chunk (leave room for metadata)
-
-// Agent file naming - matches backend convention: {AgentNNNN}.md
-const AGENT_FILE_PREFIX = "{Agent";
-const AGENT_FILE_SUFFIX = "}.md";
-
-// Counter for unique agent file names within a session
-let agentFileCounter = 0;
-
-/**
- * Chunks large tool results into hidden agent files.
- * Returns the artifacts to add and a summary message for the LLM.
- */
-function chunkLargeToolResult(
-  toolName: string,
-  results: string,
-): { summary: string; chunkedFiles: string[]; newArtifacts: Artifact[] } {
-  const chunkedFiles: string[] = [];
-  const newArtifacts: Artifact[] = [];
-  
-  // Split into chunks, trying to break at newlines
-  const chunks: string[] = [];
-  let remaining = results;
-  
-  while (remaining.length > 0) {
-    if (remaining.length <= CONTEXT_CHUNK_SIZE) {
-      chunks.push(remaining);
-      break;
-    }
-    
-    // Try to find a good break point (double newline, then single newline)
-    let breakPoint = remaining.lastIndexOf('\n\n', CONTEXT_CHUNK_SIZE);
-    if (breakPoint < CONTEXT_CHUNK_SIZE / 2) {
-      breakPoint = remaining.lastIndexOf('\n', CONTEXT_CHUNK_SIZE);
-    }
-    if (breakPoint < CONTEXT_CHUNK_SIZE / 2) {
-      breakPoint = CONTEXT_CHUNK_SIZE;
-    }
-    
-    chunks.push(remaining.substring(0, breakPoint));
-    remaining = remaining.substring(breakPoint).trimStart();
-  }
-  
-  // Create hidden artifacts for each chunk
-  const timestamp = new Date().toISOString();
-  for (let i = 0; i < chunks.length; i++) {
-    const fileNum = String(++agentFileCounter).padStart(4, '0');
-    const filename = `${AGENT_FILE_PREFIX}${fileNum}${AGENT_FILE_SUFFIX}`;
-    
-    const artifact: Artifact = {
-      id: `agent-${Date.now()}-${fileNum}`,
-      type: 'markdown',
-      title: `Agent Context ${fileNum}`,
-      language: 'markdown',
-      content: `# Agent Context File ${fileNum}\n## Source: ${toolName} (Part ${i + 1} of ${chunks.length})\n\n${chunks[i]}`,
-      filename,
-      created_at: timestamp,
-      source: 'generated',
-      hidden: true,
-    };
-    
-    newArtifacts.push(artifact);
-    chunkedFiles.push(filename);
-  }
-  
-  // Create summary for LLM
-  const totalChars = results.length;
-  const summary = `[LARGE RESULT - CHUNKED INTO ${chunks.length} FILES]
-The ${toolName} result was ${totalChars.toLocaleString()} characters (too large for context).
-Data has been split into the following searchable files:
-${chunkedFiles.map((f, i) => `  - ${f} (Part ${i + 1})`).join('\n')}
-
-Use <find search="..."/> or <request_file path="${chunkedFiles[0]}"/> to search/view these files.
-First 500 chars preview:
-${results.substring(0, 500)}${results.length > 500 ? '...' : ''}`;
-  
-  return { summary, chunkedFiles, newArtifacts };
 }
 
 // Extract all file request paths from content
@@ -392,24 +288,8 @@ function extractFindOperations(content: string): FindOp[] {
     while ((match = regex.exec(content)) !== null) {
       // Check if this pattern has path (2 groups) or not (1 group)
       const hasPath = match.length > 2 && regex.source.includes('path=');
-      
-      let path: string | null = null;
-      let search: string;
-      
-      if (hasPath) {
-        // Check if pattern has search before path (reversed order)
-        const isReversed = regex.source.indexOf('search=') < regex.source.indexOf('path=');
-        if (isReversed) {
-          search = match[1];  // search is first group
-          path = match[2].trim();  // path is second group
-        } else {
-          path = match[1].trim();  // path is first group
-          search = match[2];  // search is second group
-        }
-      } else {
-        search = match[1];
-      }
-      
+      const path = hasPath ? match[1].trim() : null;
+      const search = hasPath ? match[2] : match[1];
       const key = `${path || '*'}:${search}`;
       
       if (!seen.has(key)) {
@@ -434,46 +314,6 @@ function extractSearchReplaceOperations(content: string): SearchReplaceOp[] {
       search: match[2],
       replace: match[3],
     });
-  }
-  
-  return ops;
-}
-
-// Extract INCOMPLETE search_replace/replace_block operations (missing closing tag)
-// Used as fallback at stream_end when LLM stopped mid-output
-function extractIncompleteSearchReplaceOperations(content: string): SearchReplaceOp[] {
-  const ops: SearchReplaceOp[] = [];
-  
-  // Only try incomplete patterns if we have an opening tag but no closing tag
-  const hasSearchReplaceOpen = content.includes('<search_replace');
-  const hasSearchReplaceClose = content.includes('</search_replace>');
-  const hasReplaceBlockOpen = content.includes('<replace_block');
-  const hasReplaceBlockClose = content.includes('</replace_block>');
-  
-  // Try incomplete search_replace
-  if (hasSearchReplaceOpen && !hasSearchReplaceClose) {
-    const match = content.match(INCOMPLETE_SEARCH_REPLACE_PATTERN);
-    if (match) {
-      console.log('[INCOMPLETE_TOOL] Found incomplete search_replace, closing it');
-      ops.push({
-        path: match[1].trim(),
-        search: match[2],
-        replace: match[3].trimEnd(), // Trim trailing whitespace from incomplete content
-      });
-    }
-  }
-  
-  // Try incomplete replace_block
-  if (hasReplaceBlockOpen && !hasReplaceBlockClose) {
-    const match = content.match(INCOMPLETE_REPLACE_BLOCK_PATTERN);
-    if (match) {
-      console.log('[INCOMPLETE_TOOL] Found incomplete replace_block, closing it');
-      ops.push({
-        path: match[1].trim(),
-        search: match[2],
-        replace: match[3].trimEnd(),
-      });
-    }
   }
   
   return ops;
@@ -671,33 +511,26 @@ function executeSearchReplaceOperations(
   const results: string[] = [];
   const modifiedFiles: string[] = [];
   
-  // Get list of available files for error messages
-  const availableFiles = artifacts.map(a => a.filename || a.title || 'untitled').filter(Boolean);
-  
   for (const op of ops) {
     const artifact = findArtifactByPath(artifacts, op.path);
     
     if (!artifact) {
-      // File not found - show available files to help LLM correct the path
-      const suggestion = availableFiles.length > 0 
-        ? `\nAvailable files: ${availableFiles.slice(0, 10).join(', ')}${availableFiles.length > 10 ? ` (and ${availableFiles.length - 10} more)` : ''}`
-        : '\nNo files currently available.';
-      results.push(`[SEARCH_REPLACE_ERROR: File "${op.path}" not found.${suggestion}]`);
+      results.push(`[SEARCH_REPLACE_ERROR: File not found: ${op.path}]`);
       continue;
     }
     
     const artName = artifact.filename || artifact.title || op.path;
     const searchText = op.search.trim();
     const replaceText = op.replace.trimEnd(); // Preserve leading whitespace in replacement
-    const searchLineCount = searchText.split('\n').length;
     
     // Try exact match first
     if (artifact.content.includes(searchText)) {
       artifact.content = artifact.content.replace(searchText, replaceText);
       modifiedFiles.push(artName);
       
-      const replaceLineCount = replaceText.split('\n').length;
-      results.push(`[SEARCH_REPLACE: ✓ Replaced ${searchLineCount} lines with ${replaceLineCount} lines in "${artName}"]`);
+      const searchLines = searchText.split('\n').length;
+      const replaceLines = replaceText.split('\n').length;
+      results.push(`[SEARCH_REPLACE: Successfully replaced in ${artName} (${searchLines} lines → ${replaceLines} lines)]`);
       continue;
     }
     
@@ -723,43 +556,15 @@ function executeSearchReplaceOperations(
         artifact.content = [...before, ...replaceLines, ...after].join('\n');
         modifiedFiles.push(artName);
         found = true;
-        results.push(`[SEARCH_REPLACE: ✓ Replaced ${searchLines.length} lines with ${replaceLines.length} lines in "${artName}" (whitespace-normalized match at line ${i + 1})]`);
+        results.push(`[SEARCH_REPLACE: Successfully replaced in ${artName} (${searchLines.length} lines → ${replaceLines.length} lines, whitespace-normalized match)]`);
         break;
       }
     }
     
     if (!found) {
-      // Provide detailed error to help LLM understand what went wrong
-      const searchFirstLine = searchText.split('\n')[0].trim();
-      const searchLastLine = searchText.split('\n').slice(-1)[0].trim();
-      
-      // Try to find similar content to show what might be the issue
-      let hint = '';
-      
-      // Check if first line exists anywhere
-      const firstLineIdx = contentLines.findIndex(line => line.trim() === searchFirstLine);
-      if (firstLineIdx >= 0) {
-        // First line found - maybe the rest doesn't match
-        const contextStart = Math.max(0, firstLineIdx - 1);
-        const contextEnd = Math.min(contentLines.length, firstLineIdx + searchLineCount + 1);
-        const actualContent = contentLines.slice(contextStart, contextEnd).map((l, i) => `  ${contextStart + i + 1}: ${l}`).join('\n');
-        hint = `\nFirst line found at line ${firstLineIdx + 1}, but subsequent lines don't match.\nActual content around that area:\n${actualContent}`;
-      } else if (searchFirstLine.length > 10) {
-        // First line not found - try partial match
-        const partialMatch = contentLines.findIndex(line => 
-          line.includes(searchFirstLine.substring(0, 20)) || 
-          searchFirstLine.includes(line.trim().substring(0, 20))
-        );
-        if (partialMatch >= 0) {
-          hint = `\nNo exact match. Similar content found at line ${partialMatch + 1}:\n  "${contentLines[partialMatch].trim()}"`;
-        } else {
-          // Show file structure to help
-          const totalLines = contentLines.length;
-          hint = `\nFile "${artName}" has ${totalLines} lines. First line: "${contentLines[0]?.trim().substring(0, 50) || '(empty)'}..."`;
-        }
-      }
-      
-      results.push(`[SEARCH_REPLACE_ERROR: Content not found in "${artName}". Searched for ${searchLineCount} lines starting with:\n  "${searchFirstLine.substring(0, 60)}${searchFirstLine.length > 60 ? '...' : ''}"${hint}]`);
+      // Provide helpful error with context
+      const searchPreview = searchText.length > 100 ? searchText.substring(0, 100) + '...' : searchText;
+      results.push(`[SEARCH_REPLACE_ERROR: Search text not found in ${artName}. Search was:\n${searchPreview}]`);
     }
   }
   
@@ -780,60 +585,21 @@ class StreamingBuffer {
   private flushInterval: number = 100; // 100ms - match backend
   private maxBufferSize: number = 500; // characters - larger buffer
   private onFlush: (content: string) => void;
-  private onToolDetected: ((toolTag: string, beforeContent: string) => void) | null = null;
   private paused: boolean = false; // Stop accepting content after tool interrupt
   
-  // Tool tag patterns to watch for
-  private static TOOL_STARTS = ['<tool_call', '<find', '<find_line', '<request_file', '<search_replace', '<replace_block', '<kb_search'];
-  
-  constructor(onFlush: (content: string) => void, onToolDetected?: (toolTag: string, beforeContent: string) => void) {
+  constructor(onFlush: (content: string) => void) {
     this.onFlush = onFlush;
-    this.onToolDetected = onToolDetected || null;
   }
   
   append(chunk: string) {
     // Don't accept new content if paused (tool was detected)
     if (this.paused) {
-      console.log('[BUFFER] Paused - ignoring chunk:', chunk.substring(0, 50));
       return;
     }
     
     this.buffer += chunk;
     
-    // Debug: Log buffer state when it contains tool tags
-    if (this.buffer.includes('<search_replace') || this.buffer.includes('</search_replace')) {
-      console.log('[BUFFER] Contains search_replace, buffer length:', this.buffer.length);
-    }
-    
-    // Check for complete tool tags FIRST
-    if (this.onToolDetected) {
-      const toolResult = this.extractCompleteToolTag();
-      if (toolResult) {
-        console.log('[BUFFER] Found complete tool tag:', toolResult.tag.substring(0, 100));
-        // Found complete tool tag - flush content before it, then trigger callback
-        if (toolResult.before) {
-          this.onFlush(toolResult.before);
-        }
-        this.buffer = toolResult.after;
-        this.onToolDetected(toolResult.tag, toolResult.before);
-        return; // Don't continue - tool handler will manage flow
-      }
-    }
-    
-    // Check if buffer contains a partial tool tag at the end
-    const partialToolPos = this.findPartialToolTag();
-    if (partialToolPos >= 0) {
-      // Flush everything before the partial tag, keep the rest
-      if (partialToolPos > 0) {
-        const toFlush = this.buffer.substring(0, partialToolPos);
-        this.buffer = this.buffer.substring(partialToolPos);
-        this.onFlush(toFlush);
-      }
-      // Don't flush the partial tag yet - wait for more content
-      return;
-    }
-    
-    // No tool tags - normal flush behavior
+    // Flush immediately if buffer is very large
     if (this.buffer.length >= this.maxBufferSize) {
       this.flushNow();
       return;
@@ -848,129 +614,8 @@ class StreamingBuffer {
     }
   }
   
-  private findPartialToolTag(): number {
-    // Look for any tool start that doesn't have its closing
-    const bufferLower = this.buffer.toLowerCase();
-    
-    for (const toolStart of StreamingBuffer.TOOL_STARTS) {
-      const pos = bufferLower.lastIndexOf(toolStart);
-      if (pos >= 0) {
-        const afterStart = bufferLower.substring(pos);
-        
-        // Tags that need closing tags (not self-closing)
-        if (toolStart === '<tool_call') {
-          if (!afterStart.includes('</tool_call>')) {
-            return pos; // Partial - waiting for closing tag
-          }
-        } else if (toolStart === '<search_replace') {
-          if (!afterStart.includes('</search_replace>')) {
-            return pos; // Partial - waiting for closing tag
-          }
-        } else if (toolStart === '<replace_block') {
-          if (!afterStart.includes('</replace_block>')) {
-            return pos; // Partial - waiting for closing tag
-          }
-        } else {
-          // Other tags just need closing >
-          if (!afterStart.includes('>')) {
-            return pos; // Partial tag found
-          }
-        }
-      }
-    }
-    return -1; // No partial tag
-  }
-  
-  private extractCompleteToolTag(): { tag: string; before: string; after: string } | null {
-    const bufferLower = this.buffer.toLowerCase();
-    
-    // First check for <tool_call>...</tool_call> (wraps other tools)
-    const toolCallStart = bufferLower.indexOf('<tool_call');
-    if (toolCallStart >= 0) {
-      const afterStart = bufferLower.substring(toolCallStart);
-      const closePos = afterStart.indexOf('</tool_call>');
-      if (closePos >= 0) {
-        // Use original buffer for actual content, but positions from lowercase
-        const tag = this.buffer.substring(toolCallStart, toolCallStart + closePos + '</tool_call>'.length);
-        return {
-          tag,
-          before: this.buffer.substring(0, toolCallStart),
-          after: this.buffer.substring(toolCallStart + closePos + '</tool_call>'.length),
-        };
-      }
-      return null; // Incomplete tool_call
-    }
-    
-    // Check for <search_replace>...</search_replace> (multi-line)
-    const searchReplaceStart = bufferLower.indexOf('<search_replace');
-    if (searchReplaceStart >= 0) {
-      const afterStart = bufferLower.substring(searchReplaceStart);
-      const closePos = afterStart.indexOf('</search_replace>');
-      if (closePos >= 0) {
-        const tag = this.buffer.substring(searchReplaceStart, searchReplaceStart + closePos + '</search_replace>'.length);
-        return {
-          tag,
-          before: this.buffer.substring(0, searchReplaceStart),
-          after: this.buffer.substring(searchReplaceStart + closePos + '</search_replace>'.length),
-        };
-      }
-      return null; // Incomplete search_replace
-    }
-    
-    // Check for <replace_block>...</replace_block> (multi-line, legacy)
-    const replaceBlockStart = bufferLower.indexOf('<replace_block');
-    if (replaceBlockStart >= 0) {
-      const afterStart = bufferLower.substring(replaceBlockStart);
-      const closePos = afterStart.indexOf('</replace_block>');
-      if (closePos >= 0) {
-        const tag = this.buffer.substring(replaceBlockStart, replaceBlockStart + closePos + '</replace_block>'.length);
-        return {
-          tag,
-          before: this.buffer.substring(0, replaceBlockStart),
-          after: this.buffer.substring(replaceBlockStart + closePos + '</replace_block>'.length),
-        };
-      }
-      return null; // Incomplete replace_block
-    }
-    
-    // Look for other complete tool tags (self-closing with >)
-    for (const toolStart of StreamingBuffer.TOOL_STARTS) {
-      // Skip tags already handled above
-      if (toolStart === '<tool_call' || toolStart === '<search_replace' || toolStart === '<replace_block') continue;
-      
-      const startPos = bufferLower.indexOf(toolStart);
-      if (startPos >= 0) {
-        const afterStart = bufferLower.substring(startPos);
-        const closePos = afterStart.indexOf('>');
-        if (closePos >= 0) {
-          // Use original buffer for actual content
-          const tag = this.buffer.substring(startPos, startPos + closePos + 1);
-          return {
-            tag,
-            before: this.buffer.substring(0, startPos),
-            after: this.buffer.substring(startPos + closePos + 1),
-          };
-        }
-      }
-    }
-    return null;
-  }
-  
   flushNow() {
     if (this.buffer.length > 0 && !this.paused) {
-      // Before flushing, check one more time for tool tags
-      if (this.onToolDetected) {
-        const toolResult = this.extractCompleteToolTag();
-        if (toolResult) {
-          if (toolResult.before) {
-            this.onFlush(toolResult.before);
-          }
-          this.buffer = toolResult.after;
-          this.onToolDetected(toolResult.tag, toolResult.before);
-          return;
-        }
-      }
-      
       this.onFlush(this.buffer);
       this.buffer = '';
       this.lastFlush = performance.now();
@@ -1062,61 +707,29 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   // Structure: { chatId: { filename: writeCount } }
   const artifactWriteCountRef = useRef<Record<string, Record<string, number>>>({});
   
-  // Track the current streaming message ID for tool result continuations
-  const currentStreamingMessageIdRef = useRef<string | null>(null);
-  
-  // Track which chat the current stream belongs to - prevents cross-chat contamination
-  const currentStreamingChatIdRef = useRef<string | null>(null);
-  
-  // Clear streaming refs when chat changes to prevent cross-chat contamination
-  useEffect(() => {
-    // If user switched to a different chat while streaming, clear the refs
-    if (currentChat?.id && currentStreamingChatIdRef.current && 
-        currentStreamingChatIdRef.current !== currentChat.id) {
-      console.log('[CHAT_CHANGE] Clearing streaming refs - switched from', 
-        currentStreamingChatIdRef.current, 'to', currentChat.id);
-      currentStreamingChatIdRef.current = null;
-      currentStreamingMessageIdRef.current = null;
-      streamingBufferRef.current?.clear();
-    }
-  }, [currentChat?.id]);
-  
-  // Tool detection callback ref - will be set up in useEffect
-  const toolDetectedCallbackRef = useRef<((toolTag: string, beforeContent: string) => void) | null>(null);
-  
   if (!streamingBufferRef.current) {
-    streamingBufferRef.current = new StreamingBuffer(
-      // onFlush callback
-      (content) => {
-        // Only append content if we're still streaming for the same chat
-        const streamingChatId = currentStreamingChatIdRef.current;
-        const { currentChat } = useChatStore.getState();
-        
-        // If user switched to a different chat, ignore this content
-        if (streamingChatId && currentChat?.id && streamingChatId !== currentChat.id) {
-          console.log('[BUFFER_FLUSH] Ignoring content for different chat:', streamingChatId, 'vs', currentChat.id);
-          return;
-        }
-        
-        const store = useChatStore.getState();
-        store.appendStreamingContent(content);
-        
-        // Check for artifacts periodically (every 500ms)
-        const now = performance.now();
-        if (now - lastArtifactCheckRef.current > 500) {
-          lastArtifactCheckRef.current = now;
-          const { streamingContent } = useChatStore.getState();
-          store.updateStreamingArtifacts(streamingContent);
-        }
-      },
-      // onToolDetected callback
-      (toolTag, beforeContent) => {
-        console.log('[TOOL_DETECTED] Tag:', toolTag.substring(0, 100));
-        if (toolDetectedCallbackRef.current) {
-          toolDetectedCallbackRef.current(toolTag, beforeContent);
-        }
+    streamingBufferRef.current = new StreamingBuffer((content) => {
+      const store = useChatStore.getState();
+      store.appendStreamingContent(content);
+      
+      // Check for artifacts periodically (every 500ms)
+      const now = performance.now();
+      if (now - lastArtifactCheckRef.current > 500) {
+        lastArtifactCheckRef.current = now;
+        const { streamingContent } = useChatStore.getState();
+        store.updateStreamingArtifacts(streamingContent);
       }
-    );
+      
+      // Check for tool tags that need immediate execution
+      // Get fresh state AFTER appendStreamingContent
+      const { streamingContent } = useChatStore.getState();
+      console.warn(`[BUFFER_FLUSH] Content len=${streamingContent.length}, callback=${!!toolInterruptCallbackRef.current}`);
+      if (toolInterruptCallbackRef.current) {
+        toolInterruptCallbackRef.current(streamingContent);
+      } else {
+        console.warn('[BUFFER_FLUSH] toolInterruptCallbackRef.current is NULL!');
+      }
+    });
   }
   
   // Handle file requests detected in LLM responses - fetch files and auto-continue
@@ -1204,7 +817,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             parent_id: parentMessageId,
             zip_context: zipContext,
             save_user_message: false,
-            is_tool_continuation: true,
           },
         }));
         
@@ -1246,7 +858,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           parent_id: parentMessageId,
           zip_context: zipContext,
           save_user_message: false,
-          is_tool_continuation: true,
         },
       }));
     }
@@ -1279,7 +890,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           parent_id: parentMessageId,
           zip_context: zipContext,
           save_user_message: false,
-          is_tool_continuation: true,
         },
       }));
     }
@@ -1335,7 +945,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           parent_id: parentMessageId,
           zip_context: zipContext,
           save_user_message: false,
-          is_tool_continuation: true,
         },
       }));
     }
@@ -1396,16 +1005,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           break;
         }
         
-        console.log('[stream_start] Stream starting for chat:', payload.chat_id, 'message_id:', payload.message_id);
+        console.log('[stream_start] Stream starting for chat:', payload.chat_id);
         // Log current state
         const { messages, artifacts } = useChatStore.getState();
         console.log(`[stream_start] State before clear: ${messages.length} messages, ${artifacts.length} artifacts`);
-        
-        // Track which chat this stream belongs to - prevents cross-chat contamination
-        currentStreamingChatIdRef.current = payload.chat_id || null;
-        
-        // Track the current streaming message ID for tool continuations
-        currentStreamingMessageIdRef.current = payload.message_id || null;
         
         streamingBufferRef.current?.clear();
         setStreamingContent('');
@@ -1432,10 +1035,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         
         if (chunk.content) {
-          // Debug: Log incoming chunks
-          if (chunk.content.includes('<search_replace') || chunk.content.includes('</search_replace')) {
-            console.log('[STREAM_CHUNK] Contains search_replace tag:', chunk.content.substring(0, 200));
-          }
           // Use buffered append for performance
           streamingBufferRef.current?.append(chunk.content);
         }
@@ -1463,12 +1062,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         
         const chunk = message.payload as StreamChunk & { parent_id?: string };
         console.warn('Stream ended:', chunk);
-        
-        // Clear the streaming chat ID ref - stream is over
-        const streamingChatId = currentStreamingChatIdRef.current;
-        currentStreamingChatIdRef.current = null;
-        currentStreamingMessageIdRef.current = null;
-        
         // Add final message
         if (chunk.message_id) {
           const { streamingContent, currentChat, generatedImages } = useChatStore.getState();
@@ -1477,18 +1070,16 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           // Debug: Check for tool tags in final content
           const hasToolTag = streamingContent.includes('<find') || 
                              streamingContent.includes('<request_file') || 
-                             streamingContent.includes('<search_replace') ||
-                             streamingContent.includes('<replace_block');
+                             streamingContent.includes('<search_replace');
           if (hasToolTag) {
             console.warn('[STREAM_END] TOOL TAGS FOUND IN FINAL CONTENT!');
             console.warn('[STREAM_END] Content tail:', streamingContent.slice(-1000));
           }
           
-          // CRITICAL: Validate stream belongs to current chat
-          // Use BOTH chunk.chat_id AND our tracked streamingChatId for robustness
-          const expectedChatId = chunk.chat_id || streamingChatId;
-          if (expectedChatId && currentChat?.id && expectedChatId !== currentChat.id) {
-            console.warn('[STREAM_END] Ignoring stream for different chat:', expectedChatId, 'current:', currentChat.id);
+          // Only add message if it belongs to the current chat
+          // This prevents cross-chat contamination when switching chats during streaming
+          if (chunk.chat_id && currentChat?.id && chunk.chat_id !== currentChat.id) {
+            console.warn('Ignoring stream_end for different chat:', chunk.chat_id, 'current:', currentChat.id);
             clearStreaming();
             setIsSending(false);
             break;
@@ -1619,17 +1210,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           }
           
           // Process search_replace operations (new format)
-          let searchReplaceOps = extractSearchReplaceOperations(streamingContent);
-          
-          // Fallback: try to extract incomplete operations (LLM stopped without closing tag)
-          if (searchReplaceOps.length === 0) {
-            const incompleteOps = extractIncompleteSearchReplaceOperations(streamingContent);
-            if (incompleteOps.length > 0) {
-              console.log('[SEARCH_REPLACE] Using', incompleteOps.length, 'incomplete operations (missing closing tag)');
-              searchReplaceOps = incompleteOps;
-            }
-          }
-          
+          const searchReplaceOps = extractSearchReplaceOperations(streamingContent);
           if (searchReplaceOps.length > 0 && currentChat?.id && !needsAutoContinue) {
             console.log('[SEARCH_REPLACE] Found', searchReplaceOps.length, 'search_replace operations');
             handleSearchReplaceOperations(currentChat.id, searchReplaceOps, chunk.message_id, allArtifacts, chunk.message_id);
@@ -1763,7 +1344,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
                     parent_id: chunk.message_id,
                     zip_context: zipContext,
                     save_user_message: false,
-                    is_tool_continuation: true,
                   },
                 }));
                 // Don't clear streaming - LLM will continue
@@ -1813,8 +1393,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         const chunk = message.payload as StreamChunk;
         console.error('Stream error:', chunk.error);
         streamingBufferRef.current?.clear();
-        currentStreamingChatIdRef.current = null;
-        currentStreamingMessageIdRef.current = null;
         clearStreaming();
         setIsSending(false);
         break;
@@ -1827,28 +1405,22 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         // Generation was stopped by user
         const chunk = message.payload as StreamChunk & { parent_id?: string };
         console.log('Stream stopped by user');
-        
-        // Clear the streaming chat ID ref
-        const streamingChatId = currentStreamingChatIdRef.current;
-        currentStreamingChatIdRef.current = null;
-        currentStreamingMessageIdRef.current = null;
-        
-        // Add partial message if content exists AND it's for the current chat
+        // Add partial message if content exists
         if (chunk.message_id) {
-          const { streamingContent, currentChat } = useChatStore.getState();
-          
-          // Validate stream belongs to current chat
-          const expectedChatId = chunk.chat_id || streamingChatId;
-          if (expectedChatId && currentChat?.id && expectedChatId !== currentChat.id) {
-            console.warn('[STREAM_STOPPED] Ignoring stream for different chat:', expectedChatId, 'current:', currentChat.id);
-            clearStreaming();
-            setIsSending(false);
-            break;
+          const { streamingContent } = useChatStore.getState();
+          if (streamingContent) {
+            const assistantMessage: Message = {
+              id: chunk.message_id,
+              chat_id: chunk.chat_id || '',
+              role: 'assistant',
+              content: streamingContent + '\n\n*[Generation stopped]*',
+              parent_id: chunk.parent_id,
+              input_tokens: chunk.usage?.input_tokens,
+              output_tokens: chunk.usage?.output_tokens,
+              created_at: new Date().toISOString(),
+            };
+            addMessage(assistantMessage);
           }
-          
-          // Don't add message here - the content is already being saved by backend
-          // The "[Generation stopped]" marker will be in the database but not shown to user
-          // This prevents duplicate messages when tools interrupt generation
         }
         clearStreaming();
         setIsSending(false);
@@ -1949,9 +1521,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         return;
       }
       
-      // Capture parent ID at the START before any stop_generation clears it
-      const capturedParentId = currentStreamingMessageIdRef.current;
-      
       // ======== TRACK COMPLETED ARTIFACTS ========
       // Track artifacts as they complete during streaming (for notification in tool results)
       // We DON'T interrupt for artifacts - only track them to include in tool result messages
@@ -1984,8 +1553,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       // Debug: Check if any tool-like patterns exist
       const hasToolTag = streamingContent.includes('<find') || 
                          streamingContent.includes('<request_file') || 
-                         streamingContent.includes('<search_replace') ||
-                         streamingContent.includes('<replace_block');
+                         streamingContent.includes('<search_replace');
       if (hasToolTag) {
         console.warn('[TOOL_INTERRUPT] Tool tag detected in content, length:', streamingContent.length);
         console.warn('[TOOL_INTERRUPT] Last 500 chars:', streamingContent.slice(-500));
@@ -2021,11 +1589,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       };
       
       // Helper to send tool results without creating new messages
-      // Uses capturedParentId to ensure proper conversation tree linkage
       // Includes notifications about artifacts that were saved during streaming
-      // Large results are chunked into hidden agent files to prevent context overflow
       const sendToolResult = (toolName: string, results: string) => {
-        const { zipContext, streamingContent, artifacts, setArtifacts } = useChatStore.getState();
+        const { zipContext, streamingContent } = useChatStore.getState();
         
         // Build notification about saved artifacts
         let artifactNotification = '';
@@ -2037,32 +1603,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         
         // Ensure we always send something, even if results are empty
-        let finalResults = results.trim() || `[${toolName.toUpperCase()}: No results returned]`;
-        
-        // Check if results exceed context threshold - chunk into hidden agent files
-        if (finalResults.length > CONTEXT_CHUNK_THRESHOLD) {
-          console.log(`[TOOL_RESULT] Large result (${finalResults.length} chars) - chunking into agent files`);
-          const { summary, chunkedFiles, newArtifacts } = chunkLargeToolResult(toolName, finalResults);
-          finalResults = summary;
-          // Add new hidden artifacts to the store
-          setArtifacts([...artifacts, ...newArtifacts]);
-          console.log(`[TOOL_RESULT] Created ${chunkedFiles.length} agent files: ${chunkedFiles.join(', ')}`);
-        }
-        
-        // Use captured streaming message ID as parent for linear conversation flow
-        // This prevents tool continuations from creating branches
-        console.log(`[TOOL_RESULT] Sending ${toolName} results (${finalResults.length} chars), parent_id: ${capturedParentId}, savedArtifacts: ${savedArtifactsDuringStreamRef.current.length}`);
-        
+        const finalResults = results.trim() || `[${toolName.toUpperCase()}: No results returned]`;
+        console.log(`[TOOL_RESULT] Sending ${toolName} results (${finalResults.length} chars), savedArtifacts: ${savedArtifactsDuringStreamRef.current.length}`);
         wsRef.current!.send(JSON.stringify({
           type: 'chat_message',
           payload: {
             chat_id: currentChat.id,
             content: `[SYSTEM TOOL RESULT - ${toolName}]\nThe following results were generated by the system, not typed by the user.\n\n${finalResults}${artifactNotification}\n\n[END TOOL RESULT]`,
-            parent_id: capturedParentId,  // Link to current streaming message for linear conversation
-            continue_message_id: capturedParentId,  // Append to this existing message instead of creating new
             zip_context: zipContext,
             save_user_message: false,
-            is_tool_continuation: true,
           },
         }));
       };
@@ -2102,19 +1651,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
       }
       
-      // Check for find tag (with path) - try both attribute orders
-      let findWithPathMatch = streamingContent.match(STREAM_FIND_PATTERN_WITH_PATH);
-      let pathGroup = 1, searchGroup = 2;  // Default: path first, search second
-      
-      if (!findWithPathMatch) {
-        // Try reversed order: search first, path second
-        findWithPathMatch = streamingContent.match(STREAM_FIND_PATTERN_WITH_PATH_REV);
-        if (findWithPathMatch) {
-          pathGroup = 2;  // Path is second group in reversed pattern
-          searchGroup = 1;  // Search is first group
-        }
-      }
-      
+      // Check for find tag (with path)
+      const findWithPathMatch = streamingContent.match(STREAM_FIND_PATTERN_WITH_PATH);
       if (findWithPathMatch) {
         console.log('[TOOL_INTERRUPT] MATCHED find (with path):', findWithPathMatch[0].substring(0, 100));
         const tagKey = getTagKey('find_path', findWithPathMatch[0]);
@@ -2136,7 +1674,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
           streamingBufferRef.current?.pause();
           
-          const ops: FindOp[] = [{ path: findWithPathMatch[pathGroup], search: findWithPathMatch[searchGroup] }];
+          const ops: FindOp[] = [{ path: findWithPathMatch[1], search: findWithPathMatch[2] }];
           const results = executeFindOperations(getAllArtifacts(), ops);
           sendToolResult('find', results.join('\n\n'));
           return;
@@ -2252,88 +1790,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           return;
         }
       }
-      
-      // Check for replace_block tag (legacy format, multi-line)
-      const replaceBlockMatch = streamingContent.match(STREAM_REPLACE_BLOCK_PATTERN);
-      if (replaceBlockMatch) {
-        console.log('[TOOL_INTERRUPT] MATCHED replace_block, path:', replaceBlockMatch[1]);
-        const tagKey = getTagKey('replace_block', replaceBlockMatch[0]);
-        if (!processedToolTagsRef.current.has(tagKey)) {
-          processedToolTagsRef.current.add(tagKey);
-          console.log('[TOOL_INTERRUPT] Detected replace_block tag, executing immediately');
-          
-          wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
-          streamingBufferRef.current?.pause();
-          
-          // Convert to SearchReplaceOp format (same structure)
-          const ops: SearchReplaceOp[] = [{
-            path: replaceBlockMatch[1],
-            search: replaceBlockMatch[2],
-            replace: replaceBlockMatch[3],
-          }];
-          
-          const allArtifacts = getAllArtifacts();
-          const { updateArtifact } = useChatStore.getState();
-          const { updatedArtifacts, results, modifiedFiles } = executeSearchReplaceOperations(allArtifacts, ops);
-          
-          // Update modified artifacts in store
-          for (const art of updatedArtifacts) {
-            const key = art.filename || art.title || '';
-            if (key && modifiedFiles.includes(key)) {
-              updateArtifact(key, art);
-            }
-          }
-          
-          sendToolResult('replace_block', results.join('\n\n'));
-          return;
-        }
-      }
-      
-      // Check for kb_search tag - search knowledge bases
-      const kbSearchMatch = streamingContent.match(STREAM_KB_SEARCH_PATTERN);
-      if (kbSearchMatch) {
-        console.log('[TOOL_INTERRUPT] MATCHED kb_search, query:', kbSearchMatch[1]);
-        const tagKey = getTagKey('kb_search', kbSearchMatch[0]);
-        if (!processedToolTagsRef.current.has(tagKey)) {
-          processedToolTagsRef.current.add(tagKey);
-          
-          // Check for tool loop
-          if (isToolLoop(tagKey)) {
-            console.warn('[TOOL_INTERRUPT] Loop detected for kb_search, stopping');
-            wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
-            streamingBufferRef.current?.pause();
-            sendToolResult('kb_search', '[LOOP DETECTED] You have searched for this same query multiple times. Please use the results you have or try a different query.');
-            return;
-          }
-          recordToolCall(tagKey);
-          
-          console.log('[TOOL_INTERRUPT] Detected kb_search tag, executing API call');
-          
-          // Stop generation and pause buffer
-          wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
-          streamingBufferRef.current?.pause();
-          
-          // Make API call to search knowledge bases
-          const searchQuery = kbSearchMatch[1];
-          api.post('/knowledge-stores/search', { query: searchQuery, top_k: 5 })
-            .then((response) => {
-              const { results, stores_searched } = response.data;
-              if (results.length === 0) {
-                sendToolResult('kb_search', `[KB_SEARCH: No results found for "${searchQuery}" across ${stores_searched} knowledge bases]`);
-              } else {
-                const formattedResults = results.map((r: { document_name: string; knowledge_store_name: string; score: number; content: string }, i: number) => 
-                  `[Result ${i + 1}] From "${r.document_name}" (${r.knowledge_store_name}, score: ${r.score.toFixed(2)})\n${r.content}`
-                ).join('\n\n---\n\n');
-                sendToolResult('kb_search', `[KB_SEARCH RESULTS for "${searchQuery}"]\nSearched ${stores_searched} knowledge bases, found ${results.length} results:\n\n${formattedResults}`);
-              }
-            })
-            .catch((err) => {
-              console.error('[TOOL_INTERRUPT] kb_search API error:', err);
-              sendToolResult('kb_search', `[KB_SEARCH ERROR: Failed to search knowledge bases - ${err.message || 'Unknown error'}]`);
-            });
-          return;
-        }
-      }
     };
     
     // Clear processed tags when streaming ends or on unmount
@@ -2341,195 +1797,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       toolInterruptCallbackRef.current = null;
     };
   }, []); // No dependencies - uses refs and getState()
-  
-  // Set up tool detected callback - handles complete tool tags found in buffer BEFORE they're displayed
-  useEffect(() => {
-    console.log('[TOOL_DETECTED_SETUP] Setting up tool detected callback');
-    toolDetectedCallbackRef.current = (toolTag: string, _beforeContent: string) => {
-      const { currentChat, artifacts, uploadedArtifacts } = useChatStore.getState();
-      if (!currentChat?.id || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        console.warn('[TOOL_DETECTED] Skipped - no chat or WS not connected');
-        return;
-      }
-      
-      console.log('[TOOL_DETECTED] Processing tag:', toolTag.substring(0, 100));
-      
-      // If this is a <tool_call>...</tool_call> wrapper, extract inner content
-      let tagToProcess = toolTag;
-      const toolCallMatch = toolTag.match(/<tool_call[^>]*>([\s\S]*?)<\/tool_call>/i);
-      if (toolCallMatch) {
-        // Extract inner content - might contain <find> or other tags
-        const innerContent = toolCallMatch[1].trim();
-        console.log('[TOOL_DETECTED] Extracted from tool_call wrapper:', innerContent.substring(0, 100));
-        
-        // Look for inner tool tag
-        const innerTagMatch = innerContent.match(/<(find|find_line|request_file|search_replace|kb_search)[^>]*>/i);
-        if (innerTagMatch) {
-          tagToProcess = innerTagMatch[0];
-          console.log('[TOOL_DETECTED] Found inner tag:', tagToProcess);
-        } else {
-          // Maybe it's JSON format: {"tool": "find", "query": "..."}
-          try {
-            const jsonMatch = innerContent.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              const parsed = JSON.parse(jsonMatch[0]);
-              const toolName = parsed.tool || parsed.name;
-              if (toolName === 'find') {
-                tagToProcess = `<find search="${parsed.query || parsed.search || ''}" ${parsed.path ? `path="${parsed.path}"` : ''}>`;
-              }
-            }
-          } catch (e) {
-            console.warn('[TOOL_DETECTED] Could not parse tool_call JSON:', innerContent.substring(0, 100));
-          }
-        }
-      }
-      
-      // Capture parent ID BEFORE stopping - stream_end will clear it
-      const capturedParentId = currentStreamingMessageIdRef.current;
-      
-      // Pause the buffer to stop further content
-      streamingBufferRef.current?.pause();
-      
-      // Stop the LLM generation
-      wsRef.current.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
-      
-      // Combine artifacts for searching
-      const allArtifacts = [...artifacts, ...uploadedArtifacts];
-      
-      // Helper to send tool result - uses captured parentId
-      const sendResult = (toolName: string, result: string) => {
-        const { zipContext } = useChatStore.getState();
-        
-        console.log(`[TOOL_DETECTED] Sending ${toolName} result, parent_id: ${capturedParentId}, continue_message_id: ${capturedParentId}`);
-        
-        wsRef.current!.send(JSON.stringify({
-          type: 'chat_message',
-          payload: {
-            chat_id: currentChat.id,
-            content: `[SYSTEM TOOL RESULT - ${toolName}]\nThe following results were generated by the system, not typed by the user.\n\n${result}\n\n[END TOOL RESULT]`,
-            parent_id: capturedParentId,
-            continue_message_id: capturedParentId,  // Append to this existing message instead of creating new
-            zip_context: zipContext,
-            save_user_message: false,
-            is_tool_continuation: true,
-          },
-        }));
-      };
-      
-      // Parse and execute the tool tag
-      // <find search="..." path="..."> or <find path="..." search="...">
-      const findMatch = tagToProcess.match(/<find\s+(?:search=["']([^"']+)["']\s+path=["']([^"']+)["']|path=["']([^"']+)["']\s+search=["']([^"']+)["']|search=["']([^"']+)["'])\s*\/?>/i);
-      if (findMatch) {
-        // Extract search and path from whichever groups matched
-        const search = findMatch[1] || findMatch[4] || findMatch[5];
-        const path = findMatch[2] || findMatch[3] || null;
-        
-        console.log(`[TOOL_DETECTED] find: search="${search}", path="${path}"`);
-        
-        const ops: FindOp[] = [{ path, search }];
-        const results = executeFindOperations(allArtifacts, ops);
-        sendResult('find', results.join('\n\n'));
-        return;
-      }
-      
-      // <find_line path="..." contains="...">
-      const findLineMatch = tagToProcess.match(/<find_line\s+path=["']([^"']+)["']\s+contains=["']([^"']+)["']\s*\/?>/i);
-      if (findLineMatch) {
-        const path = findLineMatch[1];
-        const contains = findLineMatch[2];
-        
-        console.log(`[TOOL_DETECTED] find_line: path="${path}", contains="${contains}"`);
-        
-        const ops: FindLineOp[] = [{ path, contains }];
-        const results = executeFindLineOperations(allArtifacts, ops);
-        sendResult('find_line', results.join('\n\n'));
-        return;
-      }
-      
-      // <request_file path="...">
-      const requestFileMatch = tagToProcess.match(/<request_file\s+path=["']([^"']+)["']\s*\/?>/i);
-      if (requestFileMatch) {
-        const path = requestFileMatch[1];
-        console.log(`[TOOL_DETECTED] request_file: path="${path}"`);
-        
-        // Try to find the artifact
-        const artifact = findArtifactByPath(allArtifacts, path);
-        if (artifact) {
-          sendResult('request_file', `[FILE: ${path}]\n\`\`\`\n${artifact.content}\n\`\`\``);
-        } else {
-          const availableFiles = allArtifacts.map(a => a.filename || a.title || 'unnamed').slice(0, 20);
-          sendResult('request_file', `[FILE_ERROR: Could not find "${path}"]\nAvailable files: ${availableFiles.join(', ')}`);
-        }
-        return;
-      }
-      
-      // <search_replace path="...">===== SEARCH...===== Replace...</search_replace>
-      const searchReplaceMatch = tagToProcess.match(/<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*?)<\/search_replace>/i);
-      if (searchReplaceMatch) {
-        const path = searchReplaceMatch[1];
-        const searchText = searchReplaceMatch[2];
-        const replaceText = searchReplaceMatch[3];
-        
-        console.log(`[TOOL_DETECTED] search_replace: path="${path}", search=${searchText.length} chars, replace=${replaceText.length} chars`);
-        
-        const ops: SearchReplaceOp[] = [{ path, search: searchText, replace: replaceText }];
-        const { updateArtifact } = useChatStore.getState();
-        const { updatedArtifacts, results, modifiedFiles } = executeSearchReplaceOperations(allArtifacts, ops);
-        
-        // Update modified artifacts in store
-        for (const art of updatedArtifacts) {
-          const key = art.filename || art.title || '';
-          if (key && modifiedFiles.includes(key)) {
-            updateArtifact(key, art);
-          }
-        }
-        
-        sendResult('search_replace', results.join('\n\n'));
-        return;
-      }
-      
-      // <replace_block path="...">===== SEARCH...===== Replace...</replace_block> (legacy)
-      const replaceBlockMatch = tagToProcess.match(/<replace_block\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*?)<\/replace_block>/i);
-      if (replaceBlockMatch) {
-        const path = replaceBlockMatch[1];
-        const searchText = replaceBlockMatch[2];
-        const replaceText = replaceBlockMatch[3];
-        
-        console.log(`[TOOL_DETECTED] replace_block: path="${path}", search=${searchText.length} chars, replace=${replaceText.length} chars`);
-        
-        const ops: SearchReplaceOp[] = [{ path, search: searchText, replace: replaceText }];
-        const { updateArtifact } = useChatStore.getState();
-        const { updatedArtifacts, results, modifiedFiles } = executeSearchReplaceOperations(allArtifacts, ops);
-        
-        // Update modified artifacts in store
-        for (const art of updatedArtifacts) {
-          const key = art.filename || art.title || '';
-          if (key && modifiedFiles.includes(key)) {
-            updateArtifact(key, art);
-          }
-        }
-        
-        sendResult('replace_block', results.join('\n\n'));
-        return;
-      }
-      
-      // <kb_search query="...">
-      const kbSearchMatch = tagToProcess.match(/<kb_search\s+query=["']([^"']+)["']\s*\/?>/i);
-      if (kbSearchMatch) {
-        const query = kbSearchMatch[1];
-        console.log(`[TOOL_DETECTED] kb_search: query="${query}"`);
-        // KB search needs async API call - for now just acknowledge
-        sendResult('kb_search', `[KB_SEARCH: Searching for "${query}"... (async operation)]`);
-        return;
-      }
-      
-      console.warn('[TOOL_DETECTED] Unrecognized tool tag:', tagToProcess);
-    };
-    
-    return () => {
-      toolDetectedCallbackRef.current = null;
-    };
-  }, []);
   
   const connect = useCallback(() => {
     if (!accessToken || wsRef.current?.readyState === WebSocket.OPEN) {
@@ -2661,27 +1928,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       // Reset file write counter for this chat on new user message (new task)
       artifactWriteCountRef.current[chatId] = {};
       
-      // Convert attachments to display format for the user message
-      const displayAttachments = attachments?.map((att: any) => ({
-        type: att.type as 'image' | 'file',
-        name: att.filename || 'attachment',
-        data: att.data,
-        mime_type: att.mime_type,
-        url: att.type === 'image' && att.data ? `data:${att.mime_type};base64,${att.data}` : undefined,
-      }));
-      
-      console.log('[sendChatMessage] Attachments:', {
-        rawCount: attachments?.length || 0,
-        displayCount: displayAttachments?.length || 0,
-        first: displayAttachments?.[0] ? { 
-          type: displayAttachments[0].type, 
-          name: displayAttachments[0].name, 
-          hasData: !!displayAttachments[0].data,
-          dataLen: displayAttachments[0].data?.length || 0,
-          hasUrl: !!displayAttachments[0].url,
-        } : null,
-      });
-      
       // Generate a proper UUID for the user message (used by both frontend and backend)
       const messageId = crypto.randomUUID();
       const userMessage: Message = {
@@ -2689,7 +1935,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         chat_id: chatId,
         role: 'user',
         content,
-        attachments: displayAttachments,
         parent_id: parentId,
         created_at: new Date().toISOString(),
       };
