@@ -256,6 +256,118 @@ class ToolRegistry:
             },
             handler=FileViewingTools.view_signature,
         )
+        
+        # Task Queue tools - Agentic task management
+        self.register(
+            name="add_task",
+            description="Add a task to the agentic task queue. Tasks auto-start if queue is not paused.",
+            parameters={
+                "description": {
+                    "type": "string",
+                    "description": "Short task description",
+                    "required": True,
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": "Detailed instructions (up to 512 tokens)",
+                    "required": True,
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Priority (0=normal, higher=more urgent)",
+                    "required": False,
+                },
+                "auto_continue": {
+                    "type": "boolean",
+                    "description": "Auto-start next task when this completes (default: true)",
+                    "required": False,
+                }
+            },
+            handler=self._add_task_handler,
+        )
+        
+        self.register(
+            name="add_tasks_batch",
+            description="Add multiple tasks to the queue at once. Use this to plan a series of steps.",
+            parameters={
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string"},
+                            "instructions": {"type": "string"},
+                            "priority": {"type": "integer"},
+                            "auto_continue": {"type": "boolean"}
+                        }
+                    },
+                    "description": "Array of tasks with description, instructions, optional priority and auto_continue",
+                    "required": True,
+                }
+            },
+            handler=self._add_tasks_batch_handler,
+        )
+        
+        self.register(
+            name="complete_task",
+            description="Mark the current task as completed. Call this when you've finished a task from the queue.",
+            parameters={
+                "result_summary": {
+                    "type": "string",
+                    "description": "Brief summary of what was accomplished",
+                    "required": False,
+                }
+            },
+            handler=self._complete_task_handler,
+        )
+        
+        self.register(
+            name="fail_task",
+            description="Mark the current task as failed. Use when you cannot complete a task.",
+            parameters={
+                "reason": {
+                    "type": "string",
+                    "description": "Why the task failed",
+                    "required": False,
+                }
+            },
+            handler=self._fail_task_handler,
+        )
+        
+        self.register(
+            name="skip_task",
+            description="Skip the current task and move to the next one.",
+            parameters={},
+            handler=self._skip_task_handler,
+        )
+        
+        self.register(
+            name="get_task_queue",
+            description="Get the current status of the task queue.",
+            parameters={},
+            handler=self._get_task_queue_handler,
+        )
+        
+        self.register(
+            name="clear_task_queue",
+            description="Clear all pending tasks from the queue.",
+            parameters={},
+            handler=self._clear_task_queue_handler,
+        )
+        
+        self.register(
+            name="pause_task_queue",
+            description="Pause task queue execution. Tasks won't auto-start until resumed.",
+            parameters={},
+            handler=self._pause_task_queue_handler,
+        )
+        
+        self.register(
+            name="resume_task_queue",
+            description="Resume task queue execution after pausing.",
+            parameters={},
+            handler=self._resume_task_queue_handler,
+        )
     
     async def _calculator_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Safe mathematical expression evaluator"""
@@ -714,6 +826,323 @@ class ToolRegistry:
             import html as html_module
             text = html_module.unescape(text)
             return text
+    
+    async def _add_task_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Add a single task to the queue"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        description = args.get("description", "").strip()
+        instructions = args.get("instructions", "").strip()
+        priority = args.get("priority", 0)
+        auto_continue = args.get("auto_continue", True)
+        
+        if not description:
+            return {"error": "Task description is required"}
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService, TaskSource
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            task = await queue_service.add_task(
+                description=description,
+                instructions=instructions,
+                source=TaskSource.LLM,
+                priority=priority,
+                auto_continue=auto_continue,
+            )
+            
+            status = await queue_service.get_queue_status()
+            logger.info(f"[TASK_QUEUE] Added task '{description}' to chat {chat_id}")
+            
+            return {
+                "success": True,
+                "task_id": task.id,
+                "description": task.description,
+                "status": task.status.value,
+                "queue_length": status["queue_length"],
+                "current_task": status["current_task"]["description"] if status["current_task"] else None,
+            }
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error adding task: {e}")
+            return {"error": f"Failed to add task: {str(e)}"}
+    
+    async def _add_tasks_batch_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Add multiple tasks to the queue"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        tasks_data = args.get("tasks", [])
+        
+        if not tasks_data:
+            return {"error": "No tasks provided"}
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService, TaskSource
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            tasks = await queue_service.add_tasks_batch(
+                tasks=tasks_data,
+                source=TaskSource.LLM,
+            )
+            
+            status = await queue_service.get_queue_status()
+            logger.info(f"[TASK_QUEUE] Added {len(tasks)} tasks to chat {chat_id}")
+            
+            return {
+                "success": True,
+                "tasks_added": len(tasks),
+                "descriptions": [t.description for t in tasks],
+                "queue_length": status["queue_length"],
+                "current_task": status["current_task"]["description"] if status["current_task"] else None,
+            }
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error adding tasks: {e}")
+            return {"error": f"Failed to add tasks: {str(e)}"}
+    
+    async def _complete_task_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Mark current task as completed"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        result_summary = args.get("result_summary", "")
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            completed_task, next_task = await queue_service.complete_task(result_summary)
+            
+            if not completed_task:
+                return {"error": "No task in progress to complete"}
+            
+            logger.info(f"[TASK_QUEUE] Completed '{completed_task.description}' in chat {chat_id}")
+            
+            result = {
+                "success": True,
+                "completed": completed_task.description,
+                "result_summary": result_summary or "Completed",
+            }
+            
+            if next_task:
+                result["next_task"] = {
+                    "description": next_task.description,
+                    "instructions": next_task.instructions,
+                }
+                result["message"] = f"Task completed. Now working on: {next_task.description}"
+            else:
+                status = await queue_service.get_queue_status()
+                result["queue_length"] = status["queue_length"]
+                result["message"] = "Task completed. No more tasks in queue." if status["queue_length"] == 0 else f"Task completed. {status['queue_length']} tasks remaining (paused or waiting)."
+            
+            return result
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error completing task: {e}")
+            return {"error": f"Failed to complete task: {str(e)}"}
+    
+    async def _fail_task_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Mark current task as failed"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        reason = args.get("reason", "")
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            failed_task = await queue_service.fail_task(reason)
+            
+            if not failed_task:
+                return {"error": "No task in progress to fail"}
+            
+            logger.info(f"[TASK_QUEUE] Failed '{failed_task.description}' in chat {chat_id}: {reason}")
+            
+            status = await queue_service.get_queue_status()
+            return {
+                "success": True,
+                "failed_task": failed_task.description,
+                "reason": reason or "Unspecified",
+                "queue_length": status["queue_length"],
+            }
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error failing task: {e}")
+            return {"error": f"Failed to mark task as failed: {str(e)}"}
+    
+    async def _skip_task_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Skip current task"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            skipped_task, next_task = await queue_service.skip_task()
+            
+            if not skipped_task:
+                return {"error": "No task in progress to skip"}
+            
+            logger.info(f"[TASK_QUEUE] Skipped '{skipped_task.description}' in chat {chat_id}")
+            
+            result = {
+                "success": True,
+                "skipped": skipped_task.description,
+            }
+            
+            if next_task:
+                result["next_task"] = next_task.description
+            else:
+                status = await queue_service.get_queue_status()
+                result["queue_length"] = status["queue_length"]
+            
+            return result
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error skipping task: {e}")
+            return {"error": f"Failed to skip task: {str(e)}"}
+    
+    async def _get_task_queue_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Get the current task queue status"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            status = await queue_service.get_queue_status()
+            
+            return status
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error getting queue: {e}")
+            return {"error": f"Failed to get queue: {str(e)}"}
+    
+    async def _clear_task_queue_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Clear all tasks from the queue"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            cleared = await queue_service.clear_queue()
+            
+            logger.info(f"[TASK_QUEUE] Cleared {cleared} tasks from chat {chat_id}")
+            
+            return {
+                "success": True,
+                "tasks_cleared": cleared,
+            }
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error clearing queue: {e}")
+            return {"error": f"Failed to clear queue: {str(e)}"}
+    
+    async def _pause_task_queue_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Pause task queue execution"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            await queue_service.pause_queue()
+            
+            status = await queue_service.get_queue_status()
+            logger.info(f"[TASK_QUEUE] Paused queue in chat {chat_id}")
+            
+            return {
+                "success": True,
+                "paused": True,
+                "queue_length": status["queue_length"],
+                "current_task": status["current_task"]["description"] if status["current_task"] else None,
+            }
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error pausing queue: {e}")
+            return {"error": f"Failed to pause queue: {str(e)}"}
+    
+    async def _resume_task_queue_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Resume task queue execution"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Missing context - task queue requires active chat"}
+        
+        try:
+            from app.services.task_queue import TaskQueueService
+            
+            db = context["db"]
+            chat_id = context["chat_id"]
+            
+            queue_service = TaskQueueService(db, chat_id)
+            next_task = await queue_service.resume_queue()
+            
+            status = await queue_service.get_queue_status()
+            logger.info(f"[TASK_QUEUE] Resumed queue in chat {chat_id}")
+            
+            result = {
+                "success": True,
+                "paused": False,
+                "queue_length": status["queue_length"],
+            }
+            
+            if next_task:
+                result["started_task"] = next_task.description
+            
+            return result
+        except Exception as e:
+            logger.error(f"[TASK_QUEUE] Error resuming queue: {e}")
+            return {"error": f"Failed to resume queue: {str(e)}"}
 
 
 # Session-based file store for uploaded files

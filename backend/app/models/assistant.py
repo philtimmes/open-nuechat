@@ -96,6 +96,10 @@ class CustomAssistant(Base):
     is_featured = Column(Boolean, default=False)  # Admin-featured
     category = Column(String(50), default="general")  # Category for filtering
     
+    # Assistant Mode (NC-0.8.0.0)
+    # Default mode preset for this assistant
+    mode_id = Column(String(36), ForeignKey("assistant_modes.id", ondelete="SET NULL"), nullable=True)
+    
     # Usage stats
     conversation_count = Column(Integer, default=0)
     message_count = Column(Integer, default=0)

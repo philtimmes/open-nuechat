@@ -1054,7 +1054,162 @@ async def reset_rag_model(user: User = Depends(get_current_user)) -> dict:
 
 ---
 
-## RAG Service (app/services/rag.py) (UPDATED NC-0.6.50)
+## Task Queue Service (app/services/task_queue.py) (NEW NC-0.7.17)
+
+```python
+# Agentic task queue for multi-step workflows
+# LLM manages task flow via tools - NO automatic verification calls
+# Queue persisted in Chat.metadata JSON column
+
+class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    PAUSED = "paused"
+
+class TaskSource(str, Enum):
+    USER = "user"
+    LLM = "llm"
+
+@dataclass
+class AgentTask:
+    id: str                          # UUID
+    description: str                 # Short description
+    instructions: str                # Detailed instructions (up to 512 tokens)
+    status: TaskStatus = QUEUED
+    auto_continue: bool = True       # Auto-start next task when complete
+    priority: int = 0                # Higher = more urgent
+    created_at: str                  # ISO datetime
+    completed_at: Optional[str]      # ISO datetime when completed
+    result_summary: Optional[str]    # Brief summary when completed
+    source: TaskSource = USER
+
+class TaskQueueService:
+    def __init__(self, db: AsyncSession, chat_id: str): ...
+    
+    async def add_task(description, instructions, source, auto_continue=True, priority=0) -> AgentTask
+        # Add task, auto-starts if queue not paused
+    
+    async def add_tasks_batch(tasks: List[Dict], source) -> List[AgentTask]
+        # Add multiple tasks with optional priority/auto_continue per task
+    
+    async def complete_task(result_summary: Optional[str]) -> Tuple[AgentTask, Optional[AgentTask]]
+        # Complete current task. Returns (completed, next_task_if_auto_continue)
+    
+    async def fail_task(reason: str) -> AgentTask
+        # Mark current task as failed (no auto-retry)
+    
+    async def skip_task() -> Tuple[AgentTask, Optional[AgentTask]]
+        # Skip current task, returns (skipped, next_task)
+    
+    async def pause_queue() -> None
+        # Pause auto-execution
+    
+    async def resume_queue() -> Optional[AgentTask]
+        # Resume, returns started task if any
+    
+    async def get_queue_status() -> Dict
+        # {queue_length, current_task, queued_tasks, completed_count, 
+        #  recent_completed, has_pending, paused}
+    
+    async def clear_queue() -> int
+        # Clear all tasks, return count
+    
+    def get_system_prompt_addition() -> str
+        # System prompt with current/queued/completed tasks
+
+def parse_tasks_from_llm_response(response: str) -> List[Dict]
+    # Parse tasks from JSON, XML, or markdown list format
+```
+
+### Tools (in tools/registry.py)
+
+```python
+add_task(description, instructions, priority=0, auto_continue=True)
+    # -> {success, task_id, status, queue_length, current_task}
+
+add_tasks_batch(tasks: [{description, instructions, priority?, auto_continue?}, ...])
+    # -> {success, tasks_added, descriptions, queue_length, current_task}
+
+complete_task(result_summary?: str)
+    # -> {success, completed, result_summary, next_task?, message}
+
+fail_task(reason?: str)
+    # -> {success, failed_task, reason, queue_length}
+
+skip_task()
+    # -> {success, skipped, next_task?, queue_length}
+
+get_task_queue()
+    # -> {queue_length, current_task, queued_tasks, completed_count, paused, ...}
+
+clear_task_queue()
+    # -> {success, tasks_cleared}
+
+pause_task_queue()
+    # -> {success, paused, queue_length, current_task}
+
+resume_task_queue()
+    # -> {success, paused, queue_length, started_task?}
+```
+
+---
+
+## RAG Service (app/services/rag.py) (UPDATED NC-0.7.16)
+
+### Hybrid Search (NEW NC-0.7.16)
+
+```python
+# Hybrid search combines semantic FAISS search with exact identifier matching.
+# This solves the problem of queries like "Rule 1S-2.053" failing because
+# semantic search doesn't match specific codes well.
+
+class RAGService:
+    def _normalize_text_for_matching(self, text: str) -> str:
+        # Normalize Unicode variants and range words for matching:
+        # - All dash variants (em dash, en dash, minus) → hyphen (-)
+        # - All quote variants (curly quotes) → straight quotes
+        # - Range words: "1 to 9" → "1-9", "5 through 10" → "5-10"
+        # Range conversion requires at least one side to have a digit
+        # Allows "1—9" in document to match "1 to 9" in query
+    
+    def _extract_identifiers(self, query: str) -> List[str]:
+        # Extract specific identifiers that should be searched exactly
+        # Normalizes query first, then extracts patterns:
+        # - Legal statutes: "1S-2.053", "768.28", "119.07(1)"
+        # - Rule references: "FAC 61G15-30", "Rule 12-345"
+        # - Section citations: "§ 119.07", "Section 768.28"
+        # - Case numbers: "2024-CF-001234"
+        # - Product codes: "ABC-123-XYZ"
+        # Returns list of identifier strings found in query
+    
+    async def _identifier_search(
+        self,
+        db: AsyncSession,
+        identifiers: List[str],
+        knowledge_store_ids: Optional[List[str]] = None,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        # Search for chunks containing specific identifiers using substring matching
+        # Normalizes chunk content before comparison (handles Unicode dashes)
+        # Scores based on: word boundary match (1.0) vs substring match (0.8)
+        # Returns results with _match_type="identifier" and _matched_identifiers list
+    
+    def _merge_search_results(
+        self,
+        semantic_results: List[Dict[str, Any]],
+        identifier_results: List[Dict[str, Any]],
+        semantic_threshold: float = 0.7,
+        identifier_boost: float = 0.15,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        # Merge semantic and identifier results
+        # - Identifier matches get +0.15 score boost
+        # - Chunks found by both methods use higher score
+        # - Identifier-only matches included even if below semantic threshold
+        # Returns merged results sorted by score
+```
 
 ### Model Loading Fix
 
@@ -1156,6 +1311,225 @@ class FileViewingTools:
 
 ---
 
+## NC-0.8.0.0 - Dynamic Tools & Assistant Modes
+
+### Overview
+
+Major architecture change: RAG and tools become **composable via filter chains** instead of hardcoded. Only Global KB remains always-on (invisible guardrails).
+
+### New Database Models
+
+#### AssistantMode (app/models/assistant_mode.py)
+
+```python
+class AssistantMode(Base):
+    __tablename__ = "assistant_modes"
+    
+    id = Column(String(36), primary_key=True)
+    name = Column(String(100), nullable=False)       # "Creative Writing"
+    description = Column(Text)
+    icon = Column(String(500))                       # Path to SVG
+    
+    active_tools = Column(JSON)                      # ["web_search", "artifacts"]
+    advertised_tools = Column(JSON)                  # ["web_search"]
+    
+    filter_chain_id = Column(String(36), ForeignKey("filter_chains.id"))
+    
+    sort_order = Column(Integer, default=0)
+    enabled = Column(Boolean, default=True)
+    is_global = Column(Boolean, default=True)
+    created_by = Column(String(36))
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+```
+
+#### Schema Changes
+
+```sql
+-- New table
+CREATE TABLE assistant_modes (
+    id UUID PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    icon VARCHAR(500),
+    active_tools JSON,
+    advertised_tools JSON,
+    filter_chain_id UUID REFERENCES filter_chains(id),
+    sort_order INTEGER DEFAULT 0,
+    enabled BOOLEAN DEFAULT TRUE,
+    is_global BOOLEAN DEFAULT TRUE,
+    created_by UUID,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+-- Modified tables
+ALTER TABLE custom_assistants ADD COLUMN mode_id UUID REFERENCES assistant_modes(id);
+ALTER TABLE chats ADD COLUMN mode_id UUID REFERENCES assistant_modes(id);
+ALTER TABLE chats ADD COLUMN active_tools JSON;
+```
+
+### New Filter Chain Primitives (app/filters/executor.py)
+
+#### RAG Evaluators
+
+```python
+async def _prim_local_rag(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+    """Search user's uploaded documents for current chat."""
+    # config: query_var, output_var, top_k, threshold
+
+async def _prim_kb_rag(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+    """Search current assistant's knowledge base."""
+    # config: query_var, output_var, top_k, threshold
+
+async def _prim_global_kb(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+    """Search global knowledge bases (always active, no icon)."""
+    # config: query_var, output_var, top_k, threshold, kb_ids (optional)
+
+async def _prim_user_chats_kb(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+    """Search user's chat history knowledge base."""
+    # config: query_var, output_var, top_k, threshold
+```
+
+#### Dynamic Tool Nodes
+
+```python
+async def _prim_export_tool(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+    """Register LLM-triggered tool ($WebSearch="...")."""
+    # config:
+    #   name: str                    # "WebSearch"
+    #   trigger_pattern: str         # r'\$WebSearch="([^"]+)"'
+    #   advertise: bool              # Include in system prompt
+    #   advertise_text: str          # "Use $WebSearch=..."
+    #   erase_from_display: bool     # Hide trigger from UI
+    #   keep_in_history: bool        # Preserve in message.content
+    #   on_trigger: List[dict]       # Mini filter chain steps
+
+async def _prim_user_hint(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+    """Text selection popup menu item."""
+    # config:
+    #   label: str                   # "Explain"
+    #   icon: str                    # Path to SVG
+    #   location: str                # "response" | "query" | "both"
+    #   prompt: str                  # "Explain: {$Selected}"
+    #   on_trigger: List[dict]       # Optional complex flow
+
+async def _prim_user_action(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+    """Button below chat messages."""
+    # config:
+    #   label: str                   # "Search"
+    #   icon: str                    # Path to SVG
+    #   position: str                # "response" | "query" | "input"
+    #   prompt: str                  # "Search: {$MessageContent}"
+    #   on_trigger: List[dict]       # Optional complex flow
+```
+
+### ExecutionContext Enhancement
+
+```python
+@dataclass
+class ExecutionContext:
+    # ... existing fields ...
+    
+    # Content source flags (NEW)
+    from_llm: bool = False    # True when processing LLM output
+    from_user: bool = False   # True when processing user input
+```
+
+### Special Variables
+
+| Variable | Context | Description |
+|----------|---------|-------------|
+| `$Selected` | user_hint | User's selected text |
+| `$MessageContent` | user_action | Full message content |
+| `$MessageId` | user_hint, user_action | Message ID |
+| `$MessageRole` | user_hint, user_action | "user" or "assistant" |
+| `$1`, `$2`, etc. | export_tool | Regex capture groups |
+| `$Query` | all | Original user query |
+| `$Var[name]` | all | Named variable |
+| `$PreviousResult` | all | Last step output |
+
+### WebSocket Events (NEW)
+
+```python
+# Server -> Client: Tools available for this chat
+class WSDynamicTools(BaseModel):
+    type: Literal["dynamic_tools"]
+    payload: {
+        chat_id: str,
+        tools: List[{
+            name: str,
+            label: str,
+            icon: str,
+            location: str,           # "response" | "query" | "both"
+            trigger_source: str      # "llm" | "user" | "both"
+        }]
+    }
+
+# Client -> Server: User triggered a tool
+class WSTriggerTool(BaseModel):
+    type: Literal["trigger_tool"]
+    payload: {
+        chat_id: str,
+        tool_name: str,
+        selected_text: str,
+        message_id: str
+    }
+```
+
+### API Endpoints (NEW)
+
+```python
+# Assistant Modes
+GET    /api/assistant-modes              # List all modes
+POST   /api/assistant-modes              # Create mode (admin)
+GET    /api/assistant-modes/{id}         # Get mode
+PUT    /api/assistant-modes/{id}         # Update mode (admin)
+DELETE /api/assistant-modes/{id}         # Delete mode (admin)
+
+# Chat tools
+GET    /api/chats/{id}/tools             # Get active tools for chat
+PUT    /api/chats/{id}/tools             # Update active tools
+PUT    /api/chats/{id}/mode              # Change chat mode
+```
+
+### Tool Categories
+
+```python
+class ToolCategory(Enum):
+    ALWAYS_ACTIVE = "always"       # Global KB (no icon, invisible)
+    MODE_CONTROLLED = "mode"       # Web, artifacts, images
+    USER_TOGGLEABLE = "toggle"     # User can enable/disable
+```
+
+### Active Tools Bar UI
+
+- Line-based SVG icons (admin uploadable)
+- **Active**: Glow effect (brighter, same hue as background)
+- **Inactive**: No glow (muted but visible)
+- **Hover**: Subtle brightness increase + tooltip
+- Global KB has **no icon** (always active, invisible)
+
+### Default Assistant Modes
+
+| Mode | Active Tools | Advertised |
+|------|--------------|------------|
+| Creative Writing | None | None |
+| Coding | artifacts, file_ops, code_exec | artifacts, file_ops |
+| Deep Research | web_search, citations | web_search |
+| General | web_search, artifacts | None |
+
+### Removed (from websocket.py)
+
+| Removed | Replacement |
+|---------|-------------|
+| Hardcoded Global KB search | `global_kb` primitive (always active, invisible) |
+| Hardcoded User Chats KB search | `user_chats_kb` primitive (mode-controlled) |
+| Hardcoded Assistant KB search | `kb_rag` primitive (mode-controlled) |
+| Hardcoded Local Docs search | `local_rag` primitive (mode-controlled) |
+
+---
+
 ## Microservice Signatures
 
 ### TTS Service (tts-service/main.py)
@@ -1202,9 +1576,12 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ## Current Schema Version
 
-**NC-0.7.15**
+**NC-0.8.0.0**
 
 Changes:
+- NC-0.8.0.0: **Dynamic Tools & Assistant Modes** - Major architecture change. See dedicated section below.
+- NC-0.7.17: **Agentic Task Queue** - FIFO task queue for multi-step workflows. New service `task_queue.py` with `TaskQueueService`, tools (`add_task`, `add_tasks_batch`, `get_task_queue`, `clear_task_queue`), WebSocket `task_log` events, `chats.chat_metadata` column for queue storage
+- NC-0.7.16: **Hybrid RAG search** - combines semantic FAISS search with exact identifier matching for legal statutes, rule references, case numbers, and product codes. New methods: `_extract_identifiers()`, `_identifier_search()`, `_merge_search_results()`
 - NC-0.7.15: **Source-specific RAG prompts** (global KB, GPT KB, user docs, chat history), **keyword_check filter node** for quick chain exit, **search_documents tool enhancement** to search all sources, **Admin panel partial refactor** (types.ts, SystemTab, OAuthTab, FeaturesTab, CategoriesTab), **Admin panel scroll fix**, **SQLAlchemy cartesian product warning fix**
 - NC-0.7.14: **Migration system fix** - always checks all migrations regardless of stored version, individually validates each change
 - NC-0.7.13: **RAG context-aware query enhancement** - follow-up questions use conversation context for better search results

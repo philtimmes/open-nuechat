@@ -21,6 +21,7 @@ class FilterChain(Base):
     - Complex conditionals
     - Loops
     - Chain composition
+    - Export as dynamic tool
     """
     __tablename__ = "filter_chains"
     
@@ -41,6 +42,33 @@ class FilterChain(Base):
     max_iterations = Column(Integer, default=10, nullable=False)  # Safety limit for loops
     debug = Column(Boolean, default=False, nullable=False)  # Log execution to console
     skip_if_rag_hit = Column(Boolean, default=True, nullable=False)  # Skip chain if RAG found results
+    
+    # Export as Dynamic Tool (NC-0.8.0.0)
+    # When enabled, this filter chain becomes a tool that can be advertised to the LLM
+    export_as_tool = Column(Boolean, default=False, nullable=False)  # Enable tool export
+    tool_name = Column(String(100), nullable=True)  # Tool identifier (e.g., "WebSearch")
+    tool_label = Column(String(100), nullable=True)  # Display label (e.g., "🔍 Search Web")
+    
+    # Advertising to LLM
+    advertise_to_llm = Column(Boolean, default=False, nullable=False)  # Include in system prompt
+    advertise_text = Column(Text, nullable=True)  # e.g., "Use $WebSearch=\"query\" to search"
+    
+    # Triggering
+    trigger_pattern = Column(String(500), nullable=True)  # Regex pattern e.g., r'\$WebSearch="([^"]+)"'
+    trigger_source = Column(String(20), default='both', nullable=False)  # 'llm', 'user', 'both'
+    
+    # Display behavior
+    erase_from_display = Column(Boolean, default=True, nullable=False)  # Hide trigger from chat UI
+    keep_in_history = Column(Boolean, default=True, nullable=False)  # Preserve in message history
+    
+    # UI Button (for user hints)
+    button_enabled = Column(Boolean, default=False, nullable=False)
+    button_icon = Column(String(50), nullable=True)  # Emoji or icon name
+    button_location = Column(String(20), default='response', nullable=False)  # 'response', 'query', 'both'
+    button_trigger_mode = Column(String(20), default='immediate', nullable=False)  # 'immediate', 'modal', 'selection'
+    
+    # Variables that this tool accepts (JSON array of {name, label, default, type})
+    tool_variables = Column(JSON, nullable=True, default=list)
     
     # The chain definition (JSON)
     # Structure: {"steps": [...], "variables": [...]}
@@ -66,6 +94,22 @@ class FilterChain(Base):
             "max_iterations": self.max_iterations,
             "debug": self.debug,
             "skip_if_rag_hit": self.skip_if_rag_hit,
+            # Export as tool fields
+            "export_as_tool": self.export_as_tool,
+            "tool_name": self.tool_name,
+            "tool_label": self.tool_label,
+            "advertise_to_llm": self.advertise_to_llm,
+            "advertise_text": self.advertise_text,
+            "trigger_pattern": self.trigger_pattern,
+            "trigger_source": self.trigger_source,
+            "erase_from_display": self.erase_from_display,
+            "keep_in_history": self.keep_in_history,
+            "button_enabled": self.button_enabled,
+            "button_icon": self.button_icon,
+            "button_location": self.button_location,
+            "button_trigger_mode": self.button_trigger_mode,
+            "tool_variables": self.tool_variables,
+            # Definition and metadata
             "definition": self.definition,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

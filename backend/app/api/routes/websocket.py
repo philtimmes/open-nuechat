@@ -21,6 +21,7 @@ from app.services.billing import BillingService
 from app.services.procedural_memory import ProceduralMemoryService, get_procedural_context
 from app.services.tool_service import ToolService
 from app.services.image_gen import detect_image_request, detect_image_request_async
+from app.services.task_queue import TaskQueueService
 from app.tools.registry import tool_registry, store_session_file
 from app.models.models import User, Chat, Message, MessageRole, ContentType, AssistantConversation, CustomAssistant
 from app.core.config import settings
@@ -128,7 +129,9 @@ async def websocket_endpoint(
             elif msg_type == "chat_message":
                 save_msg = payload.get("save_user_message", True)
                 content_len = len(payload.get("content", ""))
-                logger.info(f"chat_message: chat={payload.get('chat_id')}, content_len={content_len}, save={save_msg}")
+                # Debug: log if save_user_message was explicitly in payload
+                has_save_key = "save_user_message" in payload
+                logger.info(f"chat_message: chat={payload.get('chat_id')}, content_len={content_len}, save={save_msg}, explicit_in_payload={has_save_key}")
                 
                 # Debug: log first and last 100 chars to verify content integrity
                 content = payload.get("content", "")
@@ -228,6 +231,9 @@ async def handle_chat_message(
     
     chat_id = payload.get("chat_id")
     content = payload.get("content", "")
+    
+    # Debug: log payload keys and save_user_message sources
+    logger.info(f"[PAYLOAD_DEBUG] keys={list(payload.keys())}, 'save_user_message' in payload={'save_user_message' in payload}, func_param={save_user_message}")
     
     logger.info(f"[CONTENT_TRACE] handle_chat_message entry: content='{content[:50] if content else 'EMPTY'}...' len={len(content)}, save_user_message={save_user_message}")
     
@@ -595,9 +601,10 @@ async def handle_chat_message(
         rag_had_results = False
         import time
         
-        # Skip RAG for tool result continuations (save_user_message=False)
-        # These are system-generated responses that don't need knowledge retrieval
-        is_tool_result = not save_user_message
+        # Skip RAG only for actual tool result continuations (system-generated responses)
+        # NOT for regenerations - those are real user queries that need knowledge context
+        # Tool results are identified by their content prefix, not by save_user_message flag
+        is_tool_result = content.startswith("[SYSTEM TOOL RESULT") or content.startswith("[SYSTEM NOTIFICATION")
         
         # 1. Global Knowledge Base search (automatic, independent of user RAG settings)
         # Skip for tool results to avoid unnecessary searches and potential GPU issues
@@ -980,6 +987,20 @@ The following is relevant information from your previous conversations:
             except Exception as e:
                 logger.warning(f"Failed to get procedural memory context: {e}")
         
+        # Inject Task Queue context (pending tasks for agentic execution)
+        # Only include capability notice if tools are enabled
+        try:
+            task_queue = TaskQueueService(db, chat_id)
+            await task_queue._load_queue()  # Ensure queue is loaded
+            task_context = task_queue.get_system_prompt_addition(
+                include_capability_notice=enable_tools  # Only show capability if tools enabled
+            )
+            if task_context:
+                system_prompt = f"{system_prompt}\n\n{task_context}"
+                logger.debug(f"[TASK_QUEUE] Injected task queue context for chat {chat_id}")
+        except Exception as e:
+            logger.debug(f"[TASK_QUEUE] Could not get task queue context: {e}")
+        
         # Inject zip manifest if provided in payload (preferred) or from DB (fallback)
         zip_context = payload.get("zip_context")
         if zip_context:
@@ -1295,6 +1316,34 @@ The following is relevant information from your previous conversations:
                     logger.debug(f"Queued skill learning from chat {chat_id}")
             except Exception as skill_err:
                 logger.debug(f"Skill learning skipped: {skill_err}")
+        
+        # ==== AGENTIC TASK QUEUE STATUS ====
+        # Send queue status update to frontend after each response
+        # LLM manages its own task flow via tools (complete_task, fail_task, etc.)
+        try:
+            task_queue = TaskQueueService(db, chat_id)
+            queue_status = await task_queue.get_queue_status()
+            
+            if queue_status["has_pending"] or queue_status["completed_count"] > 0:
+                # Send status update to frontend
+                await ws_manager.send_to_connection(connection, {
+                    "type": "task_queue_status",
+                    "payload": {
+                        "chat_id": chat_id,
+                        "queue_length": queue_status["queue_length"],
+                        "current_task": queue_status["current_task"],
+                        "paused": queue_status["paused"],
+                        "completed_count": queue_status["completed_count"],
+                    },
+                })
+                
+                # Archive log if getting large
+                await task_queue.archive_log_overflow()
+                
+        except Exception as task_err:
+            logger.debug(f"[TASK_QUEUE] Status update skipped: {task_err}")
+        except Exception as task_err:
+            logger.warning(f"[TASK_QUEUE] Task processing error: {task_err}")
         
         # Auto-generate title using LLM
         # Check current title with direct SQL

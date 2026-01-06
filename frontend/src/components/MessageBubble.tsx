@@ -1,10 +1,11 @@
-import React, { useState, memo } from 'react';
-import type { Message, Artifact, GeneratedImage } from '../types';
+import React, { useState, memo, useRef } from 'react';
+import type { Message, Artifact, GeneratedImage, UserHint } from '../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import GeneratedImageCard from './GeneratedImageCard';
+import TextSelectionBubble from './TextSelectionBubble';
 
 // Tool citation data
 interface ToolCitation {
@@ -216,6 +217,8 @@ interface MessageProps {
   onBranchChange?: (branchIndex: number) => void;
   assistantName?: string;
   versionInfo?: VersionInfo;
+  // NC-0.8.0.0: Text selection hint handler
+  onHintSelect?: (hint: UserHint, selectedText: string) => void;
 }
 
 // Memoized message comparison - only re-render if content actually changed
@@ -254,6 +257,9 @@ function arePropsEqual(prevProps: MessageProps, nextProps: MessageProps): boolea
   if (prevProps.versionInfo?.current !== nextProps.versionInfo?.current) return false;
   if (prevProps.versionInfo?.total !== nextProps.versionInfo?.total) return false;
   
+  // Check hint handler (NC-0.8.0.0)
+  if (prevProps.onHintSelect !== nextProps.onHintSelect) return false;
+  
   return true;
 }
 
@@ -275,12 +281,16 @@ function MessageBubbleInner({
   onBranchChange,
   assistantName,
   versionInfo,
+  onHintSelect,
 }: MessageProps) {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  
+  // Ref for text selection bubble
+  const contentRef = useRef<HTMLDivElement>(null);
   
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
@@ -554,8 +564,16 @@ function MessageBubbleInner({
               <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
             </div>
           ) : (
-            // After streaming complete: full markdown rendering
-            <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)]">
+            // After streaming complete: full markdown rendering with text selection support
+            <div ref={contentRef} className="relative prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)]">
+              {/* Text Selection Bubble - NC-0.8.0.0 */}
+              {onHintSelect && (
+                <TextSelectionBubble
+                  containerRef={contentRef}
+                  messageRole={message.role as 'user' | 'assistant'}
+                  onHintSelect={onHintSelect}
+                />
+              )}
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{

@@ -10,15 +10,232 @@ Manages filter chains:
 
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, text
 from datetime import datetime, timezone
 import logging
 import asyncio
+import json
 
 from app.models.filter_chain import FilterChain as FilterChainModel
 from app.filters.executor import ChainExecutor, ExecutionResult
 
 logger = logging.getLogger(__name__)
+
+
+# Flag to track if new columns exist in database
+_new_columns_exist: Optional[bool] = None
+
+
+def reset_column_cache():
+    """Reset the column existence cache (call after migrations)."""
+    global _new_columns_exist
+    _new_columns_exist = None
+
+
+async def _check_new_columns_exist(db: AsyncSession) -> bool:
+    """Check if the new export_as_tool columns exist in the database."""
+    global _new_columns_exist
+    if _new_columns_exist is not None:
+        return _new_columns_exist
+    
+    try:
+        result = await db.execute(text("PRAGMA table_info(filter_chains)"))
+        columns = [row[1] for row in result.fetchall()]
+        _new_columns_exist = "export_as_tool" in columns
+        logger.info(f"Column check: export_as_tool exists = {_new_columns_exist}, columns = {columns}")
+        return _new_columns_exist
+    except Exception as e:
+        logger.error(f"Column check failed: {e}")
+        _new_columns_exist = False
+        return False
+
+
+def _make_chain_dict_from_row(row, has_new_columns: bool) -> dict:
+    """Create a chain dict from a raw SQL row."""
+    if has_new_columns:
+        # Full schema with new columns
+        raw_definition = row[25]  # definition is at index 25
+        logger.debug(f"Raw definition (new schema): type={type(raw_definition)}, value={repr(raw_definition)[:200]}")
+        
+        if isinstance(raw_definition, str):
+            try:
+                definition = json.loads(raw_definition)
+            except Exception as e:
+                logger.error(f"Failed to parse definition JSON: {e}")
+                definition = {"steps": [], "_parse_error": str(e)}
+        elif isinstance(raw_definition, dict):
+            definition = raw_definition
+        else:
+            logger.warning(f"Definition is not str or dict: {type(raw_definition)}")
+            definition = {"steps": []}
+            
+        tool_variables = row[24]  # tool_variables is at index 24
+        if isinstance(tool_variables, str):
+            try:
+                tool_variables = json.loads(tool_variables)
+            except:
+                tool_variables = []
+        elif not isinstance(tool_variables, list):
+            tool_variables = []
+        
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "enabled": bool(row[3]),
+            "priority": row[4],
+            "retain_history": bool(row[5]),
+            "bidirectional": bool(row[6]),
+            "outbound_chain_id": row[7],
+            "max_iterations": row[8],
+            "debug": bool(row[9]),
+            "skip_if_rag_hit": bool(row[10]),
+            "export_as_tool": bool(row[11]),
+            "tool_name": row[12],
+            "tool_label": row[13],
+            "advertise_to_llm": bool(row[14]),
+            "advertise_text": row[15],
+            "trigger_pattern": row[16],
+            "trigger_source": row[17] or "both",
+            "erase_from_display": bool(row[18]) if row[18] is not None else True,
+            "keep_in_history": bool(row[19]) if row[19] is not None else True,
+            "button_enabled": bool(row[20]),
+            "button_icon": row[21],
+            "button_location": row[22] or "response",
+            "button_trigger_mode": row[23] or "immediate",
+            "tool_variables": tool_variables,
+            "definition": definition,
+            "created_at": row[26],
+            "updated_at": row[27],
+            "created_by": row[28],
+        }
+    else:
+        # Old schema without new columns
+        # Column order: id(0), name(1), description(2), enabled(3), priority(4),
+        # retain_history(5), bidirectional(6), outbound_chain_id(7), max_iterations(8),
+        # definition(9), created_at(10), updated_at(11), created_by(12), debug(13), skip_if_rag_hit(14)
+        raw_definition = row[9]  # definition is at index 9
+        logger.debug(f"Raw definition (old schema): type={type(raw_definition)}, value={repr(raw_definition)[:200]}")
+        
+        if isinstance(raw_definition, str):
+            try:
+                definition = json.loads(raw_definition)
+            except Exception as e:
+                logger.error(f"Failed to parse definition JSON: {e}")
+                definition = {"steps": [], "_parse_error": str(e)}
+        elif isinstance(raw_definition, dict):
+            definition = raw_definition
+        else:
+            logger.warning(f"Definition is not str or dict: {type(raw_definition)}")
+            definition = {"steps": []}
+        
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "enabled": bool(row[3]),
+            "priority": row[4],
+            "retain_history": bool(row[5]),
+            "bidirectional": bool(row[6]),
+            "outbound_chain_id": row[7],
+            "max_iterations": row[8],
+            "debug": bool(row[13]) if row[13] is not None else False,
+            "skip_if_rag_hit": bool(row[14]) if row[14] is not None else True,
+            "definition": definition,
+            "created_at": row[10],
+            "updated_at": row[11],
+            "created_by": row[12],
+            # Default values for new fields
+            "export_as_tool": False,
+            "tool_name": None,
+            "tool_label": None,
+            "advertise_to_llm": False,
+            "advertise_text": None,
+            "trigger_pattern": None,
+            "trigger_source": "both",
+            "erase_from_display": True,
+            "keep_in_history": True,
+            "button_enabled": False,
+            "button_icon": None,
+            "button_location": "response",
+            "button_trigger_mode": "immediate",
+            "tool_variables": [],
+        }
+
+
+async def _safe_query_all_chains(db: AsyncSession) -> List[dict]:
+    """Query all filter chains safely, handling missing columns."""
+    has_new = await _check_new_columns_exist(db)
+    logger.info(f"_safe_query_all_chains: has_new_columns = {has_new}")
+    
+    if has_new:
+        sql = """
+            SELECT id, name, description, enabled, priority, retain_history,
+                   bidirectional, outbound_chain_id, max_iterations, debug,
+                   skip_if_rag_hit, export_as_tool, tool_name, tool_label,
+                   advertise_to_llm, advertise_text, trigger_pattern, trigger_source,
+                   erase_from_display, keep_in_history, button_enabled, button_icon,
+                   button_location, button_trigger_mode, tool_variables, definition,
+                   created_at, updated_at, created_by
+            FROM filter_chains
+        """
+    else:
+        # Query columns in the order they actually exist in the old schema
+        # Based on PRAGMA table_info: id, name, description, enabled, priority,
+        # retain_history, bidirectional, outbound_chain_id, max_iterations,
+        # definition, created_at, updated_at, created_by, debug, skip_if_rag_hit
+        sql = """
+            SELECT id, name, description, enabled, priority, retain_history,
+                   bidirectional, outbound_chain_id, max_iterations, definition,
+                   created_at, updated_at, created_by, debug, skip_if_rag_hit
+            FROM filter_chains
+        """
+    
+    logger.debug(f"Executing SQL: {sql.strip()}")
+    result = await db.execute(text(sql))
+    rows = result.fetchall()
+    logger.info(f"Query returned {len(rows)} rows")
+    
+    chains = []
+    for i, row in enumerate(rows):
+        try:
+            chain_dict = _make_chain_dict_from_row(row, has_new)
+            chains.append(chain_dict)
+        except Exception as e:
+            logger.error(f"Failed to parse row {i}: {e}, row data: {row}")
+    
+    return chains
+
+
+async def _safe_query_chain_by_id(db: AsyncSession, chain_id: str) -> Optional[dict]:
+    """Query a single filter chain by ID safely, handling missing columns."""
+    has_new = await _check_new_columns_exist(db)
+    
+    if has_new:
+        sql = """
+            SELECT id, name, description, enabled, priority, retain_history,
+                   bidirectional, outbound_chain_id, max_iterations, debug,
+                   skip_if_rag_hit, export_as_tool, tool_name, tool_label,
+                   advertise_to_llm, advertise_text, trigger_pattern, trigger_source,
+                   erase_from_display, keep_in_history, button_enabled, button_icon,
+                   button_location, button_trigger_mode, tool_variables, definition,
+                   created_at, updated_at, created_by
+            FROM filter_chains WHERE id = :chain_id
+        """
+    else:
+        # Query columns in the order they actually exist in the old schema
+        sql = """
+            SELECT id, name, description, enabled, priority, retain_history,
+                   bidirectional, outbound_chain_id, max_iterations, definition,
+                   created_at, updated_at, created_by, debug, skip_if_rag_hit
+            FROM filter_chains WHERE id = :chain_id
+        """
+    
+    result = await db.execute(text(sql), {"chain_id": chain_id})
+    row = result.fetchone()
+    if row:
+        return _make_chain_dict_from_row(row, has_new)
+    return None
 
 
 # Type aliases
@@ -101,21 +318,34 @@ class ChainManager:
         Returns number of chains loaded.
         """
         async with self._lock:
-            result = await db.execute(select(FilterChainModel))
-            chains = result.scalars().all()
-            
-            self._chains.clear()
-            self._name_to_id.clear()
-            
-            for chain in chains:
-                chain_dict = chain.to_dict()
-                self._chains[chain.id] = chain_dict
-                self._name_to_id[chain.name] = chain.id
-            
-            self._rebuild_sorted_list()
-            
-            logger.info(f"Loaded {len(self._chains)} filter chains into memory")
-            return len(self._chains)
+            try:
+                # First check if table exists and has data
+                try:
+                    count_result = await db.execute(text("SELECT COUNT(*) FROM filter_chains"))
+                    row_count = count_result.scalar()
+                    logger.info(f"filter_chains table has {row_count} rows")
+                except Exception as ce:
+                    logger.error(f"Could not count filter_chains: {ce}")
+                    row_count = 0
+                
+                chains = await _safe_query_all_chains(db)
+                logger.info(f"_safe_query_all_chains returned {len(chains)} chains")
+                
+                self._chains.clear()
+                self._name_to_id.clear()
+                
+                for chain_dict in chains:
+                    self._chains[chain_dict["id"]] = chain_dict
+                    self._name_to_id[chain_dict["name"]] = chain_dict["id"]
+                    logger.debug(f"Loaded chain: {chain_dict['name']} (id={chain_dict['id']})")
+                
+                self._rebuild_sorted_list()
+                
+                logger.info(f"Loaded {len(self._chains)} filter chains into memory")
+                return len(self._chains)
+            except Exception as e:
+                logger.error(f"Failed to load filter chains: {e}", exc_info=True)
+                return 0
     
     def _rebuild_sorted_list(self):
         """Rebuild the sorted list of enabled chain IDs."""
@@ -129,26 +359,21 @@ class ChainManager:
     async def reload_chain(self, db: AsyncSession, chain_id: str) -> bool:
         """Reload a specific chain from database."""
         async with self._lock:
-            result = await db.execute(
-                select(FilterChainModel).where(FilterChainModel.id == chain_id)
-            )
-            chain = result.scalar_one_or_none()
+            chain_dict = await _safe_query_chain_by_id(db, chain_id)
             
-            if chain:
-                chain_dict = chain.to_dict()
-                
+            if chain_dict:
                 # Remove old name mapping if name changed
                 old_chain = self._chains.get(chain_id)
-                if old_chain and old_chain.get("name") != chain.name:
+                if old_chain and old_chain.get("name") != chain_dict["name"]:
                     old_name = old_chain.get("name")
                     if old_name in self._name_to_id:
                         del self._name_to_id[old_name]
                 
                 self._chains[chain_id] = chain_dict
-                self._name_to_id[chain.name] = chain_id
+                self._name_to_id[chain_dict["name"]] = chain_id
                 self._rebuild_sorted_list()
                 
-                logger.info(f"Reloaded chain: {chain.name}")
+                logger.info(f"Reloaded chain: {chain_dict['name']}")
                 return True
             else:
                 # Chain was deleted
@@ -240,56 +465,107 @@ class ChainManager:
     ) -> Optional[dict]:
         """Update a chain."""
         
-        result = await db.execute(
-            select(FilterChainModel).where(FilterChainModel.id == chain_id)
-        )
-        chain = result.scalar_one_or_none()
+        # SAFETY: Never allow updating definition to empty
+        if "definition" in updates:
+            def_value = updates["definition"]
+            if def_value is None or def_value == {} or def_value == {"steps": []}:
+                # Check if this would wipe existing data
+                existing = await _safe_query_chain_by_id(db, chain_id)
+                if existing and existing.get("definition", {}).get("steps"):
+                    logger.warning(f"Blocked attempt to wipe definition for chain {chain_id}")
+                    del updates["definition"]  # Remove the dangerous update
         
-        if not chain:
-            return None
+        # First check if new columns exist - if so, use ORM, otherwise use raw SQL
+        has_new = await _check_new_columns_exist(db)
         
-        # Track name change
-        old_name = chain.name
+        if has_new:
+            # Use ORM when schema is up to date
+            result = await db.execute(
+                select(FilterChainModel).where(FilterChainModel.id == chain_id)
+            )
+            chain = result.scalar_one_or_none()
+            
+            if not chain:
+                return None
+            
+            # Track name change
+            old_name = chain.name
+            
+            # Apply updates
+            for key, value in updates.items():
+                if hasattr(chain, key):
+                    setattr(chain, key, value)
+            
+            chain.updated_at = datetime.now(timezone.utc)
+            
+            await db.commit()
+            await db.refresh(chain)
+            
+            # Update cache
+            chain_dict = chain.to_dict()
+        else:
+            # Use raw SQL when schema doesn't have new columns yet
+            # First verify chain exists
+            existing = await _safe_query_chain_by_id(db, chain_id)
+            if not existing:
+                return None
+            
+            old_name = existing["name"]
+            
+            # Build UPDATE statement for old schema columns only
+            allowed_cols = {"name", "description", "enabled", "priority", "retain_history",
+                          "bidirectional", "outbound_chain_id", "max_iterations", "debug",
+                          "skip_if_rag_hit", "definition"}
+            set_parts = []
+            params = {"chain_id": chain_id}
+            
+            for key, value in updates.items():
+                if key in allowed_cols:
+                    if key == "definition" and isinstance(value, dict):
+                        value = json.dumps(value)
+                    set_parts.append(f"{key} = :{key}")
+                    params[key] = value
+            
+            if set_parts:
+                set_parts.append("updated_at = :updated_at")
+                params["updated_at"] = datetime.now(timezone.utc).isoformat()
+                
+                sql = f"UPDATE filter_chains SET {', '.join(set_parts)} WHERE id = :chain_id"
+                await db.execute(text(sql), params)
+                await db.commit()
+            
+            # Refresh from DB
+            chain_dict = await _safe_query_chain_by_id(db, chain_id)
+            if not chain_dict:
+                return None
         
-        # Apply updates
-        for key, value in updates.items():
-            if hasattr(chain, key):
-                setattr(chain, key, value)
-        
-        chain.updated_at = datetime.now(timezone.utc)
-        
-        await db.commit()
-        await db.refresh(chain)
-        
-        # Update cache
-        chain_dict = chain.to_dict()
         async with self._lock:
             # Handle name change
-            if old_name != chain.name and old_name in self._name_to_id:
+            if old_name != chain_dict["name"] and old_name in self._name_to_id:
                 del self._name_to_id[old_name]
             
-            self._chains[chain.id] = chain_dict
-            self._name_to_id[chain.name] = chain.id
+            self._chains[chain_dict["id"]] = chain_dict
+            self._name_to_id[chain_dict["name"]] = chain_dict["id"]
             self._rebuild_sorted_list()
         
-        logger.info(f"Updated filter chain: {chain.name}")
+        logger.info(f"Updated filter chain: {chain_dict['name']}")
         return chain_dict
     
     async def delete_chain(self, db: AsyncSession, chain_id: str) -> bool:
         """Delete a chain."""
         
-        result = await db.execute(
-            select(FilterChainModel).where(FilterChainModel.id == chain_id)
-        )
-        chain = result.scalar_one_or_none()
+        # Get chain info for cache cleanup
+        chain_dict = await _safe_query_chain_by_id(db, chain_id)
         
-        if not chain:
+        if not chain_dict:
             return False
         
-        name = chain.name
+        name = chain_dict["name"]
         
+        # Delete using raw SQL (works regardless of schema)
         await db.execute(
-            delete(FilterChainModel).where(FilterChainModel.id == chain_id)
+            text("DELETE FROM filter_chains WHERE id = :chain_id"),
+            {"chain_id": chain_id}
         )
         await db.commit()
         

@@ -864,7 +864,7 @@ async def delete_message(
                     Message.id.not_in(ids_to_delete)
                 ).order_by(Message.created_at.desc())
             )
-            sibling = result.scalar_one_or_none()
+            sibling = result.scalars().first()
             
             if sibling:
                 # Select the most recent remaining sibling
@@ -1953,4 +1953,104 @@ async def import_chats(
         total_imported=total_imported,
         total_failed=total_failed,
         results=results
+    )
+
+
+# =============================================================================
+# CHAT TOOLS ENDPOINTS (NC-0.8.0.0)
+# =============================================================================
+
+class ChatToolsResponse(BaseModel):
+    mode_id: Optional[str] = None
+    active_tools: Optional[List[str]] = None
+
+
+class UpdateToolsRequest(BaseModel):
+    active_tools: List[str]
+
+
+class UpdateModeRequest(BaseModel):
+    mode_id: str
+
+
+@router.get("/{chat_id}/tools", response_model=ChatToolsResponse)
+async def get_chat_tools(
+    chat_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get active tools for a chat."""
+    result = await db.execute(
+        select(Chat).where(Chat.id == chat_id, Chat.owner_id == user.id)
+    )
+    chat = result.scalar_one_or_none()
+    
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    
+    return ChatToolsResponse(
+        mode_id=chat.mode_id,
+        active_tools=chat.active_tools or []
+    )
+
+
+@router.put("/{chat_id}/tools", response_model=ChatToolsResponse)
+async def update_chat_tools(
+    chat_id: str,
+    request: UpdateToolsRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Update active tools for a chat (user overrides)."""
+    result = await db.execute(
+        select(Chat).where(Chat.id == chat_id, Chat.owner_id == user.id)
+    )
+    chat = result.scalar_one_or_none()
+    
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    
+    chat.active_tools = request.active_tools
+    await db.commit()
+    
+    return ChatToolsResponse(
+        mode_id=chat.mode_id,
+        active_tools=chat.active_tools or []
+    )
+
+
+@router.put("/{chat_id}/mode", response_model=ChatToolsResponse)
+async def update_chat_mode(
+    chat_id: str,
+    request: UpdateModeRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Update assistant mode for a chat."""
+    from app.models import AssistantMode
+    
+    result = await db.execute(
+        select(Chat).where(Chat.id == chat_id, Chat.owner_id == user.id)
+    )
+    chat = result.scalar_one_or_none()
+    
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    
+    # Verify mode exists
+    mode_result = await db.execute(
+        select(AssistantMode).where(AssistantMode.id == request.mode_id)
+    )
+    mode = mode_result.scalar_one_or_none()
+    
+    if not mode:
+        raise HTTPException(status_code=404, detail="Mode not found")
+    
+    chat.mode_id = request.mode_id
+    chat.active_tools = mode.active_tools  # Reset to mode defaults
+    await db.commit()
+    
+    return ChatToolsResponse(
+        mode_id=chat.mode_id,
+        active_tools=chat.active_tools or []
     )

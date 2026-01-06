@@ -9,6 +9,7 @@ Module Structure:
 - chat.py: Chat, Message, ChatParticipant
 - document.py: Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare
 - assistant.py: CustomAssistant, AssistantConversation, assistant_knowledge_stores
+- assistant_mode.py: AssistantMode (tool presets)
 - billing.py: TokenUsage
 - tool.py: Tool, ToolUsage
 - filter.py: ChatFilter
@@ -47,6 +48,7 @@ from .document import Document, DocumentChunk, KnowledgeStore, KnowledgeStoreSha
 
 # Assistant models
 from .assistant import CustomAssistant, AssistantConversation, AssistantCategory, assistant_knowledge_stores
+from .assistant_mode import AssistantMode, DEFAULT_ASSISTANT_MODES
 
 # Billing models
 from .billing import TokenUsage
@@ -99,6 +101,9 @@ __all__ = [
     "AssistantConversation",
     "AssistantCategory",
     "assistant_knowledge_stores",
+    # Assistant Mode
+    "AssistantMode",
+    "DEFAULT_ASSISTANT_MODES",
     # Billing
     "TokenUsage",
     # Tool

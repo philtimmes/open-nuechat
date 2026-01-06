@@ -199,3 +199,51 @@ export const themeApi = {
   
   apply: (themeId: string) => api.post(`/themes/apply/${themeId}`),
 };
+
+// Assistant Modes API (NC-0.8.0.0)
+export const assistantModeApi = {
+  list: (enabledOnly: boolean = true) =>
+    api.get('/assistant-modes', { params: { enabled_only: enabledOnly } }),
+  
+  get: (modeId: string) => api.get(`/assistant-modes/${modeId}`),
+  
+  create: (data: {
+    name: string;
+    description?: string;
+    icon?: string;
+    active_tools?: string[];
+    advertised_tools?: string[];
+    filter_chain_id?: string;
+    sort_order?: number;
+    enabled?: boolean;
+    is_global?: boolean;
+  }) => api.post('/assistant-modes', data),
+  
+  update: (modeId: string, data: {
+    name?: string;
+    description?: string;
+    icon?: string;
+    active_tools?: string[];
+    advertised_tools?: string[];
+    filter_chain_id?: string;
+    sort_order?: number;
+    enabled?: boolean;
+    is_global?: boolean;
+  }) => api.put(`/assistant-modes/${modeId}`, data),
+  
+  delete: (modeId: string) => api.delete(`/assistant-modes/${modeId}`),
+  
+  duplicate: (modeId: string) => api.post(`/assistant-modes/${modeId}/duplicate`),
+};
+
+// Chat tools API (NC-0.8.0.0)
+export const chatToolsApi = {
+  getActiveTools: (chatId: string) =>
+    api.get(`/chats/${chatId}/tools`),
+  
+  updateActiveTools: (chatId: string, tools: string[]) =>
+    api.put(`/chats/${chatId}/tools`, { active_tools: tools }),
+  
+  updateMode: (chatId: string, modeId: string) =>
+    api.put(`/chats/${chatId}/mode`, { mode_id: modeId }),
+};

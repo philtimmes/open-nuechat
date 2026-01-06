@@ -906,7 +906,11 @@ class RAGService:
         bypass_access_check: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        Search across knowledge stores using FAISS indexes.
+        Search across knowledge stores using FAISS indexes with hybrid search.
+        
+        Uses hybrid search combining:
+        1. Semantic search (FAISS cosine similarity)
+        2. Identifier search (exact substring matching for codes/statutes)
         
         Args:
             bypass_access_check: If True, skip ownership/permission checks.
@@ -916,6 +920,9 @@ class RAGService:
             return []
         
         top_k = top_k or self.top_k
+        
+        # Extract identifiers for hybrid search
+        identifiers = self._extract_identifiers(query)
         
         # Check if debug logging is enabled
         debug_enabled = await _is_debug_rag_enabled(db)
@@ -933,7 +940,8 @@ class RAGService:
                 query=query[:100] + "..." if len(query) > 100 else query,
                 knowledge_stores=[kb_names.get(kid, kid) for kid in knowledge_store_ids],
                 top_k=top_k,
-                bypass_access_check=bypass_access_check
+                bypass_access_check=bypass_access_check,
+                identifiers=identifiers if identifiers else None
             )
         
         # Verify access (unless bypassed for assistant access)
@@ -954,6 +962,19 @@ class RAGService:
                 accessible=len(accessible_stores)
             )
         
+        # Run identifier search if identifiers were found
+        identifier_results = []
+        if identifiers:
+            identifier_results = await self._identifier_search(
+                db, identifiers, knowledge_store_ids=accessible_stores, top_k=top_k
+            )
+            if debug_enabled and identifier_results:
+                _log_rag_debug(
+                    "Identifier search results",
+                    count=len(identifier_results),
+                    identifiers=identifiers
+                )
+        
         # Generate query embedding
         query_embedding = await asyncio.get_event_loop().run_in_executor(
             _executor, self.embed_text, query
@@ -962,6 +983,9 @@ class RAGService:
         if query_embedding is None:
             if debug_enabled:
                 _log_rag_debug("Falling back to keyword search (embedding failed)")
+            # If we have identifier results, return those
+            if identifier_results:
+                return identifier_results[:top_k]
             # Fallback to keyword search
             doc_ids = await self._get_store_document_ids(db, accessible_stores)
             return await self._keyword_search_documents(db, doc_ids, query, top_k)
@@ -994,28 +1018,40 @@ class RAGService:
             for chunk_id, score in results:
                 all_results.append((chunk_id, score, store_id))
         
-        if not all_results:
+        # Get semantic results
+        if all_results:
+            all_results.sort(key=lambda x: x[1], reverse=True)
+            top_results = all_results[:top_k]
+            chunk_ids = [r[0] for r in top_results]
+            semantic_results = await self._get_chunks_by_ids(db, chunk_ids, {r[0]: r[1] for r in top_results})
+        else:
+            semantic_results = []
+        
+        # Merge semantic and identifier results
+        if identifiers and identifier_results:
+            final_results = self._merge_search_results(
+                semantic_results,
+                identifier_results,
+                semantic_threshold=0.7,
+                identifier_boost=0.15,
+                top_k=top_k
+            )
+        else:
+            final_results = semantic_results
+        
+        if not final_results:
             if debug_enabled:
                 _log_rag_debug("No FAISS results, falling back to direct search")
             # Fallback to direct search
             doc_ids = await self._get_store_document_ids(db, accessible_stores)
             return await self._direct_search(db, query_embedding, doc_ids, top_k)
         
-        # Sort by score and get top_k
-        all_results.sort(key=lambda x: x[1], reverse=True)
-        top_results = all_results[:top_k]
-        
         if debug_enabled:
             _log_rag_debug(
                 "Knowledge store search completed",
-                total_results=len(all_results),
-                returned_results=len(top_results),
-                top_scores=[round(r[1], 4) for r in top_results[:5]]
+                total_results=len(final_results),
+                top_scores=[round(r.get("similarity", 0), 4) for r in final_results[:5]]
             )
-        
-        # Fetch chunk details
-        chunk_ids = [r[0] for r in top_results]
-        final_results = await self._get_chunks_by_ids(db, chunk_ids, {r[0]: r[1] for r in top_results})
         
         if debug_enabled and final_results:
             _log_rag_debug(
@@ -1144,6 +1180,290 @@ class RAGService:
             logger.warning(f"[RAG_CONTEXT] Failed to enhance query: {e}")
             return query
     
+    def _normalize_text_for_matching(self, text: str) -> str:
+        """
+        Normalize text for identifier matching by converting Unicode variants
+        and common word patterns to their ASCII equivalents.
+        
+        This handles common cases where:
+        - Documents contain typographic characters (em dashes, curly quotes)
+        - Users search with regular keyboard characters
+        - Users write ranges as words ("1 to 9") instead of dashes ("1-9")
+        
+        Normalizations:
+        - All dash variants → hyphen-minus (-)
+        - All quote variants → straight quotes (' and ")
+        - Range words "to", "through", "thru" between tokens with digits → hyphen
+        """
+        import re
+        
+        # Dash/hyphen variants → regular hyphen
+        # U+002D HYPHEN-MINUS, U+2010 HYPHEN, U+2011 NON-BREAKING HYPHEN,
+        # U+2012 FIGURE DASH, U+2013 EN DASH, U+2014 EM DASH,
+        # U+2015 HORIZONTAL BAR, U+2212 MINUS SIGN
+        dash_pattern = r'[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]'
+        text = re.sub(dash_pattern, '-', text)
+        
+        # Quote variants → straight quotes (for identifiers that might have quotes)
+        # Single quotes: U+2018, U+2019, U+201A, U+201B
+        text = re.sub(r'[\u2018\u2019\u201a\u201b]', "'", text)
+        # Double quotes: U+201C, U+201D, U+201E, U+201F
+        text = re.sub(r'[\u201c\u201d\u201e\u201f]', '"', text)
+        
+        # Convert range words between tokens to hyphens
+        # "1 to 9" → "1-9", "Rule 1 through 5" → "Rule 1-5"
+        # Requirements:
+        # - At least one side must contain a digit (to avoid "go to the" → "go-the")
+        # - Tokens can be alphanumeric (letters and/or numbers)
+        # Pattern matches: (token_with_digit) to (any_token) OR (any_token) to (token_with_digit)
+        
+        def replace_range(match):
+            left, right = match.group(1), match.group(2)
+            # Only replace if at least one side has a digit
+            if any(c.isdigit() for c in left) or any(c.isdigit() for c in right):
+                return f"{left}-{right}"
+            return match.group(0)  # Return unchanged
+        
+        range_pattern = r'(\b[A-Za-z0-9]+)\s+(?:to|through|thru)\s+([A-Za-z0-9]+\b)'
+        text = re.sub(range_pattern, replace_range, text, flags=re.IGNORECASE)
+        
+        return text
+    
+    def _extract_identifiers(self, query: str) -> List[str]:
+        """
+        Extract specific identifiers from a query that should be searched exactly.
+        
+        These patterns typically fail in pure semantic search because they're
+        alphanumeric codes that don't have strong semantic meaning on their own.
+        
+        Examples matched:
+        - Legal: "1S-2.053", "Rule 12-345.67", "FAC 61G15-30"
+        - Statutes: "§ 119.07", "Section 768.28"  
+        - Codes: "ICD-10-CM", "CPT-99213"
+        - Patents/Cases: "US-2024-123456", "Case No. 2024-CF-001234"
+        - Product codes: "ABC-123-XYZ", "SKU-78910"
+        - UUIDs: partial matches like "a1b2c3d4"
+        
+        Returns list of identifier strings to search for exactly.
+        """
+        import re
+        
+        # Normalize dashes/hyphens in query before extraction
+        # Unicode dash variants that should all be treated as hyphens:
+        # - U+002D HYPHEN-MINUS (regular hyphen)
+        # - U+2010 HYPHEN
+        # - U+2011 NON-BREAKING HYPHEN
+        # - U+2012 FIGURE DASH
+        # - U+2013 EN DASH
+        # - U+2014 EM DASH
+        # - U+2015 HORIZONTAL BAR
+        # - U+2212 MINUS SIGN
+        normalized_query = self._normalize_text_for_matching(query)
+        
+        identifiers = []
+        
+        # Pattern 1: Alphanumeric with dots/dashes (statutes, codes, rules)
+        # Matches: "1S-2.053", "61G15-30.001", "768.28", "119.07(1)"
+        pattern_statute = r'\b\d+[A-Z]?[-.][\dA-Z]+(?:[-.]\d+)*(?:\([a-z0-9]+\))*\b'
+        identifiers.extend(re.findall(pattern_statute, normalized_query, re.IGNORECASE))
+        
+        # Pattern 2: Letter-prefixed codes with numbers
+        # Matches: "FAC 61G15", "Rule 12-345", "ICD-10", "CPT-99213"
+        pattern_codes = r'\b[A-Z]{2,}[-\s]?\d+[A-Z]?(?:[-.][\dA-Z]+)*\b'
+        identifiers.extend(re.findall(pattern_codes, normalized_query, re.IGNORECASE))
+        
+        # Pattern 3: Section/paragraph references
+        # Matches: "§ 119.07", "§119.07", "Section 768.28"
+        pattern_section = r'(?:§\s*|[Ss]ection\s+)(\d+(?:\.\d+)*(?:\([a-z0-9]+\))*)'
+        for match in re.finditer(pattern_section, normalized_query):
+            identifiers.append(match.group(1))
+        
+        # Pattern 4: Case/docket numbers
+        # Matches: "2024-CF-001234", "Case 23-cv-12345"
+        pattern_case = r'\b\d{2,4}[-][A-Z]{1,3}[-]\d{4,}\b'
+        identifiers.extend(re.findall(pattern_case, normalized_query, re.IGNORECASE))
+        
+        # Pattern 5: General alphanumeric identifiers with at least one letter and number
+        # and containing a separator (dash or dot)
+        # Matches: "ABC-123", "A1B2-C3D4"
+        pattern_general = r'\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]+[-./][A-Z0-9]+(?:[-./][A-Z0-9]+)*\b'
+        identifiers.extend(re.findall(pattern_general, normalized_query, re.IGNORECASE))
+        
+        # Deduplicate while preserving order, normalize to lowercase for matching
+        seen = set()
+        unique_identifiers = []
+        for ident in identifiers:
+            # Clean up and normalize
+            ident_clean = ident.strip()
+            ident_lower = ident_clean.lower()
+            if ident_lower not in seen and len(ident_clean) >= 3:
+                seen.add(ident_lower)
+                unique_identifiers.append(ident_clean)
+        
+        if unique_identifiers:
+            logger.info(f"[RAG_HYBRID] Extracted identifiers from query: {unique_identifiers}")
+        
+        return unique_identifiers
+    
+    async def _identifier_search(
+        self,
+        db: AsyncSession,
+        identifiers: List[str],
+        knowledge_store_ids: Optional[List[str]] = None,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for chunks containing specific identifiers using exact substring matching.
+        
+        This complements semantic search by finding chunks that contain specific
+        alphanumeric codes/identifiers that semantic search may miss due to
+        low semantic similarity.
+        
+        Args:
+            identifiers: List of identifier strings to search for
+            knowledge_store_ids: Optional list of knowledge store IDs to search within
+            top_k: Maximum results to return
+            
+        Returns:
+            List of matching chunks with similarity scores based on match quality
+        """
+        if not identifiers:
+            return []
+        
+        # Build query for chunks
+        query_builder = (
+            select(DocumentChunk, Document)
+            .join(Document, DocumentChunk.document_id == Document.id)
+            .where(Document.is_processed == True)
+        )
+        
+        # Filter by knowledge stores if specified
+        if knowledge_store_ids:
+            query_builder = query_builder.where(
+                Document.knowledge_store_id.in_(knowledge_store_ids)
+            )
+        
+        result = await db.execute(query_builder)
+        rows = result.all()
+        
+        if not rows:
+            return []
+        
+        results = []
+        for chunk, document in rows:
+            # Normalize content to handle Unicode dash/quote variants
+            # This allows matching "1-9" in query against "1—9" (em dash) in document
+            content_normalized = self._normalize_text_for_matching(chunk.content).lower()
+            
+            # Check each identifier
+            matches = []
+            for ident in identifiers:
+                ident_lower = ident.lower()
+                if ident_lower in content_normalized:
+                    # Calculate match quality
+                    # Exact match at word boundary scores higher
+                    import re
+                    if re.search(r'\b' + re.escape(ident_lower) + r'\b', content_normalized):
+                        matches.append((ident, 1.0))  # Perfect word boundary match
+                    else:
+                        matches.append((ident, 0.8))  # Substring match
+            
+            if matches:
+                # Score based on: number of identifiers matched and match quality
+                match_score = sum(score for _, score in matches) / len(identifiers)
+                # Boost for multiple matches
+                if len(matches) > 1:
+                    match_score = min(1.0, match_score * 1.2)
+                
+                results.append({
+                    "chunk_id": str(chunk.id),
+                    "document_id": str(document.id),
+                    "document_name": document.name,
+                    "knowledge_store_id": str(document.knowledge_store_id) if document.knowledge_store_id else None,
+                    "content": chunk.content,
+                    "chunk_index": chunk.chunk_index,
+                    "similarity": match_score,
+                    "metadata": chunk.chunk_metadata,
+                    "_match_type": "identifier",  # Internal marker
+                    "_matched_identifiers": [ident for ident, _ in matches],
+                })
+        
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        
+        if results:
+            logger.info(f"[RAG_HYBRID] Identifier search found {len(results)} matches for: {identifiers}")
+        
+        return results[:top_k]
+    
+    def _merge_search_results(
+        self,
+        semantic_results: List[Dict[str, Any]],
+        identifier_results: List[Dict[str, Any]],
+        semantic_threshold: float = 0.7,
+        identifier_boost: float = 0.15,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge semantic search results with identifier search results.
+        
+        Strategy:
+        1. Identifier matches get a score boost since they're exact matches
+        2. If a chunk appears in both, use the higher (boosted) score
+        3. Identifier matches below semantic threshold are still included
+           (this is the key improvement - they won't be filtered out)
+        
+        Args:
+            semantic_results: Results from FAISS semantic search
+            identifier_results: Results from exact identifier matching
+            semantic_threshold: The threshold used for semantic search
+            identifier_boost: Boost added to identifier match scores
+            top_k: Maximum results to return
+        """
+        # Create lookup by chunk_id
+        merged = {}
+        
+        # Add semantic results first
+        for result in semantic_results:
+            chunk_id = result["chunk_id"]
+            merged[chunk_id] = result.copy()
+            merged[chunk_id]["_sources"] = ["semantic"]
+        
+        # Merge identifier results with boost
+        for result in identifier_results:
+            chunk_id = result["chunk_id"]
+            boosted_score = min(1.0, result["similarity"] + identifier_boost)
+            
+            if chunk_id in merged:
+                # Chunk found by both methods - use higher score
+                existing_score = merged[chunk_id]["similarity"]
+                if boosted_score > existing_score:
+                    merged[chunk_id]["similarity"] = boosted_score
+                    merged[chunk_id]["_match_type"] = "hybrid"
+                merged[chunk_id]["_sources"].append("identifier")
+                if "_matched_identifiers" in result:
+                    merged[chunk_id]["_matched_identifiers"] = result["_matched_identifiers"]
+            else:
+                # Only found by identifier search - include it!
+                result_copy = result.copy()
+                result_copy["similarity"] = boosted_score
+                result_copy["_sources"] = ["identifier"]
+                merged[chunk_id] = result_copy
+        
+        # Sort by score and return top_k
+        results = list(merged.values())
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        
+        # Log merge results
+        hybrid_count = sum(1 for r in results if r.get("_sources") and len(r["_sources"]) > 1)
+        identifier_only = sum(1 for r in results if r.get("_sources") == ["identifier"])
+        if identifier_only > 0 or hybrid_count > 0:
+            logger.info(
+                f"[RAG_HYBRID] Merged results: {len(results)} total, "
+                f"{hybrid_count} hybrid (both methods), {identifier_only} identifier-only"
+            )
+        
+        return results[:top_k]
+    
     async def search_global_stores(
         self,
         db: AsyncSession,
@@ -1152,6 +1472,10 @@ class RAGService:
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Search all global knowledge stores for relevant context.
+        
+        Uses hybrid search combining:
+        1. Semantic search (FAISS cosine similarity)
+        2. Identifier search (exact substring matching for codes/statutes)
         
         Args:
             query: The search query
@@ -1170,8 +1494,12 @@ class RAGService:
         total_start = time.time()
         
         # Enhance query with conversation context (for follow-up questions)
+        original_query = query
         if chat_id:
             query = await self._enhance_query_with_context(db, query, chat_id)
+        
+        # Extract identifiers for hybrid search
+        identifiers = self._extract_identifiers(original_query)
         
         # Check if global knowledge stores are enabled
         setting_start = time.time()
@@ -1205,7 +1533,19 @@ class RAGService:
         
         logger.info(f"[GLOBAL_RAG] Searching {len(global_stores)} global stores for query: {query[:50]}...")
         
-        # Generate query embedding once
+        global_store_ids = [str(store.id) for store in global_stores]
+        
+        # Run identifier search if identifiers were found
+        identifier_results = []
+        if identifiers:
+            ident_start = time.time()
+            identifier_results = await self._identifier_search(
+                db, identifiers, knowledge_store_ids=global_store_ids, top_k=10
+            )
+            ident_time = time.time() - ident_start
+            logger.debug(f"[GLOBAL_RAG_TIMING] Identifier search took {ident_time:.3f}s, found {len(identifier_results)} matches")
+        
+        # Generate query embedding for semantic search
         embed_start = time.time()
         query_embedding = await asyncio.get_event_loop().run_in_executor(
             _executor, self.embed_text, query
@@ -1215,11 +1555,23 @@ class RAGService:
         
         if query_embedding is None:
             logger.warning("[GLOBAL_RAG] Failed to generate embedding for query")
+            # If we have identifier results, return those
+            if identifier_results:
+                store_names_with_matches = list(set(
+                    r.get("_store_name", "") for r in identifier_results 
+                    if r.get("knowledge_store_id") in global_store_ids
+                ))
+                return identifier_results, [s.name for s in global_stores if str(s.id) in 
+                    set(r.get("knowledge_store_id") for r in identifier_results)]
             return [], []
         
-        all_results = []
+        all_semantic_results = []
         matched_store_names = []
         index_manager = self.get_index_manager()
+        
+        # Get the lowest min_score among all global stores (for initial filter)
+        # We'll do per-store filtering after merging
+        global_min_score = min((store.global_min_score or 0.7) for store in global_stores)
         
         for store in global_stores:
             store_start = time.time()
@@ -1250,26 +1602,46 @@ class RAGService:
                 
                 # Limit to max_results
                 for chunk_id, score in filtered_results[:max_results]:
-                    all_results.append((chunk_id, score, store_id))
+                    all_semantic_results.append((chunk_id, score, store_id))
             else:
-                logger.debug(f"[GLOBAL_RAG] Store '{store.name}' had no matches above threshold {min_score}")
+                logger.debug(f"[GLOBAL_RAG] Store '{store.name}' had no semantic matches above threshold {min_score}")
         
-        if not all_results:
+        # Convert semantic results to standard format for merging
+        if all_semantic_results:
+            all_semantic_results.sort(key=lambda x: x[1], reverse=True)
+            chunk_ids = [r[0] for r in all_semantic_results]
+            scores_map = {r[0]: r[1] for r in all_semantic_results}
+            semantic_results = await self._get_chunks_by_ids(db, chunk_ids, scores_map)
+        else:
+            semantic_results = []
+        
+        # Merge semantic and identifier results
+        if identifiers and identifier_results:
+            final_results = self._merge_search_results(
+                semantic_results,
+                identifier_results,
+                semantic_threshold=global_min_score,
+                identifier_boost=0.15,
+                top_k=10
+            )
+            
+            # Update matched store names with any identifier-only matches
+            for result in final_results:
+                ks_id = result.get("knowledge_store_id")
+                if ks_id:
+                    for store in global_stores:
+                        if str(store.id) == ks_id and store.name not in matched_store_names:
+                            matched_store_names.append(store.name)
+        else:
+            final_results = semantic_results
+        
+        if not final_results:
             total_time = time.time() - total_start
             logger.debug(f"[GLOBAL_RAG_TIMING] No relevant results found in any global store (total time: {total_time:.3f}s)")
             return [], []
         
-        # Sort by score and fetch details
-        all_results.sort(key=lambda x: x[1], reverse=True)
-        chunk_ids = [r[0] for r in all_results]
-        scores_map = {r[0]: r[1] for r in all_results}
-        
-        fetch_start = time.time()
-        final_results = await self._get_chunks_by_ids(db, chunk_ids, scores_map)
-        fetch_time = time.time() - fetch_start
-        
         total_time = time.time() - total_start
-        logger.info(f"[GLOBAL_RAG_TIMING] Total search time: {total_time:.3f}s (embed={embed_time:.3f}s, search={total_time - embed_time - fetch_time:.3f}s, fetch={fetch_time:.3f}s)")
+        logger.info(f"[GLOBAL_RAG_TIMING] Total search time: {total_time:.3f}s (embed={embed_time:.3f}s)")
         logger.info(f"[GLOBAL_RAG] Returning {len(final_results)} results from stores: {matched_store_names}")
         
         return final_results, matched_store_names

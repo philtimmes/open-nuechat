@@ -9,6 +9,7 @@ import {
   OAuthTab, 
   FeaturesTab, 
   CategoriesTab,
+  AssistantModesTab,
   SystemSettings,
   OAuthSettings,
   LLMSettings,
@@ -158,6 +159,21 @@ export default function Admin() {
     max_iterations: 10,
     debug: false,
     skip_if_rag_hit: true,
+    // Export as tool defaults
+    export_as_tool: false,
+    tool_name: '',
+    tool_label: '',
+    advertise_to_llm: false,
+    advertise_text: '',
+    trigger_pattern: '',
+    trigger_source: 'both',
+    erase_from_display: true,
+    keep_in_history: true,
+    button_enabled: false,
+    button_icon: '',
+    button_location: 'response',
+    button_trigger_mode: 'immediate',
+    tool_variables: [],
     definition: { steps: [] },
   });
   const [filterChainJsonMode, setFilterChainJsonMode] = useState(false);
@@ -1193,6 +1209,21 @@ export default function Admin() {
       max_iterations: 10,
       debug: false,
       skip_if_rag_hit: true,
+      // Export as tool defaults
+      export_as_tool: false,
+      tool_name: '',
+      tool_label: '',
+      advertise_to_llm: false,
+      advertise_text: '',
+      trigger_pattern: '',
+      trigger_source: 'both',
+      erase_from_display: true,
+      keep_in_history: true,
+      button_enabled: false,
+      button_icon: '',
+      button_location: 'response',
+      button_trigger_mode: 'immediate',
+      tool_variables: [],
       definition: { steps: [] },
     });
     setEditingFilterChain(null);
@@ -1225,6 +1256,21 @@ export default function Admin() {
         max_iterations: filterChainForm.max_iterations,
         debug: filterChainForm.debug,
         skip_if_rag_hit: filterChainForm.skip_if_rag_hit,
+        // Export as tool fields
+        export_as_tool: filterChainForm.export_as_tool,
+        tool_name: filterChainForm.tool_name || undefined,
+        tool_label: filterChainForm.tool_label || undefined,
+        advertise_to_llm: filterChainForm.advertise_to_llm,
+        advertise_text: filterChainForm.advertise_text || undefined,
+        trigger_pattern: filterChainForm.trigger_pattern || undefined,
+        trigger_source: filterChainForm.trigger_source,
+        erase_from_display: filterChainForm.erase_from_display,
+        keep_in_history: filterChainForm.keep_in_history,
+        button_enabled: filterChainForm.button_enabled,
+        button_icon: filterChainForm.button_icon || undefined,
+        button_location: filterChainForm.button_location,
+        button_trigger_mode: filterChainForm.button_trigger_mode,
+        tool_variables: filterChainForm.tool_variables,
         definition,
       };
       
@@ -1369,6 +1415,10 @@ export default function Admin() {
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 4v6m0 0v6m0-6h6m-6 0h-6" transform="translate(-3, 0) scale(0.5)" /></svg>;
       case 'global_kb':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
+      case 'categories':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>;
+      case 'modes':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" /></svg>;
       case 'dev':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>;
       default:
@@ -1385,6 +1435,7 @@ export default function Admin() {
     { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
     { id: 'global_kb', label: 'Global KB', iconType: 'global_kb' },
     { id: 'categories', label: 'GPT Categories', iconType: 'categories' },
+    { id: 'modes', label: 'Assistant Modes', iconType: 'modes' },
     { id: 'tiers', label: 'Tiers', iconType: 'tiers' },
     { id: 'users', label: 'Users', iconType: 'users' },
     { id: 'chats', label: 'Chats', iconType: 'chats' },
@@ -3602,6 +3653,13 @@ export default function Admin() {
                         className="px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm w-48"
                         placeholder="Chain name..."
                       />
+                      <input
+                        type="text"
+                        value={filterChainForm.description || ''}
+                        onChange={(e) => setFilterChainForm({ ...filterChainForm, description: e.target.value })}
+                        className="px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm flex-1"
+                        placeholder="Description (optional)..."
+                      />
                       <select
                         value={filterChainForm.priority}
                         onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
@@ -3614,7 +3672,7 @@ export default function Admin() {
                         <option value={500}>Priority: Last (500)</option>
                       </select>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 flex-wrap">
                       <label className="flex items-center gap-2 cursor-pointer text-sm">
                         <input
                           type="checkbox"
@@ -3624,23 +3682,23 @@ export default function Admin() {
                         />
                         <span className="text-[var(--color-text)]">Enabled</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer text-sm">
+                      <label className="flex items-center gap-2 cursor-pointer text-sm" title="Preserve conversation history (don't modify messages)">
                         <input
                           type="checkbox"
                           checked={filterChainForm.retain_history}
                           onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
                           className="rounded"
                         />
-                        <span className="text-[var(--color-text)]">Hidden</span>
+                        <span className="text-[var(--color-text)]">Retain History</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer text-sm">
+                      <label className="flex items-center gap-2 cursor-pointer text-sm" title="Process both incoming and outgoing messages">
                         <input
                           type="checkbox"
-                          checked={filterChainForm.debug}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
+                          checked={filterChainForm.bidirectional}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, bidirectional: e.target.checked })}
                           className="rounded"
                         />
-                        <span className="text-[var(--color-text)]">🐛 Debug</span>
+                        <span className="text-[var(--color-text)]">Bidirectional</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer text-sm" title="Skip this filter chain if RAG (knowledge base) found results">
                         <input
@@ -3651,6 +3709,41 @@ export default function Admin() {
                         />
                         <span className="text-[var(--color-text)]">Skip if RAG hit</span>
                       </label>
+                      <label className="flex items-center gap-2 cursor-pointer text-sm">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.debug}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
+                          className="rounded"
+                        />
+                        <span className="text-[var(--color-text)]">🐛 Debug</span>
+                      </label>
+                      <div className="flex items-center gap-2 text-sm">
+                        <span className="text-[var(--color-text-secondary)]">Max Iterations:</span>
+                        <input
+                          type="number"
+                          value={filterChainForm.max_iterations}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, max_iterations: parseInt(e.target.value) || 10 })}
+                          className="w-16 px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                          min={1}
+                          max={100}
+                        />
+                      </div>
+                      {filterChainForm.bidirectional && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="text-[var(--color-text-secondary)]">Outbound Chain:</span>
+                          <select
+                            value={filterChainForm.outbound_chain_id || ''}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, outbound_chain_id: e.target.value || undefined })}
+                            className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                          >
+                            <option value="">Same chain</option>
+                            {filterChains.filter(c => c.id !== filterChainForm.id).map(c => (
+                              <option key={c.id} value={c.id}>{c.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
                       <button
                         onClick={() => setFilterChainJsonMode(!filterChainJsonMode)}
                         className={`px-3 py-1.5 rounded text-sm ${
@@ -3662,6 +3755,175 @@ export default function Admin() {
                         {filterChainJsonMode ? '← Visual' : 'JSON →'}
                       </button>
                     </div>
+                  </div>
+                  
+                  {/* Export as Tool Section */}
+                  <div className="px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-background)]/50">
+                    <div className="flex items-center gap-4">
+                      <label className="flex items-center gap-2 cursor-pointer text-sm font-medium">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.export_as_tool}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, export_as_tool: e.target.checked })}
+                          className="rounded"
+                        />
+                        <span className="text-[var(--color-text)]">🔧 Export as Dynamic Tool</span>
+                      </label>
+                      
+                      {filterChainForm.export_as_tool && (
+                        <>
+                          <input
+                            type="text"
+                            value={filterChainForm.tool_name || ''}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, tool_name: e.target.value })}
+                            className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm w-32"
+                            placeholder="Tool ID (e.g., WebSearch)"
+                          />
+                          <input
+                            type="text"
+                            value={filterChainForm.tool_label || ''}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, tool_label: e.target.value })}
+                            className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm w-40"
+                            placeholder="Label (e.g., 🔍 Search)"
+                          />
+                        </>
+                      )}
+                    </div>
+                    
+                    {filterChainForm.export_as_tool && (
+                      <div className="mt-3 grid grid-cols-2 gap-4">
+                        {/* Left column - Advertising & Trigger */}
+                        <div className="space-y-3">
+                          <div className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">Advertising & Trigger</div>
+                          
+                          <label className="flex items-center gap-2 cursor-pointer text-sm">
+                            <input
+                              type="checkbox"
+                              checked={filterChainForm.advertise_to_llm}
+                              onChange={(e) => setFilterChainForm({ ...filterChainForm, advertise_to_llm: e.target.checked })}
+                              className="rounded"
+                            />
+                            <span className="text-[var(--color-text)]">Advertise to LLM (include in system prompt)</span>
+                          </label>
+                          
+                          {filterChainForm.advertise_to_llm && (
+                            <textarea
+                              value={filterChainForm.advertise_text || ''}
+                              onChange={(e) => setFilterChainForm({ ...filterChainForm, advertise_text: e.target.value })}
+                              className="w-full px-2 py-1.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm h-16 resize-none"
+                              placeholder='e.g., Use $WebSearch="query" to search the web'
+                            />
+                          )}
+                          
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-[var(--color-text-secondary)]">Trigger Pattern:</span>
+                            <input
+                              type="text"
+                              value={filterChainForm.trigger_pattern || ''}
+                              onChange={(e) => setFilterChainForm({ ...filterChainForm, trigger_pattern: e.target.value })}
+                              className="flex-1 px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm font-mono"
+                              placeholder='e.g., \$WebSearch="([^"]+)"'
+                            />
+                          </div>
+                          
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-[var(--color-text-secondary)]">Trigger Source:</span>
+                            <select
+                              value={filterChainForm.trigger_source}
+                              onChange={(e) => setFilterChainForm({ ...filterChainForm, trigger_source: e.target.value as 'llm' | 'user' | 'both' })}
+                              className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                            >
+                              <option value="both">Both (LLM & User)</option>
+                              <option value="llm">LLM Only</option>
+                              <option value="user">User Only</option>
+                            </select>
+                          </div>
+                          
+                          <div className="flex items-center gap-4">
+                            <label className="flex items-center gap-2 cursor-pointer text-sm">
+                              <input
+                                type="checkbox"
+                                checked={filterChainForm.erase_from_display}
+                                onChange={(e) => setFilterChainForm({ ...filterChainForm, erase_from_display: e.target.checked })}
+                                className="rounded"
+                              />
+                              <span className="text-[var(--color-text)]">Erase from display</span>
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer text-sm">
+                              <input
+                                type="checkbox"
+                                checked={filterChainForm.keep_in_history}
+                                onChange={(e) => setFilterChainForm({ ...filterChainForm, keep_in_history: e.target.checked })}
+                                className="rounded"
+                              />
+                              <span className="text-[var(--color-text)]">Keep in history</span>
+                            </label>
+                          </div>
+                        </div>
+                        
+                        {/* Right column - UI Button */}
+                        <div className="space-y-3">
+                          <div className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider">UI Button (User Hints)</div>
+                          
+                          <label className="flex items-center gap-2 cursor-pointer text-sm">
+                            <input
+                              type="checkbox"
+                              checked={filterChainForm.button_enabled}
+                              onChange={(e) => setFilterChainForm({ ...filterChainForm, button_enabled: e.target.checked })}
+                              className="rounded"
+                            />
+                            <span className="text-[var(--color-text)]">Show button in chat UI</span>
+                          </label>
+                          
+                          {filterChainForm.button_enabled && (
+                            <>
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm text-[var(--color-text-secondary)]">Icon:</span>
+                                <input
+                                  type="text"
+                                  value={filterChainForm.button_icon || ''}
+                                  onChange={(e) => setFilterChainForm({ ...filterChainForm, button_icon: e.target.value })}
+                                  className="w-20 px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm text-center"
+                                  placeholder="🔍"
+                                />
+                              </div>
+                              
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm text-[var(--color-text-secondary)]">Location:</span>
+                                <select
+                                  value={filterChainForm.button_location}
+                                  onChange={(e) => setFilterChainForm({ ...filterChainForm, button_location: e.target.value as 'response' | 'query' | 'both' })}
+                                  className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                                >
+                                  <option value="response">On Responses</option>
+                                  <option value="query">On Queries</option>
+                                  <option value="both">Both</option>
+                                </select>
+                              </div>
+                              
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm text-[var(--color-text-secondary)]">Trigger Mode:</span>
+                                <select
+                                  value={filterChainForm.button_trigger_mode}
+                                  onChange={(e) => setFilterChainForm({ ...filterChainForm, button_trigger_mode: e.target.value as 'immediate' | 'modal' | 'selection' })}
+                                  className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                                >
+                                  <option value="immediate">Immediate</option>
+                                  <option value="selection">On Selection</option>
+                                  <option value="modal">Open Modal</option>
+                                </select>
+                              </div>
+                            </>
+                          )}
+                          
+                          {/* Variables section */}
+                          <div className="text-xs font-medium text-[var(--color-text-secondary)] uppercase tracking-wider mt-4">Tool Variables</div>
+                          <div className="text-xs text-[var(--color-text-secondary)]">
+                            Variables available: $Selected, $Query, $1, $2 (capture groups), $Var[name]
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   
                   {/* Content - Flow Editor or JSON */}
@@ -4106,6 +4368,11 @@ export default function Admin() {
                   </div>
                 )}
               </div>
+            )}
+            
+            {/* ASSISTANT MODES TAB */}
+            {activeTab === 'modes' && (
+              <AssistantModesTab />
             )}
             
             {/* SITE DEV TAB */}

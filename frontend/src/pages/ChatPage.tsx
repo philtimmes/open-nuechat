@@ -13,6 +13,7 @@ import EmptyState from '../components/EmptyState';
 import ArtifactsPanel from '../components/ArtifactsPanel';
 import SummaryPanel from '../components/SummaryPanel';
 import VoiceModeOverlay from '../components/VoiceModeOverlay';
+import ActiveToolsBar from '../components/ActiveToolsBar';
 import type { Artifact, Message, GeneratedImage } from '../types';
 import { groupArtifactsByFilename, getLatestArtifacts } from '../lib/artifacts';
 import api, { chatApi } from '../lib/api';
@@ -207,6 +208,8 @@ interface MessageListProps {
   chatId?: string;
   initialSelectedVersions?: Record<string, string>;
   onCurrentLeafChange?: (leafId: string | null) => void;
+  // NC-0.8.0.0: Text selection hint handler
+  onHintSelect?: (hint: import('../types').UserHint, selectedText: string) => void;
 }
 
 // Build conversation path from tree structure
@@ -344,6 +347,7 @@ const MessageList = memo(function MessageList({
   chatId,
   initialSelectedVersions,
   onCurrentLeafChange,
+  onHintSelect,
 }: MessageListProps) {
   // Track selected version for each parent (by parent_id -> selected_child_id)
   const [selectedVersions, setSelectedVersions] = useState<Record<string, string>>(
@@ -505,6 +509,7 @@ const MessageList = memo(function MessageList({
               onBranchChange={() => {}}
               assistantName={assistantName}
               versionInfo={versionInfo}
+              onHintSelect={onHintSelect}
             />
           </div>
         );
@@ -1333,6 +1338,17 @@ export default function ChatPage() {
     setSelectedArtifact(artifact);
   }, [setSelectedArtifact]);
   
+  // NC-0.8.0.0: Handle text selection hint
+  const handleHintSelect = useCallback((hint: import('../types').UserHint, selectedText: string) => {
+    // Replace {$Selected} placeholder in prompt
+    const prompt = hint.prompt?.replace('{$Selected}', selectedText) || selectedText;
+    
+    // Send the prompt as a new message using the ref (avoids stale closures)
+    if (currentChat && prompt.trim()) {
+      sendMessageRef.current(prompt);
+    }
+  }, [currentChat]);
+  
   // Handle clicking a file in the zip upload card - find and select the artifact
   const handleZipFileClick = useCallback((filepath: string) => {
     const artifact = artifacts.find(a => a.filename === filepath);
@@ -1765,6 +1781,13 @@ export default function ChatPage() {
           </div>
         </div>
         
+        {/* Active Tools Bar - NC-0.8.0.0 */}
+        {currentChat?.id && (
+          <div className="px-3 md:px-4 py-2 border-b border-[var(--color-border)] bg-[var(--color-surface)]/30">
+            <ActiveToolsBar chatId={currentChat.id} />
+          </div>
+        )}
+        
         {/* Messages container */}
         <div
           ref={containerRef}
@@ -1807,6 +1830,7 @@ export default function ChatPage() {
                   chatId={currentChat?.id}
                   initialSelectedVersions={currentChat?.selected_versions}
                   onCurrentLeafChange={setCurrentLeafAssistantId}
+                  onHintSelect={handleHintSelect}
                 />
               )}
               

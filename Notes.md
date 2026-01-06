@@ -10,7 +10,234 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.7.15
+**Current Version:** NC-0.8.0.0
+
+---
+
+## Recent Changes (NC-0.8.0.0)
+
+### Dynamic Tools & Assistant Modes
+
+Major architecture change making RAG and tools **composable via filter chains** instead of hardcoded.
+
+#### Key Concepts
+
+**Three Trigger Types:**
+| Node Type | Trigger | UI Location | Variable |
+|-----------|---------|-------------|----------|
+| `user_hint` | Text selection | Popup bubble over selection | `$Selected` |
+| `user_action` | Button click | Below messages | `$MessageContent` |
+| `export_tool` | LLM pattern | In LLM output | `$1`, `$2` (capture groups) |
+
+**Tool Categories:**
+| Category | Examples | User Control |
+|----------|----------|--------------|
+| Always Active | Global KB | None (invisible, always on) |
+| Mode Controlled | Web, Artifacts, Images | Mode preset + toggle |
+| User Toggleable | Citation style, verbosity | Full user control |
+
+#### New Filter Chain Primitives
+
+**RAG Evaluators:**
+```python
+_prim_local_rag      # User's uploaded docs for current chat
+_prim_kb_rag         # Current assistant's knowledge base
+_prim_global_kb      # Global knowledge bases (always active, no icon)
+_prim_user_chats_kb  # User's chat history KB
+```
+
+**Dynamic Tool Nodes:**
+```python
+_prim_export_tool    # LLM-triggered ($WebSearch="...")
+_prim_user_hint      # Text selection popup menu
+_prim_user_action    # Buttons below messages
+```
+
+#### ExecutionContext Enhancement
+
+```python
+from_llm: bool = False   # True when processing LLM output
+from_user: bool = False  # True when processing user input
+```
+
+#### Assistant Modes
+
+Admin-defined presets controlling which tools are active:
+
+| Mode | Active Tools | Advertised |
+|------|--------------|------------|
+| Creative Writing | None | None |
+| Coding | artifacts, file_ops, code_exec | artifacts, file_ops |
+| Deep Research | web_search, citations | web_search |
+| General | web_search, artifacts | None |
+
+- Dropdown in Custom GPT modal ("Assistant Style")
+- Admin Panel tab to add/edit modes
+- User can toggle individual tools (becomes "Custom" mode)
+
+#### Active Tools Bar
+
+Visual toolbar showing tool status:
+- Line-based SVG icons (admin uploadable)
+- **Active**: Glow (brighter, same hue as background)
+- **Inactive**: No glow (muted but visible)
+- **Hover**: Subtle brightness increase + tooltip
+- Global KB has **no icon** (always active, invisible guardrails)
+
+#### User Triggers
+
+**Text Selection (user_hint):**
+```
+User selects "quantum entanglement"
+         ↓
+┌─────────────────────┐
+│ 🔍 Search Web       │  → on_trigger: [to_tool(web_search)]
+│ 💡 Explain          │  → on_trigger: [go_to_llm("Explain: {$Selected}")]
+│ 📖 Tell me more     │  → on_trigger: [go_to_llm("Elaborate: {$Selected}")]
+└─────────────────────┘
+```
+
+**Action Buttons (user_action):**
+- Buttons below messages (next to Retry, Delete)
+- Configurable per-mode
+
+#### Database Changes
+
+```sql
+-- New table
+CREATE TABLE assistant_modes (
+    id UUID PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    icon VARCHAR(500),
+    active_tools JSON,
+    advertised_tools JSON,
+    filter_chain_id UUID REFERENCES filter_chains(id),
+    sort_order INTEGER DEFAULT 0,
+    enabled BOOLEAN DEFAULT TRUE,
+    is_global BOOLEAN DEFAULT TRUE,
+    created_by UUID,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+-- Modified tables
+ALTER TABLE custom_assistants ADD COLUMN mode_id UUID;
+ALTER TABLE chats ADD COLUMN mode_id UUID;
+ALTER TABLE chats ADD COLUMN active_tools JSON;
+```
+
+#### Removed from websocket.py
+
+| Removed | Replacement |
+|---------|-------------|
+| Hardcoded Global KB search | `global_kb` primitive (always active) |
+| Hardcoded User Chats KB search | `user_chats_kb` primitive (mode-controlled) |
+| Hardcoded Assistant KB search | `kb_rag` primitive (mode-controlled) |
+| Hardcoded Local Docs search | `local_rag` primitive (mode-controlled) |
+
+---
+
+## Recent Changes (NC-0.7.17)
+
+### Agentic Task Queue
+FIFO task queue system for multi-step agentic workflows.
+
+**Key Design Principles**:
+- NO automatic LLM verification calls (wasteful and unreliable)
+- LLM manages its own task flow via `complete_task` and `fail_task` tools
+- Tasks auto-advance when `auto_continue=true` (default)
+- Priority support (higher = more urgent)
+- Pause/resume control for user override
+
+**Task Structure**:
+```json
+{
+  "id": "uuid",
+  "description": "Short task description",
+  "instructions": "Detailed instructions (up to 512 tokens)",
+  "status": "queued|in_progress|completed|failed|paused",
+  "auto_continue": true,
+  "priority": 0,
+  "result_summary": "Brief summary of what was done",
+  "source": "user|llm"
+}
+```
+
+**LLM Tools**:
+| Tool | Description |
+|------|-------------|
+| `add_task` | Add task with description, instructions, priority, auto_continue |
+| `add_tasks_batch` | Add multiple tasks at once (planning) |
+| `complete_task` | Mark current task done (with optional summary) |
+| `fail_task` | Mark current task failed (with reason) |
+| `skip_task` | Skip current task, move to next |
+| `get_task_queue` | Get queue status |
+| `clear_task_queue` | Clear all pending tasks |
+| `pause_task_queue` | Pause auto-execution |
+| `resume_task_queue` | Resume auto-execution |
+
+**System Prompt Integration**:
+When tasks are pending, the system prompt includes:
+- Current task with instructions
+- Queued tasks (first 5)
+- Recently completed tasks (last 3)
+- Instructions to use `complete_task` or `fail_task`
+
+**WebSocket Events**:
+- `task_queue_status` - Sent after each LLM response
+  - `queue_length`, `current_task`, `paused`, `completed_count`
+
+**Database Changes**:
+- `chats.chat_metadata` - JSON column for queue storage (NC-0.7.17 migration)
+
+---
+
+## Recent Changes (NC-0.7.16)
+
+### Hybrid RAG Search
+RAG now uses **hybrid search** combining semantic similarity with exact identifier matching.
+
+**Problem Solved**: Queries like "Rule 1S-2.053" were failing because:
+- Semantic search embeds the full phrase as one vector
+- Documents containing "1S-2.053" without "Rule" nearby scored below threshold
+- Specific identifiers have weak semantic meaning
+
+**Solution**: Detect identifiers in queries and run parallel search:
+1. **Semantic search** (existing FAISS cosine similarity)
+2. **Identifier search** (exact substring matching)
+3. **Merge results** with identifier matches boosted
+
+**Identifier Patterns Detected**:
+- Legal statutes: `1S-2.053`, `768.28`, `119.07(1)`
+- Rule references: `FAC 61G15-30`, `Rule 12-345`
+- Section citations: `§ 119.07`, `Section 768.28`
+- Case numbers: `2024-CF-001234`, `23-cv-12345`
+- Product codes: `ABC-123-XYZ`, `ICD-10-CM`
+
+**Unicode Normalization**:
+Documents often contain typographic characters that don't match user input:
+- Em dash `—` (U+2014) vs hyphen `-` (U+002D)
+- En dash `–` (U+2013) vs hyphen
+- Curly quotes `""` vs straight quotes `""`
+- Range words: "1 to 9" → "1-9", "5 through 10" → "5-10"
+
+The `_normalize_text_for_matching()` helper converts all variants to ASCII equivalents before comparison:
+- "1—9" in document matches "1-9" in query
+- "1-9" in document matches "1 to 9" in query
+- Range word conversion only applies when at least one side contains a digit (avoids "go to the" → "go-the")
+
+**Key Methods Added to RAGService**:
+- `_normalize_text_for_matching(text)` - Convert Unicode dashes/quotes to ASCII
+- `_extract_identifiers(query)` - Regex extraction of alphanumeric codes
+- `_identifier_search(db, identifiers, knowledge_store_ids, top_k)` - Substring search in chunks
+- `_merge_search_results(semantic, identifier, threshold, boost, top_k)` - Combine with boost
+
+**Behavior**:
+- Identifier matches get +0.15 score boost
+- Chunks found by both methods use higher score
+- Identifier-only matches are included even if semantic score is below threshold
+- Logs show `[RAG_HYBRID]` prefix for hybrid search activity
 
 ---
 
@@ -817,6 +1044,8 @@ Filter chains now use a **visual node-based editor** similar to n8n:
 The editor uses React Flow and supports all step types with intuitive configuration panels.
 
 ### Step Types
+
+**Core:**
 - `to_llm`: Ask LLM a question
 - `query`: Generate search query
 - `to_tool`: Execute a tool
@@ -828,11 +1057,26 @@ The editor uses React Flow and supports all step types with intuitive configurat
 - `call_chain`: Execute another chain
 - `stop`: Stop execution
 - `block`: Block with error
+- `keyword_check`: Quick keyword match (NC-0.7.15)
+
+**RAG Evaluators (NC-0.8.0.0):**
+- `local_rag`: Search user's uploaded docs for current chat
+- `kb_rag`: Search current assistant's knowledge base
+- `global_kb`: Search global knowledge bases (always active)
+- `user_chats_kb`: Search user's chat history KB
+
+**Dynamic Tools (NC-0.8.0.0):**
+- `export_tool`: Register LLM-triggered tool (`$WebSearch="..."`)
+- `user_hint`: Text selection popup menu item
+- `user_action`: Button below chat messages
 
 ### Variables
 - `$Query` - Original user input
 - `$PreviousResult` - Last step output
 - `$Var[name]` - Named outputs from earlier steps
+- `$Selected` - User's selected text (user_hint only)
+- `$MessageContent` - Full message content (user_action only)
+- `$1`, `$2`, etc. - Regex capture groups (export_tool only)
 
 ---
 
@@ -866,6 +1110,9 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.8.0.0 | 2026-01-05 | **Dynamic Tools & Assistant Modes** - Composable RAG via filter chains, user_hint/user_action nodes, export_tool for LLM triggers, Active Tools Bar, Assistant Modes presets |
+| NC-0.7.17 | 2026-01-05 | Agentic Task Queue - FIFO queue for multi-step workflows, LLM-managed task flow |
+| NC-0.7.16 | 2026-01-05 | Hybrid RAG search - combines semantic + identifier matching for legal/code references |
 | NC-0.7.15 | 2026-01-05 | Source-specific RAG prompts, keyword_check filter node, Admin panel refactor (partial), scroll fix, SQLAlchemy warning fix |
 | NC-0.7.14 | 2026-01-04 | Migration system fix - checks all migrations regardless of version |
 | NC-0.7.13 | 2026-01-04 | RAG context-aware query enhancement for follow-up questions |
@@ -958,11 +1205,14 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.7.15**
+Current: **NC-0.8.0.0**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 
 Key tables added/modified:
+- NC-0.8.0.0: `assistant_modes` table, `mode_id` and `active_tools` columns on `chats`, `mode_id` on `custom_assistants`
+- NC-0.7.17: `chats.chat_metadata` JSON column (task queue storage)
+- NC-0.7.16: No schema changes (hybrid RAG search is code-only)
 - NC-0.7.15: No schema changes (Admin refactor, RAG prompts stored in system_settings)
 - NC-0.7.14: No schema changes (migration system logic fix)
 - NC-0.7.13: No schema changes (RAG query enhancement)

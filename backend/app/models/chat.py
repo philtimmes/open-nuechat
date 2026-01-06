@@ -58,6 +58,16 @@ class Chat(Base):
     # Format: { "files": [...], "warnings": [...], "last_updated": "...", "auto_generated": true }
     code_summary = Column(JSON, nullable=True)
     
+    # Generic metadata for extensible features (task queue, etc.)
+    # Format varies by feature - see specific service for structure
+    chat_metadata = Column(JSON, nullable=True)
+    
+    # Assistant Mode (NC-0.8.0.0)
+    # mode_id: Which assistant mode preset is active
+    # active_tools: User's tool overrides (becomes "Custom" mode if differs from preset)
+    mode_id = Column(String(36), ForeignKey("assistant_modes.id", ondelete="SET NULL"), nullable=True)
+    active_tools = Column(JSON, nullable=True)  # ["web_search", "artifacts", ...]
+    
     # Knowledge base indexing
     is_knowledge_indexed = Column(Boolean, default=False)
     

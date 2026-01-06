@@ -1,6 +1,8 @@
 /**
  * FlowEditor - Visual node-based filter chain editor
  * Similar to n8n workflow builder with side panel configuration
+ * 
+ * NC-0.8.0.1: Added anti-aliasing, resizable panels, mobile responsiveness
  */
 import { useCallback, useState, useMemo, useRef, useEffect } from 'react';
 import {
@@ -20,6 +22,7 @@ import {
   Position,
   NodeProps,
   NodeChange,
+  MiniMap,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
@@ -103,6 +106,20 @@ const STEP_TYPES: Record<string, { icon: string; label: string; color: string; c
   compare: { icon: '⚖️', label: 'Compare', color: '#EC4899', category: 'Logic' },
   call_chain: { icon: '🔗', label: 'Call Chain', color: '#EC4899', category: 'Logic' },
   branch: { icon: '🔀', label: 'Branch', color: '#06B6D4', category: 'Logic' },
+  
+  // RAG Evaluators (NC-0.8.0.0)
+  local_rag: { icon: '📄', label: 'Local RAG', color: '#14B8A6', category: 'RAG' },
+  kb_rag: { icon: '📚', label: 'KB RAG', color: '#14B8A6', category: 'RAG' },
+  global_kb: { icon: '🌐', label: 'Global KB', color: '#14B8A6', category: 'RAG' },
+  user_chats_kb: { icon: '💬', label: 'User Chats KB', color: '#14B8A6', category: 'RAG' },
+  
+  // Dynamic Tools (NC-0.8.0.0)
+  export_tool: { icon: '🔌', label: 'Export Tool', color: '#F97316', category: 'Dynamic' },
+  user_hint: { icon: '💡', label: 'User Hint', color: '#F97316', category: 'Dynamic' },
+  user_action: { icon: '🎯', label: 'User Action', color: '#F97316', category: 'Dynamic' },
+  
+  // Chat Management
+  set_title: { icon: '📝', label: 'Set Title', color: '#6366F1', category: 'Chat' },
 };
 
 const COMPARISON_OPERATORS = [
@@ -120,6 +137,125 @@ const COMPARISON_OPERATORS = [
   { value: 'is_not_empty', label: 'is not empty' },
   { value: 'matches', label: 'matches regex' },
 ];
+
+// ============================================================================
+// MOBILE & RESPONSIVE UTILITIES (NC-0.8.0.1)
+// ============================================================================
+
+const MOBILE_BREAKPOINT = 768;
+const MIN_PANEL_WIDTH = 180;
+const MAX_PANEL_WIDTH = 400;
+const DEFAULT_PALETTE_WIDTH = 176; // w-44 = 11rem = 176px
+const DEFAULT_CONFIG_WIDTH = 320;  // w-80 = 20rem = 320px
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(
+    typeof window !== 'undefined' ? window.innerWidth < MOBILE_BREAKPOINT : false
+  );
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  return isMobile;
+}
+
+// Resizable panel handle component
+interface ResizeHandleProps {
+  onResize: (delta: number) => void;
+  position: 'left' | 'right';
+}
+
+function ResizeHandle({ onResize, position }: ResizeHandleProps) {
+  const isDragging = useRef(false);
+  const startX = useRef(0);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    isDragging.current = true;
+    startX.current = e.clientX;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging.current) return;
+      const delta = position === 'right' 
+        ? e.clientX - startX.current 
+        : startX.current - e.clientX;
+      startX.current = e.clientX;
+      onResize(delta);
+    };
+
+    const handleMouseUp = () => {
+      isDragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [onResize, position]);
+
+  // Touch support for mobile
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    isDragging.current = true;
+    startX.current = e.touches[0].clientX;
+    
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!isDragging.current) return;
+      const delta = position === 'right'
+        ? e.touches[0].clientX - startX.current
+        : startX.current - e.touches[0].clientX;
+      startX.current = e.touches[0].clientX;
+      onResize(delta);
+    };
+
+    const handleTouchEnd = () => {
+      isDragging.current = false;
+      document.removeEventListener('touchmove', handleTouchMove);
+      document.removeEventListener('touchend', handleTouchEnd);
+    };
+
+    document.addEventListener('touchmove', handleTouchMove);
+    document.addEventListener('touchend', handleTouchEnd);
+  }, [onResize, position]);
+
+  return (
+    <div
+      className={`absolute top-0 ${position === 'left' ? 'left-0' : 'right-0'} w-1 h-full cursor-col-resize hover:bg-[var(--color-primary)] active:bg-[var(--color-primary)] transition-colors z-10 group`}
+      onMouseDown={handleMouseDown}
+      onTouchStart={handleTouchStart}
+    >
+      <div className="absolute top-1/2 -translate-y-1/2 left-1/2 -translate-x-1/2 w-1 h-8 rounded-full bg-[var(--color-border)] group-hover:bg-[var(--color-primary)] transition-colors" />
+    </div>
+  );
+}
+
+// Mobile panel toggle button
+interface PanelToggleProps {
+  isOpen: boolean;
+  onClick: () => void;
+  icon: string;
+  label: string;
+  position: 'left' | 'right';
+}
+
+function PanelToggle({ isOpen, onClick, icon, label, position }: PanelToggleProps) {
+  return (
+    <button
+      onClick={onClick}
+      className={`fixed ${position === 'left' ? 'left-2' : 'right-2'} top-1/2 -translate-y-1/2 z-50 p-2 rounded-full bg-[var(--color-surface)] border border-[var(--color-border)] shadow-lg hover:bg-[var(--color-background)] transition-all`}
+      title={label}
+    >
+      <span className="text-lg">{icon}</span>
+    </button>
+  );
+}
 
 // ============================================================================
 // STEP NODE COMPONENT (Simplified - config in side panel)
@@ -262,6 +398,8 @@ interface NodePaletteProps {
 }
 
 function NodePalette({ onAddNode }: NodePaletteProps) {
+  const [searchTerm, setSearchTerm] = useState('');
+  
   const categories = useMemo(() => {
     const cats: Record<string, Array<{ type: string; icon: string; label: string; color: string }>> = {};
     Object.entries(STEP_TYPES).forEach(([type, info]) => {
@@ -270,39 +408,75 @@ function NodePalette({ onAddNode }: NodePaletteProps) {
     });
     return cats;
   }, []);
+  
+  // Filter items by search term
+  const filteredCategories = useMemo(() => {
+    if (!searchTerm.trim()) return categories;
+    const term = searchTerm.toLowerCase();
+    const filtered: typeof categories = {};
+    Object.entries(categories).forEach(([category, items]) => {
+      const matchingItems = items.filter(
+        item => item.label.toLowerCase().includes(term) || 
+                item.type.toLowerCase().includes(term) ||
+                category.toLowerCase().includes(term)
+      );
+      if (matchingItems.length > 0) {
+        filtered[category] = matchingItems;
+      }
+    });
+    return filtered;
+  }, [categories, searchTerm]);
 
   return (
-    <div className="bg-[var(--color-surface)] rounded-lg border border-[var(--color-border)] p-2 w-44">
+    <div className="w-full">
       <div className="text-xs font-medium text-[var(--color-text)] mb-2">Add Node</div>
-      {Object.entries(categories).map(([category, items]) => (
-        <div key={category} className="mb-2">
-          <div className="text-[10px] text-[var(--color-text-secondary)] mb-1 uppercase">{category}</div>
-          <div className="space-y-0.5">
-            {items.map(item => (
-              <button
-                key={item.type}
-                onClick={() => onAddNode(item.type)}
-                className="w-full px-2 py-1 rounded text-left text-xs flex items-center gap-1.5 hover:bg-[var(--color-background)] transition-colors"
-                style={{ color: 'var(--color-text)' }}
-              >
-                <span
-                  className="w-5 h-5 rounded flex items-center justify-center text-white text-[10px]"
-                  style={{ backgroundColor: item.color }}
+      
+      {/* Search input */}
+      <input
+        type="text"
+        placeholder="Search nodes..."
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        className="w-full px-2 py-1 mb-2 text-xs rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-[var(--color-text-secondary)]"
+      />
+      
+      <div className="max-h-[50vh] overflow-y-auto">
+        {Object.entries(filteredCategories).map(([category, items]) => (
+          <div key={category} className="mb-2">
+            <div className="text-[10px] text-[var(--color-text-secondary)] mb-1 uppercase sticky top-0 bg-[var(--color-surface)] py-0.5">{category}</div>
+            <div className="space-y-0.5">
+              {items.map(item => (
+                <button
+                  key={item.type}
+                  onClick={() => onAddNode(item.type)}
+                  className="w-full px-2 py-1.5 rounded text-left text-xs flex items-center gap-1.5 hover:bg-[var(--color-background)] active:bg-[var(--color-primary)]/20 transition-colors touch-manipulation"
+                  style={{ color: 'var(--color-text)' }}
                 >
-                  {item.icon}
-                </span>
-                <span>{item.label}</span>
-              </button>
-            ))}
+                  <span
+                    className="w-5 h-5 rounded flex items-center justify-center text-white text-[10px] flex-shrink-0"
+                    style={{ backgroundColor: item.color }}
+                  >
+                    {item.icon}
+                  </span>
+                  <span className="truncate">{item.label}</span>
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
+        ))}
+        {Object.keys(filteredCategories).length === 0 && (
+          <div className="text-xs text-[var(--color-text-secondary)] italic py-2">
+            No nodes match "{searchTerm}"
+          </div>
+        )}
+      </div>
+      
       <div className="border-t border-[var(--color-border)] mt-2 pt-2 text-[10px] text-[var(--color-text-secondary)]">
         <div className="font-medium mb-1">💡 Tips:</div>
         <ul className="space-y-0.5 list-disc list-inside">
           <li>Drag handles to connect nodes</li>
           <li>Click wire to delete it</li>
-          <li>Numbers show exec order</li>
+          <li>Drag panel edges to resize</li>
         </ul>
       </div>
     </div>
@@ -336,6 +510,9 @@ function VariableInspector({ steps, currentStepIndex }: VariableInspectorProps) 
         if (s.type === 'to_tool') varType = 'object';
         if (s.type === 'set_array') varType = 'array';
         if (s.type === 'compare') varType = 'boolean';
+        // RAG types return arrays of results
+        if (['local_rag', 'kb_rag', 'global_kb'].includes(s.type)) varType = 'array';
+        if (s.type === 'user_chats_kb') varType = 'string';
         
         vars.push({
           name: `$Var[${outputVar}]`,
@@ -952,6 +1129,214 @@ function ConfigPanel({ step, stepIndex, allSteps, onUpdate, onDelete, availableT
           </div>
         )}
 
+        {/* RAG Evaluators (NC-0.8.0.0) */}
+        {['local_rag', 'kb_rag', 'global_kb', 'user_chats_kb'].includes(step.type) && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Query Variable</label>
+              <input
+                type="text"
+                value={getConfigStr('query_var', '$Query')}
+                onChange={(e) => updateConfig('query_var', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                placeholder="$Query"
+              />
+            </div>
+            
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Output Variable</label>
+              <input
+                type="text"
+                value={getConfigStr('output_var', step.type === 'user_chats_kb' ? 'UserChatsKBResults' : 
+                  step.type === 'local_rag' ? 'LocalRAGResults' :
+                  step.type === 'kb_rag' ? 'KBRAGResults' : 'GlobalKBResults')}
+                onChange={(e) => updateConfig('output_var', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+              />
+            </div>
+            
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Top K Results</label>
+                <input
+                  type="number"
+                  value={Number(step.config?.top_k) || 5}
+                  onChange={(e) => updateConfig('top_k', parseInt(e.target.value) || 5)}
+                  min={1}
+                  max={20}
+                  className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Min Score</label>
+                <input
+                  type="number"
+                  value={Number(step.config?.threshold) || 0.4}
+                  onChange={(e) => updateConfig('threshold', parseFloat(e.target.value) || 0.4)}
+                  min={0}
+                  max={1}
+                  step={0.1}
+                  className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                />
+              </div>
+            </div>
+            
+            <p className="text-[10px] text-[var(--color-text-secondary)]">
+              {step.type === 'local_rag' && 'Searches documents uploaded to the current chat.'}
+              {step.type === 'kb_rag' && "Searches the current assistant's knowledge base."}
+              {step.type === 'global_kb' && 'Searches global knowledge bases.'}
+              {step.type === 'user_chats_kb' && "Searches user's indexed chat history."}
+            </p>
+          </div>
+        )}
+
+        {/* Dynamic Tools (NC-0.8.0.0) */}
+        {step.type === 'export_tool' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Tool Name</label>
+              <input
+                type="text"
+                value={getConfigStr('name', '')}
+                onChange={(e) => updateConfig('name', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                placeholder="e.g., WebSearch"
+              />
+            </div>
+            
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Trigger Pattern (Regex)</label>
+              <input
+                type="text"
+                value={getConfigStr('trigger_pattern', '')}
+                onChange={(e) => updateConfig('trigger_pattern', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] font-mono"
+                placeholder='e.g., \$WebSearch="([^"]+)"'
+              />
+            </div>
+            
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Advertise Text</label>
+              <textarea
+                value={getConfigStr('advertise_text', '')}
+                onChange={(e) => updateConfig('advertise_text', e.target.value)}
+                rows={2}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                placeholder="Text to add to system prompt"
+              />
+            </div>
+            
+            <div className="space-y-2">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={step.config?.advertise !== false}
+                  onChange={(e) => updateConfig('advertise', e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-xs text-[var(--color-text)]">Advertise to LLM</span>
+              </label>
+              
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={step.config?.erase_from_display !== false}
+                  onChange={(e) => updateConfig('erase_from_display', e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-xs text-[var(--color-text)]">Hide trigger from UI</span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {step.type === 'user_hint' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Label</label>
+              <input
+                type="text"
+                value={getConfigStr('label', '')}
+                onChange={(e) => updateConfig('label', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                placeholder="e.g., Explain"
+              />
+            </div>
+            
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Location</label>
+              <select
+                value={getConfigStr('location', 'response')}
+                onChange={(e) => updateConfig('location', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+              >
+                <option value="response">Response only</option>
+                <option value="query">Query only</option>
+                <option value="both">Both</option>
+              </select>
+            </div>
+            
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Prompt Template</label>
+              <textarea
+                value={getConfigStr('prompt', '')}
+                onChange={(e) => updateConfig('prompt', e.target.value)}
+                rows={3}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                placeholder="Use {$Selected} for selected text"
+              />
+            </div>
+            
+            <p className="text-[10px] text-[var(--color-text-secondary)]">
+              Shows in popup when user selects text in messages.
+            </p>
+          </div>
+        )}
+
+        {step.type === 'user_action' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Label</label>
+              <input
+                type="text"
+                value={getConfigStr('label', '')}
+                onChange={(e) => updateConfig('label', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                placeholder="e.g., Search Web"
+              />
+            </div>
+            
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Position</label>
+              <select
+                value={getConfigStr('position', 'response')}
+                onChange={(e) => updateConfig('position', e.target.value)}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+              >
+                <option value="response">Below responses</option>
+                <option value="query">Below queries</option>
+                <option value="input">In input area</option>
+              </select>
+            </div>
+            
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Prompt Template</label>
+              <textarea
+                value={getConfigStr('prompt', '')}
+                onChange={(e) => updateConfig('prompt', e.target.value)}
+                rows={3}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                placeholder="Use {$MessageContent} for message"
+              />
+            </div>
+            
+            <p className="text-[10px] text-[var(--color-text-secondary)]">
+              Shows as a button below messages.
+            </p>
+          </div>
+        )}
+
         {step.type === 'go_to_llm' && (
           <div className="space-y-3">
             <div>
@@ -1026,6 +1411,90 @@ function ConfigPanel({ step, stepIndex, allSteps, onUpdate, onDelete, availableT
             {step.type === 'filter_complete' && 'Ends the filter chain and proceeds to main AI'}
             {step.type === 'stop' && 'Stops all processing, no AI response'}
             {step.type === 'block' && 'Blocks the message with an error response'}
+          </div>
+        )}
+
+        {step.type === 'set_title' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Title Mode</label>
+              <select
+                value={step.config?.generate ? 'generate' : (step.config?.title_var ? 'variable' : 'static')}
+                onChange={(e) => {
+                  const mode = e.target.value;
+                  if (mode === 'generate') {
+                    updateConfig('generate', true);
+                    updateConfig('title', '');
+                    updateConfig('title_var', '');
+                  } else if (mode === 'variable') {
+                    updateConfig('generate', false);
+                    updateConfig('title', '');
+                  } else {
+                    updateConfig('generate', false);
+                    updateConfig('title_var', '');
+                  }
+                }}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+              >
+                <option value="static">Static Title</option>
+                <option value="variable">From Variable</option>
+                <option value="generate">AI Generated</option>
+              </select>
+            </div>
+
+            {!step.config?.generate && !step.config?.title_var && (
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Title</label>
+                <input
+                  type="text"
+                  value={getConfigStr('title', '')}
+                  onChange={(e) => updateConfig('title', e.target.value)}
+                  className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                  placeholder="Chat title (supports $Var[name])"
+                />
+              </div>
+            )}
+
+            {step.config?.title_var !== undefined && !step.config?.generate && (
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Title Variable</label>
+                <input
+                  type="text"
+                  value={getConfigStr('title_var', '')}
+                  onChange={(e) => updateConfig('title_var', e.target.value)}
+                  className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                  placeholder="$Var[GeneratedTitle]"
+                />
+              </div>
+            )}
+
+            {step.config?.generate && (
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Generation Prompt (optional)</label>
+                <textarea
+                  value={getConfigStr('generate_prompt', '')}
+                  onChange={(e) => updateConfig('generate_prompt', e.target.value)}
+                  className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] min-h-[60px]"
+                  placeholder="Custom prompt for title generation..."
+                />
+              </div>
+            )}
+
+            <div>
+              <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Max Length</label>
+              <input
+                type="number"
+                value={step.config?.max_length ?? 100}
+                onChange={(e) => updateConfig('max_length', parseInt(e.target.value) || 100)}
+                min={10}
+                max={255}
+                className="w-full px-2 py-1.5 rounded text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+              />
+            </div>
+
+            <p className="text-[10px] text-[var(--color-text-secondary)]">
+              Updates the chat title. Result stored in $Var[ChatTitle].
+            </p>
           </div>
         )}
 
@@ -1119,6 +1588,41 @@ function FlowEditorInner({ definition, onChange, availableTools, filterChains }:
   const { fitView } = useReactFlow();
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const initializedRef = useRef(false);
+  
+  // NC-0.8.0.1: Mobile & resize state
+  const isMobile = useIsMobile();
+  const [paletteWidth, setPaletteWidth] = useState(DEFAULT_PALETTE_WIDTH);
+  const [configWidth, setConfigWidth] = useState(DEFAULT_CONFIG_WIDTH);
+  const [showPalette, setShowPalette] = useState(!isMobile);
+  const [showConfig, setShowConfig] = useState(!isMobile);
+  
+  // Auto-collapse panels on mobile
+  useEffect(() => {
+    if (isMobile) {
+      setShowPalette(false);
+      setShowConfig(false);
+    } else {
+      setShowPalette(true);
+      setShowConfig(true);
+    }
+  }, [isMobile]);
+  
+  // Show config panel when a step is selected on mobile
+  useEffect(() => {
+    if (isMobile && selectedStepId) {
+      setShowConfig(true);
+      setShowPalette(false);
+    }
+  }, [isMobile, selectedStepId]);
+  
+  // Resize handlers
+  const handlePaletteResize = useCallback((delta: number) => {
+    setPaletteWidth(w => Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, w + delta)));
+  }, []);
+  
+  const handleConfigResize = useCallback((delta: number) => {
+    setConfigWidth(w => Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, w + delta)));
+  }, []);
   
   // Normalize steps
   const normalizedSteps = useMemo(() => {
@@ -1396,7 +1900,50 @@ function FlowEditorInner({ definition, onChange, availableTools, filterChains }:
   }, [normalizedSteps, onChange]);
 
   return (
-    <div className="w-full h-full flex">
+    <div className="w-full h-full flex relative">
+      {/* Mobile toggle buttons */}
+      {isMobile && !showPalette && (
+        <PanelToggle
+          isOpen={showPalette}
+          onClick={() => { setShowPalette(true); setShowConfig(false); }}
+          icon="➕"
+          label="Add nodes"
+          position="left"
+        />
+      )}
+      {isMobile && !showConfig && (
+        <PanelToggle
+          isOpen={showConfig}
+          onClick={() => { setShowConfig(true); setShowPalette(false); }}
+          icon="⚙️"
+          label="Configure"
+          position="right"
+        />
+      )}
+      
+      {/* Node Palette - Collapsible on mobile, resizable on desktop */}
+      {showPalette && (
+        <div 
+          className={`h-full bg-[var(--color-surface)] border-r border-[var(--color-border)] relative flex-shrink-0 ${
+            isMobile ? 'absolute left-0 top-0 z-40 shadow-xl' : ''
+          }`}
+          style={{ width: isMobile ? 'auto' : paletteWidth }}
+        >
+          {isMobile && (
+            <button
+              onClick={() => setShowPalette(false)}
+              className="absolute top-2 right-2 z-50 p-1 rounded hover:bg-[var(--color-background)]"
+            >
+              ✕
+            </button>
+          )}
+          <div className="p-2 h-full overflow-y-auto">
+            <NodePalette onAddNode={(type) => { addNode(type); if (isMobile) setShowPalette(false); }} />
+          </div>
+          {!isMobile && <ResizeHandle onResize={handlePaletteResize} position="right" />}
+        </div>
+      )}
+      
       {/* Canvas */}
       <div className="flex-1 h-full relative">
         <ReactFlow
@@ -1413,19 +1960,50 @@ function FlowEditorInner({ definition, onChange, availableTools, filterChains }:
           defaultEdgeOptions={{
             markerEnd: { type: MarkerType.ArrowClosed },
           }}
-          style={{ backgroundColor: 'var(--color-background)' }}
-          onPaneClick={() => { setSelectedStepId(null); setEdgeContextMenu(null); }}
+          // NC-0.8.0.1: Anti-aliasing and smooth rendering
+          style={{ 
+            backgroundColor: 'var(--color-background)',
+          }}
+          className="flow-editor-canvas"
+          onPaneClick={() => { 
+            setSelectedStepId(null); 
+            setEdgeContextMenu(null);
+            if (isMobile) setShowConfig(false);
+          }}
+          // Touch-friendly settings for mobile
+          panOnScroll={!isMobile}
+          panOnDrag={true}
+          zoomOnScroll={!isMobile}
+          zoomOnPinch={true}
+          zoomOnDoubleClick={false}
+          selectNodesOnDrag={false}
+          // Prevent accidental selections on touch
+          selectionOnDrag={!isMobile}
         >
           <Background color="var(--color-border)" gap={20} />
           <Controls
+            className="flow-controls"
             style={{
               backgroundColor: 'var(--color-surface)',
               borderColor: 'var(--color-border)',
             }}
+            showInteractive={!isMobile}
           />
-          <Panel position="top-left">
-            <NodePalette onAddNode={addNode} />
-          </Panel>
+          {/* MiniMap for easier navigation */}
+          {!isMobile && (
+            <MiniMap
+              nodeColor={(node) => {
+                const step = normalizedSteps.find(s => s.id === node.id);
+                if (!step) return 'var(--color-border)';
+                return STEP_TYPES[step.type]?.color || '#6B7280';
+              }}
+              maskColor="rgba(0, 0, 0, 0.2)"
+              style={{
+                backgroundColor: 'var(--color-surface)',
+                border: '1px solid var(--color-border)',
+              }}
+            />
+          )}
         </ReactFlow>
         
         {/* Edge Context Menu */}
@@ -1450,18 +2028,55 @@ function FlowEditorInner({ definition, onChange, availableTools, filterChains }:
         )}
       </div>
       
-      {/* Config Panel */}
-      <div className="w-80 h-full border-l border-[var(--color-border)] bg-[var(--color-surface)]">
-        <ConfigPanel
-          step={selectedStep}
-          stepIndex={selectedStepIndex}
-          allSteps={normalizedSteps}
-          onUpdate={updateSelectedStep}
-          onDelete={deleteSelectedStep}
-          availableTools={availableTools}
-          filterChains={filterChains}
-        />
-      </div>
+      {/* Config Panel - Collapsible on mobile, resizable on desktop */}
+      {showConfig && (
+        <div 
+          className={`h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] relative flex-shrink-0 ${
+            isMobile ? 'absolute right-0 top-0 z-40 shadow-xl w-full max-w-[320px]' : ''
+          }`}
+          style={{ width: isMobile ? undefined : configWidth }}
+        >
+          {!isMobile && <ResizeHandle onResize={handleConfigResize} position="left" />}
+          {isMobile && (
+            <button
+              onClick={() => setShowConfig(false)}
+              className="absolute top-2 right-2 z-50 p-1 rounded hover:bg-[var(--color-background)]"
+            >
+              ✕
+            </button>
+          )}
+          <ConfigPanel
+            step={selectedStep}
+            stepIndex={selectedStepIndex}
+            allSteps={normalizedSteps}
+            onUpdate={updateSelectedStep}
+            onDelete={deleteSelectedStep}
+            availableTools={availableTools}
+            filterChains={filterChains}
+          />
+        </div>
+      )}
+      
+      {/* FlowEditor-specific styles (anti-aliasing now in global index.css) */}
+      <style>{`
+        .flow-controls button {
+          background: var(--color-surface) !important;
+          border-color: var(--color-border) !important;
+          color: var(--color-text) !important;
+        }
+        .flow-controls button:hover {
+          background: var(--color-background) !important;
+        }
+        /* Mobile touch improvements */
+        @media (max-width: 768px) {
+          .flow-editor-canvas .react-flow__renderer {
+            touch-action: pan-x pan-y;
+          }
+          .flow-editor-canvas .react-flow__node {
+            touch-action: none;
+          }
+        }
+      `}</style>
     </div>
   );
 }

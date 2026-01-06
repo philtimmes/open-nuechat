@@ -27,6 +27,9 @@ export interface Chat {
   system_prompt?: string;
   is_shared: boolean;
   is_knowledge_indexed?: boolean;  // Part of user's chat knowledge base
+  // Assistant Mode (NC-0.8.0.0)
+  mode_id?: string;
+  active_tools?: string[];  // User's tool overrides
   created_at: string;
   updated_at: string;
   total_input_tokens: number;
@@ -432,4 +435,58 @@ export interface PaginatedResponse<T> {
   page: number;
   page_size: number;
   has_more: boolean;
+}
+
+// Assistant Mode types (NC-0.8.0.0)
+export interface AssistantMode {
+  id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  active_tools: string[];
+  advertised_tools: string[];
+  filter_chain_id?: string;
+  sort_order: number;
+  enabled: boolean;
+  is_global: boolean;
+  created_by?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// Dynamic Tool types (NC-0.8.0.0)
+export interface DynamicTool {
+  name: string;
+  label: string;
+  icon?: string;
+  location: 'response' | 'query' | 'both';
+  trigger_source: 'llm' | 'user' | 'both';
+}
+
+export interface UserHint {
+  type: 'user_hint';
+  label: string;
+  icon?: string;
+  location: 'response' | 'query' | 'both';
+  prompt?: string;
+}
+
+export interface UserAction {
+  type: 'user_action';
+  label: string;
+  icon?: string;
+  position: 'response' | 'query' | 'input';
+  prompt?: string;
+}
+
+// Tool icon state
+export type ToolState = 'active' | 'inactive' | 'always';
+
+export interface ToolDefinition {
+  id: string;
+  name: string;
+  label: string;
+  icon: string;  // SVG path or inline SVG
+  category: 'always' | 'mode' | 'toggle';
+  description?: string;
 }

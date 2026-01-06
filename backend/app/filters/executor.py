@@ -59,6 +59,11 @@ class ExecutionContext:
     chain_name: str = ""
     debug: bool = False
     
+    # Content source flags (NC-0.8.0.0)
+    # Indicates where the content being processed originated
+    from_llm: bool = False    # True when processing LLM output
+    from_user: bool = False   # True when processing user input
+    
     # The original query
     original_query: str = ""
     
@@ -1450,5 +1455,475 @@ class ChainExecutor:
             elif on_no_match == "go_to_llm":
                 ctx = await self._prim_go_to_llm({}, ctx)
             # "continue" does nothing special
+        
+        return ctx
+    
+    # =========================================================================
+    # RAG EVALUATOR PRIMITIVES (NC-0.8.0.0)
+    # =========================================================================
+    
+    async def _prim_local_rag(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Search user's uploaded documents for current chat.
+        
+        Config:
+            query_var: Variable containing the query (default: $Query)
+            output_var: Variable to store results (default: LocalRAGResults)
+            top_k: Number of results to return (default: 5)
+            threshold: Minimum similarity score (default: 0.4)
+        """
+        from app.services.rag import RAGService
+        from app.db.database import async_session_maker
+        from app.models import User
+        
+        query_var = config.get("query_var", "$Query")
+        output_var = config.get("output_var", "LocalRAGResults")
+        top_k = config.get("top_k", 5)
+        threshold = config.get("threshold", 0.4)
+        
+        query = ctx.resolve_variable(query_var)
+        if not query:
+            query = ctx.original_query
+        
+        ctx.debug_log("  local_rag - query", query)
+        
+        try:
+            async with async_session_maker() as db:
+                rag_service = RAGService()
+                # Search documents uploaded to this chat
+                results = await rag_service.search_chat_documents(
+                    db=db,
+                    chat_id=ctx.chat_id,
+                    query=str(query),
+                    top_k=top_k,
+                    threshold=threshold
+                )
+                
+                ctx.debug_log("  local_rag - results count", len(results))
+                ctx.set_variable(output_var, results)
+                ctx.previous_result = results
+        except Exception as e:
+            ctx.debug_log("  local_rag - error", str(e))
+            ctx.set_variable(output_var, [])
+            ctx.previous_result = []
+        
+        return ctx
+    
+    async def _prim_kb_rag(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Search current assistant's knowledge base.
+        
+        Config:
+            query_var: Variable containing the query (default: $Query)
+            output_var: Variable to store results (default: KBRAGResults)
+            top_k: Number of results to return (default: 5)
+            threshold: Minimum similarity score (default: 0.4)
+        """
+        from app.services.rag import RAGService
+        from app.db.database import async_session_maker
+        from app.models import Chat, CustomAssistant
+        from sqlalchemy import select
+        
+        query_var = config.get("query_var", "$Query")
+        output_var = config.get("output_var", "KBRAGResults")
+        top_k = config.get("top_k", 5)
+        threshold = config.get("threshold", 0.4)
+        
+        query = ctx.resolve_variable(query_var)
+        if not query:
+            query = ctx.original_query
+        
+        ctx.debug_log("  kb_rag - query", query)
+        
+        try:
+            async with async_session_maker() as db:
+                # Get chat's assistant
+                chat_result = await db.execute(
+                    select(Chat).where(Chat.id == ctx.chat_id)
+                )
+                chat = chat_result.scalar_one_or_none()
+                
+                if not chat or not chat.assistant_id:
+                    ctx.debug_log("  kb_rag - no assistant for this chat")
+                    ctx.set_variable(output_var, [])
+                    ctx.previous_result = []
+                    return ctx
+                
+                # Get assistant's knowledge stores
+                assistant_result = await db.execute(
+                    select(CustomAssistant).where(CustomAssistant.id == chat.assistant_id)
+                )
+                assistant = assistant_result.scalar_one_or_none()
+                
+                if not assistant or not assistant.knowledge_stores:
+                    ctx.debug_log("  kb_rag - assistant has no knowledge stores")
+                    ctx.set_variable(output_var, [])
+                    ctx.previous_result = []
+                    return ctx
+                
+                # Get user for RAG service
+                user_result = await db.execute(
+                    select(User).where(User.id == ctx.user_id)
+                )
+                user = user_result.scalar_one_or_none()
+                
+                if not user:
+                    ctx.set_variable(output_var, [])
+                    ctx.previous_result = []
+                    return ctx
+                
+                rag_service = RAGService()
+                kb_ids = [str(ks.id) for ks in assistant.knowledge_stores]
+                
+                results = await rag_service.search_knowledge_stores(
+                    db=db,
+                    user=user,
+                    query=str(query),
+                    knowledge_store_ids=kb_ids,
+                    top_k=top_k,
+                    bypass_access_check=True  # Assistant access is pre-authorized
+                )
+                
+                # Filter by threshold
+                results = [r for r in results if r.get("similarity", 0) >= threshold]
+                
+                ctx.debug_log("  kb_rag - results count", len(results))
+                ctx.set_variable(output_var, results)
+                ctx.previous_result = results
+        except Exception as e:
+            ctx.debug_log("  kb_rag - error", str(e))
+            ctx.set_variable(output_var, [])
+            ctx.previous_result = []
+        
+        return ctx
+    
+    async def _prim_global_kb(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Search global knowledge bases.
+        
+        Config:
+            query_var: Variable containing the query (default: $Query)
+            output_var: Variable to store results (default: GlobalKBResults)
+            top_k: Number of results to return (default: 5)
+            threshold: Minimum similarity score (default: 0.4)
+            kb_ids: Optional list of specific KB IDs to search
+        """
+        from app.services.rag import RAGService
+        from app.db.database import async_session_maker
+        
+        query_var = config.get("query_var", "$Query")
+        output_var = config.get("output_var", "GlobalKBResults")
+        top_k = config.get("top_k", 5)
+        threshold = config.get("threshold", 0.4)
+        kb_ids = config.get("kb_ids")  # Optional specific KBs
+        
+        query = ctx.resolve_variable(query_var)
+        if not query:
+            query = ctx.original_query
+        
+        ctx.debug_log("  global_kb - query", query)
+        
+        try:
+            async with async_session_maker() as db:
+                rag_service = RAGService()
+                
+                results, store_names = await rag_service.search_global_stores(
+                    db=db,
+                    query=str(query),
+                    chat_id=ctx.chat_id,
+                    top_k=top_k,
+                    threshold=threshold
+                )
+                
+                ctx.debug_log("  global_kb - results count", len(results))
+                ctx.debug_log("  global_kb - stores", store_names)
+                ctx.set_variable(output_var, results)
+                ctx.set_variable(output_var + "_stores", store_names)
+                ctx.previous_result = results
+        except Exception as e:
+            ctx.debug_log("  global_kb - error", str(e))
+            ctx.set_variable(output_var, [])
+            ctx.previous_result = []
+        
+        return ctx
+    
+    async def _prim_user_chats_kb(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Search user's chat history knowledge base.
+        
+        Config:
+            query_var: Variable containing the query (default: $Query)
+            output_var: Variable to store results (default: UserChatsKBResults)
+            top_k: Number of results to return (default: 5)
+            threshold: Minimum similarity score (default: 0.4)
+        """
+        from app.services.rag import RAGService
+        from app.db.database import async_session_maker
+        from app.models import User
+        from sqlalchemy import select
+        
+        query_var = config.get("query_var", "$Query")
+        output_var = config.get("output_var", "UserChatsKBResults")
+        top_k = config.get("top_k", 5)
+        threshold = config.get("threshold", 0.4)
+        
+        query = ctx.resolve_variable(query_var)
+        if not query:
+            query = ctx.original_query
+        
+        ctx.debug_log("  user_chats_kb - query", query)
+        
+        try:
+            async with async_session_maker() as db:
+                # Get user's chat knowledge store
+                user_result = await db.execute(
+                    select(User).where(User.id == ctx.user_id)
+                )
+                user = user_result.scalar_one_or_none()
+                
+                if not user:
+                    ctx.set_variable(output_var, [])
+                    ctx.previous_result = []
+                    return ctx
+                
+                chat_kb_enabled = getattr(user, 'all_chats_knowledge_enabled', False)
+                chat_kb_store = getattr(user, 'chat_knowledge_store_id', None)
+                
+                if not chat_kb_enabled or not chat_kb_store:
+                    ctx.debug_log("  user_chats_kb - feature not enabled for user")
+                    ctx.set_variable(output_var, [])
+                    ctx.previous_result = []
+                    return ctx
+                
+                rag_service = RAGService()
+                results = await rag_service.get_knowledge_store_context(
+                    db=db,
+                    user=user,
+                    query=str(query),
+                    knowledge_store_ids=[chat_kb_store],
+                    bypass_access_check=True,
+                    chat_id=ctx.chat_id
+                )
+                
+                # Results come as formatted string, parse if needed
+                ctx.debug_log("  user_chats_kb - results", results[:200] if results else "None")
+                ctx.set_variable(output_var, results or "")
+                ctx.previous_result = results or ""
+        except Exception as e:
+            ctx.debug_log("  user_chats_kb - error", str(e))
+            ctx.set_variable(output_var, "")
+            ctx.previous_result = ""
+        
+        return ctx
+    
+    # =========================================================================
+    # DYNAMIC TOOL PRIMITIVES (NC-0.8.0.0)
+    # =========================================================================
+    
+    async def _prim_export_tool(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Register a dynamic tool that LLM can invoke via pattern.
+        
+        This primitive registers the tool definition in context for later use.
+        The actual triggering happens in the output filter chain.
+        
+        Config:
+            name: Tool name (e.g., "WebSearch")
+            trigger_pattern: Regex to detect invocation (e.g., r'\\$WebSearch="([^"]+)"')
+            advertise: Whether to include in system prompt (default: True)
+            advertise_text: Text to add to system prompt
+            erase_from_display: Hide trigger from UI (default: True)
+            keep_in_history: Keep in message content (default: True)
+            on_trigger: List of steps to execute when triggered
+        """
+        name = config.get("name", "")
+        trigger_pattern = config.get("trigger_pattern", "")
+        advertise = config.get("advertise", True)
+        advertise_text = config.get("advertise_text", "")
+        erase_from_display = config.get("erase_from_display", True)
+        keep_in_history = config.get("keep_in_history", True)
+        on_trigger = config.get("on_trigger", [])
+        button = config.get("button", {})
+        
+        if not name:
+            ctx.debug_log("  export_tool - no name specified")
+            return ctx
+        
+        # Store tool definition in context for use by the system
+        tool_def = {
+            "name": name,
+            "trigger_pattern": trigger_pattern,
+            "advertise": advertise,
+            "advertise_text": advertise_text,
+            "erase_from_display": erase_from_display,
+            "keep_in_history": keep_in_history,
+            "on_trigger": on_trigger,
+            "button": button,
+        }
+        
+        # Get or create exported tools list
+        exported_tools = ctx.variables.get("_exported_tools", [])
+        exported_tools.append(tool_def)
+        ctx.set_variable("_exported_tools", exported_tools)
+        
+        ctx.debug_log("  export_tool - registered", name)
+        
+        return ctx
+    
+    async def _prim_user_hint(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Register a text selection popup menu item.
+        
+        Config:
+            label: Display label (e.g., "Explain")
+            icon: Path to SVG icon
+            location: Where to show - "response", "query", or "both"
+            prompt: Prompt template with {$Selected} placeholder
+            on_trigger: Optional list of steps for complex flows
+        """
+        label = config.get("label", "")
+        icon = config.get("icon", "")
+        location = config.get("location", "response")
+        prompt = config.get("prompt", "")
+        on_trigger = config.get("on_trigger", [])
+        
+        if not label:
+            ctx.debug_log("  user_hint - no label specified")
+            return ctx
+        
+        hint_def = {
+            "type": "user_hint",
+            "label": label,
+            "icon": icon,
+            "location": location,
+            "prompt": prompt,
+            "on_trigger": on_trigger,
+        }
+        
+        # Get or create user hints list
+        user_hints = ctx.variables.get("_user_hints", [])
+        user_hints.append(hint_def)
+        ctx.set_variable("_user_hints", user_hints)
+        
+        ctx.debug_log("  user_hint - registered", label)
+        
+        return ctx
+    
+    async def _prim_user_action(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Register a button below chat messages.
+        
+        Config:
+            label: Display label (e.g., "Search Web")
+            icon: Path to SVG icon  
+            position: Where to show - "response", "query", or "input"
+            prompt: Prompt template with {$MessageContent} placeholder
+            on_trigger: Optional list of steps for complex flows
+        """
+        label = config.get("label", "")
+        icon = config.get("icon", "")
+        position = config.get("position", "response")
+        prompt = config.get("prompt", "")
+        on_trigger = config.get("on_trigger", [])
+        
+        if not label:
+            ctx.debug_log("  user_action - no label specified")
+            return ctx
+        
+        action_def = {
+            "type": "user_action",
+            "label": label,
+            "icon": icon,
+            "position": position,
+            "prompt": prompt,
+            "on_trigger": on_trigger,
+        }
+        
+        # Get or create user actions list
+        user_actions = ctx.variables.get("_user_actions", [])
+        user_actions.append(action_def)
+        ctx.set_variable("_user_actions", user_actions)
+        
+        ctx.debug_log("  user_action - registered", label)
+        
+        return ctx
+    
+    # =========================================================================
+    # CHAT MANAGEMENT PRIMITIVES
+    # =========================================================================
+    
+    async def _prim_set_title(self, config: dict, ctx: ExecutionContext) -> ExecutionContext:
+        """
+        Update the current chat's title.
+        
+        Config:
+            title: The new title (can include variables like $Var[MyTitle])
+            title_var: Variable containing the title (alternative to title)
+            max_length: Maximum title length (default: 100, max: 255)
+            generate: If true, ask LLM to generate a title based on the query
+            generate_prompt: Custom prompt for title generation
+        """
+        from app.db.database import async_session_maker
+        from sqlalchemy import update
+        from app.models.chat import Chat
+        
+        # Determine the title to set
+        title = None
+        
+        # Option 1: Direct title
+        if config.get("title"):
+            title = ctx.interpolate(config.get("title"))
+        
+        # Option 2: From variable
+        elif config.get("title_var"):
+            title_var = config.get("title_var")
+            title = ctx.resolve_variable(title_var)
+            if title:
+                title = str(title)
+        
+        # Option 3: Generate with LLM
+        elif config.get("generate", False):
+            if not self._llm_func:
+                ctx.debug_log("  set_title - cannot generate, no LLM function")
+                return ctx
+            
+            generate_prompt = config.get("generate_prompt", 
+                "Generate a short, descriptive title (5-8 words max) for a conversation that starts with this message. "
+                "Output only the title, no quotes or extra text.")
+            
+            prompt = f"{generate_prompt}\n\nMessage: {ctx.original_query}"
+            system = "You are a title generator. Output only the title, nothing else."
+            
+            title = await self._llm_func(prompt, system)
+            title = title.strip().strip('"\'')
+            ctx.debug_log("  set_title - generated", title)
+        
+        if not title:
+            ctx.debug_log("  set_title - no title specified or generated")
+            return ctx
+        
+        # Enforce max length
+        max_length = min(config.get("max_length", 100), 255)
+        if len(title) > max_length:
+            title = title[:max_length - 3] + "..."
+        
+        ctx.debug_log("  set_title - updating chat title", title)
+        
+        try:
+            async with async_session_maker() as db:
+                await db.execute(
+                    update(Chat)
+                    .where(Chat.id == ctx.chat_id)
+                    .values(title=title)
+                )
+                await db.commit()
+                
+            ctx.debug_log("  set_title - success")
+            ctx.previous_result = title
+            ctx.set_variable("ChatTitle", title)
+            
+        except Exception as e:
+            ctx.debug_log("  set_title - error", str(e))
+            logger.error(f"Failed to update chat title: {e}")
         
         return ctx

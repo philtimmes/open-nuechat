@@ -231,6 +231,22 @@ export interface FilterChainDef {
   max_iterations: number;
   debug: boolean;
   skip_if_rag_hit: boolean;
+  // Export as dynamic tool fields (NC-0.8.0.0)
+  export_as_tool: boolean;
+  tool_name?: string;
+  tool_label?: string;
+  advertise_to_llm: boolean;
+  advertise_text?: string;
+  trigger_pattern?: string;
+  trigger_source: 'llm' | 'user' | 'both';
+  erase_from_display: boolean;
+  keep_in_history: boolean;
+  button_enabled: boolean;
+  button_icon?: string;
+  button_location: 'response' | 'query' | 'both';
+  button_trigger_mode: 'immediate' | 'modal' | 'selection';
+  tool_variables?: Array<{ name: string; label: string; default?: string; type?: string }>;
+  // Definition and metadata
   definition: { steps: FilterChainStep[] };
   created_at?: string;
   updated_at?: string;
@@ -281,7 +297,7 @@ export interface GPTCategory {
   updated_at: string;
 }
 
-export type TabId = 'system' | 'oauth' | 'llm' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'categories' | 'dev';
+export type TabId = 'system' | 'oauth' | 'llm' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'categories' | 'modes' | 'dev';
 
 // Common props for tab components
 export interface TabProps {

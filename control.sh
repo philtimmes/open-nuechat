@@ -45,6 +45,7 @@ NATIVE_VENV_DIR="${NATIVE_VENV_DIR:-./venv}"
 NATIVE_DATA_DIR="${NATIVE_DATA_DIR:-/opt/nuechat/_data}"
 NATIVE_PID_DIR="${NATIVE_PID_DIR:-/tmp/nuechat}"
 NATIVE_LOG_DIR="${NATIVE_LOG_DIR:-/var/log/nuechat}"
+NATIVE_SKIP_VENV=false  # Set to true if using conda or external venv
 
 # -----------------------------------------------------------------------------
 # Helper Functions
@@ -1170,15 +1171,28 @@ native_build() {
     native_check_node
     native_setup_dirs
     
-    # Create Python virtual environment
-    if [ ! -d "$NATIVE_VENV_DIR" ]; then
-        log_info "Creating Python virtual environment..."
-        python3 -m venv "$NATIVE_VENV_DIR"
+    # Check if already in a conda or virtual environment
+    if [ -n "$CONDA_PREFIX" ]; then
+        log_info "Detected conda environment: $CONDA_DEFAULT_ENV"
+        NATIVE_SKIP_VENV=true
+    elif [ -n "$VIRTUAL_ENV" ]; then
+        log_info "Detected virtual environment: $VIRTUAL_ENV"
+        NATIVE_SKIP_VENV=true
     fi
     
-    # Activate venv and install backend deps
+    if [ "$NATIVE_SKIP_VENV" = true ]; then
+        log_info "Using existing environment, skipping venv creation..."
+    else
+        # Create Python virtual environment
+        if [ ! -d "$NATIVE_VENV_DIR" ]; then
+            log_info "Creating Python virtual environment..."
+            python3 -m venv "$NATIVE_VENV_DIR"
+        fi
+        source "$NATIVE_VENV_DIR/bin/activate"
+    fi
+    
+    # Install backend deps
     log_info "Installing backend dependencies..."
-    source "$NATIVE_VENV_DIR/bin/activate"
     pip install --upgrade pip
     pip install -r backend/requirements.txt
     
@@ -1189,9 +1203,12 @@ native_build() {
     cd ..
     
     log_success "Native build completed!"
-    echo ""
-    echo "To activate the virtual environment manually:"
-    echo "  source $NATIVE_VENV_DIR/bin/activate"
+    
+    if [ "$NATIVE_SKIP_VENV" = false ]; then
+        echo ""
+        echo "To activate the virtual environment manually:"
+        echo "  source $NATIVE_VENV_DIR/bin/activate"
+    fi
 }
 
 native_start() {
@@ -1219,12 +1236,25 @@ native_start() {
         set +a
     fi
     
+    # Determine Python environment
+    local use_venv=false
+    if [ -n "$CONDA_PREFIX" ]; then
+        log_info "Using conda environment: $CONDA_DEFAULT_ENV"
+    elif [ -n "$VIRTUAL_ENV" ]; then
+        log_info "Using virtual environment: $VIRTUAL_ENV"
+    elif [ -d "$NATIVE_VENV_DIR" ]; then
+        log_info "Activating venv: $NATIVE_VENV_DIR"
+        source "$NATIVE_VENV_DIR/bin/activate"
+        use_venv=true
+    else
+        log_warning "No Python environment detected. Using system Python."
+    fi
+    
     # Check if already running
     if [ -f "$NATIVE_PID_DIR/backend.pid" ] && kill -0 $(cat "$NATIVE_PID_DIR/backend.pid") 2>/dev/null; then
         log_warning "Backend already running (PID: $(cat $NATIVE_PID_DIR/backend.pid))"
     else
         log_info "Starting backend..."
-        source "$NATIVE_VENV_DIR/bin/activate"
         
         # Set default env vars
         export DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:///$NATIVE_DATA_DIR/nuechat.db}"
@@ -1431,8 +1461,20 @@ native_logs() {
 }
 
 native_shell() {
+    # Check if already in an environment
+    if [ -n "$CONDA_PREFIX" ]; then
+        log_info "Already in conda environment: $CONDA_DEFAULT_ENV"
+        echo "You're already in the conda environment."
+        return 0
+    elif [ -n "$VIRTUAL_ENV" ]; then
+        log_info "Already in virtual environment: $VIRTUAL_ENV"
+        echo "You're already in a virtual environment."
+        return 0
+    fi
+    
     if [ ! -d "$NATIVE_VENV_DIR" ]; then
-        log_error "Virtual environment not found. Run './control.sh --native build' first."
+        log_error "No virtual environment found at $NATIVE_VENV_DIR"
+        log_info "If using conda, activate it with: conda activate open-nuechat"
         exit 1
     fi
     
@@ -1497,6 +1539,192 @@ native_clean() {
         echo "To remove data: rm -rf $NATIVE_DATA_DIR"
     else
         log_info "Cleanup cancelled."
+    fi
+}
+
+native_faiss_build() {
+    local profile=""
+    local force=""
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --profile)
+                profile="$2"
+                shift 2
+                ;;
+            --force)
+                force="true"
+                shift
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Usage: ./control.sh --native faiss-build --profile <rocm|cuda|cpu> [--force]"
+                exit 1
+                ;;
+        esac
+    done
+    
+    if [ -z "$profile" ]; then
+        log_error "Profile required"
+        echo "Usage: ./control.sh --native faiss-build --profile <rocm|cuda|cpu> [--force]"
+        exit 1
+    fi
+    
+    # Validate profile
+    case $profile in
+        rocm|cuda|cpu)
+            ;;
+        *)
+            log_error "Invalid profile: $profile (must be rocm, cuda, or cpu)"
+            exit 1
+            ;;
+    esac
+    
+    # Check for Python environment
+    if [ -z "$CONDA_PREFIX" ] && [ -z "$VIRTUAL_ENV" ]; then
+        if [ -d "$NATIVE_VENV_DIR" ]; then
+            source "$NATIVE_VENV_DIR/bin/activate"
+        else
+            log_error "No Python environment active. Activate conda or run './control.sh --native build' first."
+            exit 1
+        fi
+    fi
+    
+    local wheels_dir="backend/wheels"
+    local wheel_pattern=""
+    
+    case $profile in
+        rocm)
+            wheel_pattern="faiss*rocm*.whl"
+            ;;
+        cuda)
+            wheel_pattern="faiss*cuda*.whl"
+            ;;
+        cpu)
+            wheel_pattern="faiss*cpu*.whl"
+            ;;
+    esac
+    
+    # Check if wheel already exists
+    if ls "$wheels_dir"/$wheel_pattern 1>/dev/null 2>&1 || ls "$wheels_dir"/faiss*.whl 1>/dev/null 2>&1; then
+        if [ "$force" != "true" ]; then
+            echo ""
+            log_success "FAISS wheel already exists:"
+            ls -la "$wheels_dir"/faiss*.whl
+            echo ""
+            echo "To install: pip install $wheels_dir/faiss*.whl"
+            echo "Use --force to rebuild anyway."
+            return 0
+        else
+            log_warning "Force rebuild requested."
+        fi
+    fi
+    
+    echo ""
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║              Building FAISS Wheel (Native) - $profile               ${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    
+    # Check prerequisites based on profile
+    case $profile in
+        rocm)
+            if ! command -v rocminfo &> /dev/null; then
+                log_error "ROCm not found. Please install ROCm first."
+                echo "See: https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html"
+                exit 1
+            fi
+            log_info "ROCm detected: $(rocminfo 2>/dev/null | grep 'Marketing Name' | head -1 || echo 'OK')"
+            ;;
+        cuda)
+            if ! command -v nvcc &> /dev/null && [ ! -d "/usr/local/cuda" ]; then
+                log_error "CUDA toolkit not found. Please install CUDA first."
+                exit 1
+            fi
+            log_info "CUDA detected: $(nvcc --version 2>/dev/null | grep release || echo 'OK')"
+            ;;
+        cpu)
+            log_info "Building CPU-only FAISS (no GPU required)"
+            ;;
+    esac
+    
+    log_info "Python version: $(python --version)"
+    log_info "This may take 10-15 minutes..."
+    echo ""
+    
+    # Install build dependencies
+    log_info "Installing build dependencies..."
+    pip install --upgrade pip cmake swig numpy build
+    
+    # Check for system dependencies
+    if ! command -v cmake &> /dev/null; then
+        log_error "cmake not found. Please install: sudo apt install cmake"
+        exit 1
+    fi
+    
+    if ! ldconfig -p | grep -q openblas; then
+        log_warning "OpenBLAS not detected. Install with: sudo apt install libopenblas-dev"
+    fi
+    
+    # Clone faiss-wheels
+    local tmpdir=$(mktemp -d)
+    log_info "Cloning faiss-wheels to $tmpdir..."
+    git clone --recursive https://github.com/faiss-wheels/faiss-wheels.git "$tmpdir/faiss-wheels"
+    
+    cd "$tmpdir/faiss-wheels"
+    
+    # Set build environment based on profile
+    case $profile in
+        rocm)
+            log_info "Building with ROCm GPU support..."
+            export FAISS_GPU_SUPPORT=ROCM
+            ;;
+        cuda)
+            log_info "Building with CUDA GPU support..."
+            export FAISS_GPU_SUPPORT=CUDA
+            ;;
+        cpu)
+            log_info "Building CPU-only..."
+            export FAISS_GPU_SUPPORT=OFF
+            ;;
+    esac
+    
+    export FAISS_OPT_LEVELS=generic
+    
+    # Disable LTO to avoid GCC internal compiler errors
+    export CFLAGS="-fno-lto"
+    export CXXFLAGS="-fno-lto"
+    export LDFLAGS="-fno-lto"
+    
+    # Build the wheel
+    log_info "Running build (this takes a while)..."
+    python -m build --wheel
+    
+    # Copy wheel to wheels directory
+    mkdir -p "$(dirs -l +0)/$wheels_dir"
+    cp dist/faiss*.whl "$(dirs -l +0)/$wheels_dir/"
+    
+    cd - > /dev/null
+    
+    # Clean up
+    rm -rf "$tmpdir"
+    
+    # Verify and install
+    if ls "$wheels_dir"/faiss*.whl 1>/dev/null 2>&1; then
+        echo ""
+        log_success "FAISS wheel built successfully!"
+        ls -la "$wheels_dir"/faiss*.whl
+        echo ""
+        
+        log_info "Installing wheel..."
+        pip install "$wheels_dir"/faiss*.whl --force-reinstall
+        
+        echo ""
+        log_success "FAISS installed!"
+        python -c "import faiss; print(f'FAISS version: {faiss.__version__ if hasattr(faiss, \"__version__\") else \"OK\"}')"
+    else
+        log_error "Wheel file not created!"
+        exit 1
     fi
 }
 
@@ -1575,6 +1803,11 @@ main() {
                 echo -e "${YELLOW}[NATIVE MODE]${NC}"
                 native_clean "$@"
                 ;;
+            faiss-build)
+                print_banner
+                echo -e "${YELLOW}[NATIVE MODE]${NC}"
+                native_faiss_build "$@"
+                ;;
             help|--help|-h)
                 print_banner
                 print_help
@@ -1582,7 +1815,7 @@ main() {
             *)
                 log_error "Unknown command for native mode: $command"
                 echo ""
-                echo "Available native commands: build, start, stop, restart, logs, status, shell, update, clean, help"
+                echo "Available native commands: build, start, stop, restart, logs, status, shell, update, clean, faiss-build, help"
                 exit 1
                 ;;
         esac

@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.api.routes import (
     auth, chats, billing, documents, themes, websocket, filters,
     api_keys, knowledge_stores, assistants, branding, admin, tools, utils, tts, stt, images,
-    filter_chains, vibe, procedural_memory, user_settings
+    filter_chains, vibe, procedural_memory, user_settings, assistant_modes
 )
 from app.api.routes.v1 import router as v1_router
 from app.services.rag import RAGService
@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.7.15"
+SCHEMA_VERSION = "NC-0.8.0.0"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -329,6 +329,57 @@ async def run_migrations(conn):
             ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'lifestyle', 'Lifestyle', '🌟', 8, 1)", "seed category: lifestyle"),
             ("INSERT INTO assistant_categories (id, value, label, icon, sort_order, is_active) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'other', 'Other', '📁', 99, 1)", "seed category: other"),
         ],
+        "NC-0.7.17": [
+            # Agentic Task Queue - chat_metadata column on chats for task storage
+            ("ALTER TABLE chats ADD COLUMN chat_metadata JSON", "chats.chat_metadata"),
+        ],
+        "NC-0.8.0.0": [
+            # Dynamic Tools & Assistant Modes
+            # New assistant_modes table
+            ("""CREATE TABLE IF NOT EXISTS assistant_modes (
+                id VARCHAR(36) PRIMARY KEY,
+                name VARCHAR(100) NOT NULL UNIQUE,
+                description TEXT,
+                icon VARCHAR(500),
+                active_tools JSON DEFAULT '[]',
+                advertised_tools JSON DEFAULT '[]',
+                filter_chain_id VARCHAR(36) REFERENCES filter_chains(id) ON DELETE SET NULL,
+                sort_order INTEGER DEFAULT 0,
+                enabled BOOLEAN DEFAULT 1,
+                is_global BOOLEAN DEFAULT 1,
+                created_by VARCHAR(36),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""", "assistant_modes table"),
+            # Add mode_id to chats
+            ("ALTER TABLE chats ADD COLUMN mode_id VARCHAR(36) REFERENCES assistant_modes(id) ON DELETE SET NULL", "chats.mode_id"),
+            # Add active_tools to chats (user overrides)
+            ("ALTER TABLE chats ADD COLUMN active_tools JSON", "chats.active_tools"),
+            # Add mode_id to custom_assistants
+            ("ALTER TABLE custom_assistants ADD COLUMN mode_id VARCHAR(36) REFERENCES assistant_modes(id) ON DELETE SET NULL", "custom_assistants.mode_id"),
+            
+            # Filter Chain Export as Tool fields
+            ("ALTER TABLE filter_chains ADD COLUMN export_as_tool BOOLEAN DEFAULT 0", "filter_chains.export_as_tool"),
+            ("ALTER TABLE filter_chains ADD COLUMN tool_name VARCHAR(100)", "filter_chains.tool_name"),
+            ("ALTER TABLE filter_chains ADD COLUMN tool_label VARCHAR(100)", "filter_chains.tool_label"),
+            ("ALTER TABLE filter_chains ADD COLUMN advertise_to_llm BOOLEAN DEFAULT 0", "filter_chains.advertise_to_llm"),
+            ("ALTER TABLE filter_chains ADD COLUMN advertise_text TEXT", "filter_chains.advertise_text"),
+            ("ALTER TABLE filter_chains ADD COLUMN trigger_pattern VARCHAR(500)", "filter_chains.trigger_pattern"),
+            ("ALTER TABLE filter_chains ADD COLUMN trigger_source VARCHAR(20) DEFAULT 'both'", "filter_chains.trigger_source"),
+            ("ALTER TABLE filter_chains ADD COLUMN erase_from_display BOOLEAN DEFAULT 1", "filter_chains.erase_from_display"),
+            ("ALTER TABLE filter_chains ADD COLUMN keep_in_history BOOLEAN DEFAULT 1", "filter_chains.keep_in_history"),
+            ("ALTER TABLE filter_chains ADD COLUMN button_enabled BOOLEAN DEFAULT 0", "filter_chains.button_enabled"),
+            ("ALTER TABLE filter_chains ADD COLUMN button_icon VARCHAR(50)", "filter_chains.button_icon"),
+            ("ALTER TABLE filter_chains ADD COLUMN button_location VARCHAR(20) DEFAULT 'response'", "filter_chains.button_location"),
+            ("ALTER TABLE filter_chains ADD COLUMN button_trigger_mode VARCHAR(20) DEFAULT 'immediate'", "filter_chains.button_trigger_mode"),
+            ("ALTER TABLE filter_chains ADD COLUMN tool_variables JSON", "filter_chains.tool_variables"),
+            
+            # Seed default assistant modes
+            ("INSERT INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'General', 'Balanced tool availability for everyday tasks', '[\"web_search\", \"artifacts\"]', '[]', 0)", "seed mode: General"),
+            ("INSERT INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Creative Writing', 'Focused writing without tool distractions', '[]', '[]', 1)", "seed mode: Creative Writing"),
+            ("INSERT INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Coding', 'Full artifact and code tools for development', '[\"artifacts\", \"file_ops\", \"code_exec\"]', '[\"artifacts\", \"file_ops\"]', 2)", "seed mode: Coding"),
+            ("INSERT INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Deep Research', 'Web search and knowledge base tools for research', '[\"web_search\", \"kb_search\", \"citations\"]', '[\"web_search\", \"kb_search\"]', 3)", "seed mode: Deep Research"),
+        ],
     }
     
     # Sort versions and run migrations in order
@@ -400,6 +451,20 @@ async def run_migrations(conn):
                         )
                         if result.fetchone():
                             logger.debug(f"  {name}: category '{cat_value}' already exists, skipping")
+                            continue
+                
+                # Check if assistant_modes name already exists
+                if "INSERT" in sql and "assistant_modes" in sql:
+                    # Extract the name field (second value after id)
+                    name_match = re.search(r",\s*'([^']+)',\s*'[^']+'", sql)
+                    if name_match:
+                        mode_name = name_match.group(1)
+                        result = await conn.execute(
+                            text("SELECT 1 FROM assistant_modes WHERE name = :name"),
+                            {"name": mode_name}
+                        )
+                        if result.fetchone():
+                            logger.debug(f"  {name}: mode '{mode_name}' already exists, skipping")
                             continue
                 
                 # Check if index already exists (for CREATE INDEX safety)
@@ -663,6 +728,7 @@ app.include_router(filter_chains.router, prefix="/api/admin", tags=["Filter Chai
 app.include_router(vibe.router, prefix="/api/vibe", tags=["VibeCode"])  # AI code editor endpoints
 app.include_router(procedural_memory.router, prefix="/api", tags=["Procedural Memory"])  # Skill learning endpoints
 app.include_router(user_settings.router, prefix="/api/user", tags=["User Settings"])  # User settings endpoints
+app.include_router(assistant_modes.router, prefix="/api", tags=["Assistant Modes"])  # Routes /api/assistant-modes/*
 
 # OpenAI-compatible API (v1)
 app.include_router(v1_router)  # Routes /v1/* (models, chat/completions, images/generations, embeddings)

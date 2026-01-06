@@ -55,6 +55,34 @@
   box-sizing: border-box;
 }
 
+/* NC-0.8.0.1: Global anti-aliasing for all UI elements */
+*, *::before, *::after {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Optimize rendering for interactive elements */
+button, input, select, textarea, a {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* SVG anti-aliasing */
+svg {
+  shape-rendering: geometricPrecision;
+}
+
+svg text {
+  text-rendering: optimizeLegibility;
+}
+
+/* Canvas smoothing hints */
+canvas {
+  image-rendering: auto;
+}
+
 html, body, #root {
   height: 100%;
 }
@@ -431,4 +459,89 @@ code:not(pre code) {
   .hover-effect:hover {
     transform: scale(1.02);
   }
+}
+
+/* NC-0.8.0.1: Enhanced rendering for icons and emojis */
+.emoji, [role="img"] {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-style: normal;
+  font-weight: normal;
+  text-rendering: optimizeLegibility;
+}
+
+/* Smooth icon rendering in buttons and UI */
+button svg, a svg, .icon {
+  shape-rendering: geometricPrecision;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Prevent blurry icons on transform */
+.transform, [class*="translate"], [class*="scale"], [class*="rotate"] {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+}
+
+/* Smooth transitions for UI elements */
+button, a, input, select, textarea {
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
+}
+
+/* Sub-pixel anti-aliasing for light text on dark backgrounds */
+@media screen and (-webkit-min-device-pixel-ratio: 2), screen and (min-resolution: 2dppx) {
+  body {
+    -webkit-font-smoothing: subpixel-antialiased;
+  }
+}
+
+/* Crisp borders and shadows */
+.border, [class*="border-"] {
+  image-rendering: crisp-edges;
+}
+
+/* ReactFlow specific anti-aliasing */
+.react-flow__node {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+.react-flow__edge path, .react-flow__edge line {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.react-flow__handle {
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.react-flow__handle:hover {
+  transform: scale(1.2);
+}
+
+/* MiniMap smoothing */
+.react-flow__minimap {
+  image-rendering: auto;
+}
+
+.react-flow__minimap svg {
+  shape-rendering: geometricPrecision;
+}
+
+/* Markdown/prose content anti-aliasing */
+.prose, .markdown, .message-content {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-kerning: normal;
+  font-feature-settings: "kern" 1, "liga" 1;
+}
+
+/* Code blocks with clear rendering */
+pre, code, .font-mono {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeSpeed;
+  font-feature-settings: "calt" 1, "liga" 0;
 }
