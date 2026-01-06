@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.8.0.0"
+SCHEMA_VERSION = "NC-0.8.0.1.1"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -379,6 +379,17 @@ async def run_migrations(conn):
             ("INSERT INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Creative Writing', 'Focused writing without tool distractions', '[]', '[]', 1)", "seed mode: Creative Writing"),
             ("INSERT INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Coding', 'Full artifact and code tools for development', '[\"artifacts\", \"file_ops\", \"code_exec\"]', '[\"artifacts\", \"file_ops\"]', 2)", "seed mode: Coding"),
             ("INSERT INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Deep Research', 'Web search and knowledge base tools for research', '[\"web_search\", \"kb_search\", \"citations\"]', '[\"web_search\", \"kb_search\"]', 3)", "seed mode: Deep Research"),
+        ],
+        "NC-0.8.0.1": [
+            # Global KB Required Keywords feature
+            ("ALTER TABLE knowledge_stores ADD COLUMN require_keywords_enabled BOOLEAN DEFAULT 0", "knowledge_stores.require_keywords_enabled"),
+            ("ALTER TABLE knowledge_stores ADD COLUMN required_keywords JSON", "knowledge_stores.required_keywords"),
+        ],
+        "NC-0.8.0.1.1": [
+            # Document-level keyword filtering for Global KBs
+            ("ALTER TABLE documents ADD COLUMN require_keywords_enabled BOOLEAN DEFAULT 0", "documents.require_keywords_enabled"),
+            ("ALTER TABLE documents ADD COLUMN required_keywords TEXT", "documents.required_keywords"),
+            ("ALTER TABLE documents ADD COLUMN keyword_match_mode VARCHAR(10) DEFAULT 'any'", "documents.keyword_match_mode"),
         ],
     }
     

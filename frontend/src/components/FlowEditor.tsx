@@ -1455,7 +1455,7 @@ function ConfigPanel({ step, stepIndex, allSteps, onUpdate, onDelete, availableT
               </div>
             )}
 
-            {step.config?.title_var !== undefined && !step.config?.generate && (
+            {(step.config as Record<string, unknown>)?.title_var !== undefined && !(step.config as Record<string, unknown>)?.generate && (
               <div>
                 <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Title Variable</label>
                 <input
@@ -1468,7 +1468,7 @@ function ConfigPanel({ step, stepIndex, allSteps, onUpdate, onDelete, availableT
               </div>
             )}
 
-            {step.config?.generate && (
+            {Boolean((step.config as Record<string, unknown>)?.generate) && (
               <div>
                 <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Generation Prompt (optional)</label>
                 <textarea
@@ -1484,7 +1484,7 @@ function ConfigPanel({ step, stepIndex, allSteps, onUpdate, onDelete, availableT
               <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Max Length</label>
               <input
                 type="number"
-                value={step.config?.max_length ?? 100}
+                value={((step.config as Record<string, unknown>)?.max_length as number) ?? 100}
                 onChange={(e) => updateConfig('max_length', parseInt(e.target.value) || 100)}
                 min={10}
                 max={255}

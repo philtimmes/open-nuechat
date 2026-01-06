@@ -27,6 +27,11 @@ class Document(Base):
     3. Chunking
     4. Embedding generation
     5. is_processed=True, chunk_count set
+    
+    NC-0.8.0.1.1: Document-level keyword filtering for Global KBs
+    - Each doc can require specific keywords in user query
+    - Supports "exact phrases" and comma-separated keywords
+    - Match mode: all, any, or mixed (phrases=all, keywords=any)
     """
     __tablename__ = "documents"
     
@@ -43,6 +48,12 @@ class Document(Base):
     # Processing status
     is_processed = Column(Boolean, default=False)
     chunk_count = Column(Integer, default=0)
+    
+    # NC-0.8.0.1.1: Document-level keyword filtering for Global KBs
+    # When enabled, document chunks only returned if query contains keywords
+    require_keywords_enabled = Column(Boolean, default=False)
+    required_keywords = Column(Text, nullable=True)  # Comma-separated, "phrases in quotes"
+    keyword_match_mode = Column(String(10), default='any')  # 'any', 'all', 'mixed'
     
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -94,6 +105,7 @@ class KnowledgeStore(Base):
     - Usage statistics
     - Public/discoverable visibility options
     - Global stores auto-searched on every query
+    - Required keywords filter for relevance (NC-0.8.0.1)
     """
     __tablename__ = "knowledge_stores"
     
@@ -113,6 +125,11 @@ class KnowledgeStore(Base):
     # Global store settings
     global_min_score = Column(Float, default=0.7)  # Minimum relevance score to include results
     global_max_results = Column(Integer, default=3)  # Max results to include from global search
+    
+    # Required keywords filter (NC-0.8.0.1)
+    # When enabled, global KB only activates if query contains at least one keyword
+    require_keywords_enabled = Column(Boolean, default=False)
+    required_keywords = Column(JSON, nullable=True)  # List of keywords/phrases: ["pricing", "cost", "subscription"]
     
     # Stats
     document_count = Column(Integer, default=0)

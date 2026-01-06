@@ -59,6 +59,9 @@ class KnowledgeStoreResponse(BaseModel):
     is_global: bool = False  # Auto-searched on every query (admin only)
     global_min_score: float = 0.7  # Minimum relevance score for global results
     global_max_results: int = 3  # Max results from global search
+    # NC-0.8.0.1: Required keywords filter
+    require_keywords_enabled: bool = False
+    required_keywords: Optional[List[str]] = None
     document_count: int
     total_chunks: int
     total_size_bytes: int
@@ -127,9 +130,20 @@ class DocumentInfo(BaseModel):
     is_processed: bool
     chunk_count: int
     created_at: datetime
+    # NC-0.8.0.1.1: Document keyword filtering
+    require_keywords_enabled: bool = False
+    required_keywords: Optional[str] = None  # Comma-separated, "phrases in quotes"
+    keyword_match_mode: str = 'any'  # 'any', 'all', 'mixed'
     
     class Config:
         from_attributes = True
+
+
+class DocumentKeywordsUpdate(BaseModel):
+    """Update document keyword settings (NC-0.8.0.1.1)"""
+    require_keywords_enabled: bool
+    required_keywords: Optional[str] = None  # e.g. '"alien spacecraft", UFO, glimmer'
+    keyword_match_mode: str = 'any'  # 'any', 'all', 'mixed'
 
 
 # === Helper Functions ===
@@ -692,6 +706,62 @@ async def remove_document_from_store(
     return {"message": "Document removed", "id": document_id}
 
 
+@router.patch("/{store_id}/documents/{document_id}/keywords", response_model=DocumentInfo)
+async def update_document_keywords(
+    store_id: str,
+    document_id: str,
+    update: DocumentKeywordsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update document keyword settings for Global KB filtering (NC-0.8.0.1.1).
+    
+    Keywords format:
+    - Comma-separated: UFO, aliens, spacecraft
+    - Quoted phrases: "alien spacecraft", "unidentified flying object"
+    - Mixed: "alien spacecraft", UFO, glimmer
+    
+    Match modes:
+    - any: Any phrase OR any keyword matches (most permissive)
+    - all: ALL phrases AND ALL keywords must match (most restrictive)
+    - mixed: ALL phrases must match, but only need ANY keyword
+    """
+    store, _ = await get_store_with_access(
+        store_id, current_user, db, SharePermission.EDIT
+    )
+    
+    result = await db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.knowledge_store_id == store_id
+        )
+    )
+    document = result.scalar_one_or_none()
+    
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    
+    # Validate match mode
+    if update.keyword_match_mode not in ('any', 'all', 'mixed'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid keyword_match_mode. Must be 'any', 'all', or 'mixed'"
+        )
+    
+    document.require_keywords_enabled = update.require_keywords_enabled
+    document.required_keywords = update.required_keywords
+    document.keyword_match_mode = update.keyword_match_mode
+    
+    await db.commit()
+    await db.refresh(document)
+    
+    return DocumentInfo.model_validate(document)
+
+
 # === Endpoints: Sharing ===
 
 @router.post("/{store_id}/share", response_model=ShareResponse)
@@ -993,6 +1063,8 @@ async def set_store_global(
     is_global: bool = True,
     min_score: float = 0.7,
     max_results: int = 3,
+    require_keywords_enabled: bool = False,
+    required_keywords: Optional[str] = None,  # JSON string of keywords list
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1001,7 +1073,13 @@ async def set_store_global(
     When a store is marked as global:
     - It's automatically searched on every chat query for all users
     - It's also made public so users can see it exists
+    
+    NC-0.8.0.1: Added required keywords filter
+    - When require_keywords_enabled=True, store only searched if query contains keywords
+    - required_keywords: JSON array of keywords/phrases
     """
+    import json
+    
     if not current_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1023,6 +1101,17 @@ async def set_store_global(
     store.global_min_score = min_score
     store.global_max_results = max_results
     
+    # NC-0.8.0.1: Required keywords
+    store.require_keywords_enabled = require_keywords_enabled
+    if required_keywords:
+        try:
+            store.required_keywords = json.loads(required_keywords)
+        except json.JSONDecodeError:
+            # If not valid JSON, treat as single keyword
+            store.required_keywords = [required_keywords] if required_keywords.strip() else []
+    else:
+        store.required_keywords = []
+    
     # Global stores should also be public so users can see they exist
     # (they're being searched on their behalf, so they should know about it)
     if is_global:
@@ -1040,6 +1129,8 @@ async def set_store_global(
         "is_public": store.is_public,
         "global_min_score": min_score,
         "global_max_results": max_results,
+        "require_keywords_enabled": require_keywords_enabled,
+        "required_keywords": store.required_keywords,
     }
 
 

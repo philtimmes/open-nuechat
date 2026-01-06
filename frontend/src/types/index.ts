@@ -223,6 +223,10 @@ export interface Document {
   chunk_count: number;
   knowledge_store_id?: string;
   created_at: string;
+  // NC-0.8.0.1.1: Document keyword filtering
+  require_keywords_enabled?: boolean;
+  required_keywords?: string;  // Comma-separated, "phrases in quotes"
+  keyword_match_mode?: 'any' | 'all' | 'mixed';
 }
 
 export interface SearchResult {
@@ -243,6 +247,11 @@ export interface KnowledgeStore {
   is_public: boolean;
   is_discoverable: boolean;
   is_global?: boolean;  // Auto-searched on every query (admin-only setting)
+  global_min_score?: number;  // Minimum relevance score for global search
+  global_max_results?: number;  // Max results from global search
+  // NC-0.8.0.1: Required keywords for global KB relevance
+  require_keywords_enabled?: boolean;
+  required_keywords?: string[];  // Keywords/phrases that must be in query
   document_count: number;
   total_chunks: number;
   total_size_bytes: number;

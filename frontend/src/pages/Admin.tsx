@@ -185,6 +185,31 @@ export default function Admin() {
   const [allKBStores, setAllKBStores] = useState<GlobalKBStore[]>([]);
   const [globalKBLoading, setGlobalKBLoading] = useState(false);
   const [globalKBEnabled, setGlobalKBEnabled] = useState(true);
+  const [editingKeywordsStoreId, setEditingKeywordsStoreId] = useState<string | null>(null);
+  const [keywordsInput, setKeywordsInput] = useState('');
+  
+  // NC-0.8.0.1.1: Expanded Global KB to show documents
+  const [expandedGlobalKBId, setExpandedGlobalKBId] = useState<string | null>(null);
+  const [globalKBDocs, setGlobalKBDocs] = useState<Array<{
+    id: string;
+    name: string;
+    file_type: string;
+    file_size: number;
+    is_processed: boolean;
+    chunk_count: number;
+    require_keywords_enabled?: boolean;
+    required_keywords?: string;
+    keyword_match_mode?: string;
+  }>>([]);
+  const [globalKBDocsLoading, setGlobalKBDocsLoading] = useState(false);
+  const [editingDocKeywords, setEditingDocKeywords] = useState<{
+    id: string;
+    name: string;
+    storeId: string;
+    require_keywords_enabled: boolean;
+    required_keywords: string;
+    keyword_match_mode: string;
+  } | null>(null);
   
   // GPT Categories state
   const [gptCategories, setGptCategories] = useState<GPTCategory[]>([]);
@@ -292,13 +317,21 @@ export default function Admin() {
     }
   };
   
-  const updateGlobalStoreSettings = async (store: GlobalKBStore, minScore: number, maxResults: number) => {
+  const updateGlobalStoreSettings = async (
+    store: GlobalKBStore, 
+    minScore: number, 
+    maxResults: number,
+    requireKeywordsEnabled?: boolean,
+    requiredKeywords?: string[]
+  ) => {
     try {
       await api.post(`/knowledge-stores/admin/global/${store.id}`, null, {
         params: {
           is_global: true,
           min_score: minScore,
           max_results: maxResults,
+          require_keywords_enabled: requireKeywordsEnabled ?? store.require_keywords_enabled ?? false,
+          required_keywords: JSON.stringify(requiredKeywords ?? store.required_keywords ?? []),
         },
       });
       await fetchGlobalKBStores();
@@ -306,6 +339,63 @@ export default function Admin() {
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to update store settings');
+    }
+  };
+  
+  // NC-0.8.0.1.1: Fetch documents for a Global KB
+  const fetchGlobalKBDocs = async (storeId: string) => {
+    setGlobalKBDocsLoading(true);
+    try {
+      const res = await api.get(`/knowledge-stores/${storeId}/documents`);
+      setGlobalKBDocs(res.data || []);
+    } catch (err: any) {
+      console.error('Failed to load Global KB documents:', err);
+      setGlobalKBDocs([]);
+    } finally {
+      setGlobalKBDocsLoading(false);
+    }
+  };
+  
+  const toggleExpandGlobalKB = async (storeId: string) => {
+    if (expandedGlobalKBId === storeId) {
+      setExpandedGlobalKBId(null);
+      setGlobalKBDocs([]);
+    } else {
+      setExpandedGlobalKBId(storeId);
+      await fetchGlobalKBDocs(storeId);
+    }
+  };
+  
+  const openDocKeywordsModal = (doc: typeof globalKBDocs[0], storeId: string) => {
+    setEditingDocKeywords({
+      id: doc.id,
+      name: doc.name,
+      storeId,
+      require_keywords_enabled: doc.require_keywords_enabled || false,
+      required_keywords: doc.required_keywords || '',
+      keyword_match_mode: doc.keyword_match_mode || 'any',
+    });
+  };
+  
+  const saveDocKeywordsAdmin = async () => {
+    if (!editingDocKeywords) return;
+    
+    try {
+      await api.patch(
+        `/knowledge-stores/${editingDocKeywords.storeId}/documents/${editingDocKeywords.id}/keywords`,
+        {
+          require_keywords_enabled: editingDocKeywords.require_keywords_enabled,
+          required_keywords: editingDocKeywords.required_keywords,
+          keyword_match_mode: editingDocKeywords.keyword_match_mode,
+        }
+      );
+      // Refresh docs list
+      await fetchGlobalKBDocs(editingDocKeywords.storeId);
+      setEditingDocKeywords(null);
+      setSuccess('Document keyword filter updated');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save document keywords');
     }
   };
   
@@ -3640,120 +3730,126 @@ export default function Admin() {
             {showFilterChainModal && (
               <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                 <div className="bg-[var(--color-surface)] rounded-xl w-[95vw] h-[95vh] border border-[var(--color-border)] flex flex-col">
-                  {/* Header */}
-                  <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between shrink-0">
-                    <div className="flex items-center gap-4">
-                      <h3 className="text-lg font-semibold text-[var(--color-text)]">
-                        {editingFilterChain ? 'Edit Filter Chain' : 'Create Filter Chain'}
+                  {/* Header - Mobile Responsive */}
+                  <div className="px-3 md:px-4 py-2 md:py-3 border-b border-[var(--color-border)] shrink-0">
+                    {/* Top row: Title, Name, Cancel/Save */}
+                    <div className="flex items-center gap-2 md:gap-4 mb-2">
+                      <h3 className="text-sm md:text-lg font-semibold text-[var(--color-text)] whitespace-nowrap">
+                        {editingFilterChain ? '✏️ Edit' : '➕ New'}
                       </h3>
                       <input
                         type="text"
                         value={filterChainForm.name}
                         onChange={(e) => setFilterChainForm({ ...filterChainForm, name: e.target.value })}
-                        className="px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm w-48"
+                        className="px-2 md:px-3 py-1 md:py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm flex-1 min-w-0"
                         placeholder="Chain name..."
                       />
                       <input
                         type="text"
                         value={filterChainForm.description || ''}
                         onChange={(e) => setFilterChainForm({ ...filterChainForm, description: e.target.value })}
-                        className="px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm flex-1"
-                        placeholder="Description (optional)..."
+                        className="hidden md:block px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm flex-1 min-w-0"
+                        placeholder="Description..."
                       />
-                      <select
-                        value={filterChainForm.priority}
-                        onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
-                        className="px-2 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                      >
-                        <option value={10}>Priority: First (10)</option>
-                        <option value={50}>Priority: Early (50)</option>
-                        <option value={100}>Priority: Normal (100)</option>
-                        <option value={200}>Priority: Late (200)</option>
-                        <option value={500}>Priority: Last (500)</option>
-                      </select>
-                    </div>
-                    <div className="flex items-center gap-3 flex-wrap">
-                      <label className="flex items-center gap-2 cursor-pointer text-sm">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.enabled}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, enabled: e.target.checked })}
-                          className="rounded"
-                        />
-                        <span className="text-[var(--color-text)]">Enabled</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer text-sm" title="Preserve conversation history (don't modify messages)">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.retain_history}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
-                          className="rounded"
-                        />
-                        <span className="text-[var(--color-text)]">Retain History</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer text-sm" title="Process both incoming and outgoing messages">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.bidirectional}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, bidirectional: e.target.checked })}
-                          className="rounded"
-                        />
-                        <span className="text-[var(--color-text)]">Bidirectional</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer text-sm" title="Skip this filter chain if RAG (knowledge base) found results">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.skip_if_rag_hit}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, skip_if_rag_hit: e.target.checked })}
-                          className="rounded"
-                        />
-                        <span className="text-[var(--color-text)]">Skip if RAG hit</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer text-sm">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.debug}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
-                          className="rounded"
-                        />
-                        <span className="text-[var(--color-text)]">🐛 Debug</span>
-                      </label>
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="text-[var(--color-text-secondary)]">Max Iterations:</span>
-                        <input
-                          type="number"
-                          value={filterChainForm.max_iterations}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, max_iterations: parseInt(e.target.value) || 10 })}
-                          className="w-16 px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                          min={1}
-                          max={100}
-                        />
-                      </div>
-                      {filterChainForm.bidirectional && (
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="text-[var(--color-text-secondary)]">Outbound Chain:</span>
-                          <select
-                            value={filterChainForm.outbound_chain_id || ''}
-                            onChange={(e) => setFilterChainForm({ ...filterChainForm, outbound_chain_id: e.target.value || undefined })}
-                            className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
-                          >
-                            <option value="">Same chain</option>
-                            {filterChains.filter(c => c.id !== filterChainForm.id).map(c => (
-                              <option key={c.id} value={c.id}>{c.name}</option>
-                            ))}
-                          </select>
-                        </div>
-                      )}
                       <button
                         onClick={() => setFilterChainJsonMode(!filterChainJsonMode)}
-                        className={`px-3 py-1.5 rounded text-sm ${
+                        className={`px-2 py-1 rounded text-xs md:text-sm whitespace-nowrap ${
                           filterChainJsonMode
                             ? 'bg-yellow-500/20 text-yellow-400'
                             : 'bg-[var(--color-background)] text-[var(--color-text-secondary)]'
                         }`}
                       >
-                        {filterChainJsonMode ? '← Visual' : 'JSON →'}
+                        {filterChainJsonMode ? '← Visual' : 'JSON'}
                       </button>
+                      <button
+                        onClick={resetFilterChainForm}
+                        className="px-2 md:px-3 py-1 md:py-1.5 text-xs md:text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    
+                    {/* Second row: Options (scrollable on mobile) */}
+                    <div className="flex items-center gap-2 md:gap-3 overflow-x-auto pb-1 text-xs md:text-sm">
+                      <select
+                        value={filterChainForm.priority}
+                        onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
+                        className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-xs md:text-sm shrink-0"
+                      >
+                        <option value={10}>P:10</option>
+                        <option value={50}>P:50</option>
+                        <option value={100}>P:100</option>
+                        <option value={200}>P:200</option>
+                        <option value={500}>P:500</option>
+                      </select>
+                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.enabled}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, enabled: e.target.checked })}
+                          className="rounded w-3 h-3 md:w-4 md:h-4"
+                        />
+                        <span className="text-[var(--color-text)]">On</span>
+                      </label>
+                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0" title="Retain History">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.retain_history}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
+                          className="rounded w-3 h-3 md:w-4 md:h-4"
+                        />
+                        <span className="text-[var(--color-text)]">History</span>
+                      </label>
+                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0" title="Bidirectional">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.bidirectional}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, bidirectional: e.target.checked })}
+                          className="rounded w-3 h-3 md:w-4 md:h-4"
+                        />
+                        <span className="text-[var(--color-text)]">Bidir</span>
+                      </label>
+                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0" title="Skip if RAG hit">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.skip_if_rag_hit}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, skip_if_rag_hit: e.target.checked })}
+                          className="rounded w-3 h-3 md:w-4 md:h-4"
+                        />
+                        <span className="text-[var(--color-text)]">Skip RAG</span>
+                      </label>
+                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0">
+                        <input
+                          type="checkbox"
+                          checked={filterChainForm.debug}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
+                          className="rounded w-3 h-3 md:w-4 md:h-4"
+                        />
+                        <span className="text-[var(--color-text)]">🐛</span>
+                      </label>
+                      <div className="flex items-center gap-1 whitespace-nowrap shrink-0">
+                        <span className="text-[var(--color-text-secondary)]">Max:</span>
+                        <input
+                          type="number"
+                          value={filterChainForm.max_iterations}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, max_iterations: parseInt(e.target.value) || 10 })}
+                          className="w-12 px-1 py-0.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-xs md:text-sm"
+                          min={1}
+                          max={100}
+                        />
+                      </div>
+                      {filterChainForm.bidirectional && (
+                        <select
+                          value={filterChainForm.outbound_chain_id || ''}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, outbound_chain_id: e.target.value || undefined })}
+                          className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-xs md:text-sm shrink-0"
+                        >
+                          <option value="">Outbound: Same</option>
+                          {filterChains.filter(c => c.id !== filterChainForm.id).map(c => (
+                            <option key={c.id} value={c.id}>{c.name}</option>
+                          ))}
+                        </select>
+                      )}
                     </div>
                   </div>
                   
@@ -4075,22 +4171,32 @@ export default function Admin() {
                       No global stores configured. Add a store from the list below.
                     </div>
                   ) : (
-                    <div className="space-y-3">
+                    <div className="space-y-4">
                       {globalKBStores.map(store => (
                         <div 
                           key={store.id}
-                          className="flex items-center justify-between p-4 bg-[var(--color-background)] rounded-lg border border-green-500/30"
+                          className="p-4 bg-[var(--color-background)] rounded-lg border border-green-500/30"
                         >
-                          <div className="flex items-center gap-3">
-                            <span className="text-2xl">{store.icon}</span>
-                            <div>
-                              <div className="font-medium text-[var(--color-text)]">{store.name}</div>
-                              <div className="text-xs text-[var(--color-text-secondary)]">
-                                Owner: {store.owner_username} • {store.document_count} docs
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-3">
+                              <span className="text-2xl">{store.icon}</span>
+                              <div>
+                                <div className="font-medium text-[var(--color-text)]">{store.name}</div>
+                                <div className="text-xs text-[var(--color-text-secondary)]">
+                                  Owner: {store.owner_username} • {store.document_count} docs
+                                </div>
                               </div>
                             </div>
+                            <button
+                              onClick={() => toggleStoreGlobal(store, false)}
+                              className="px-3 py-1 text-sm bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                            >
+                              Remove
+                            </button>
                           </div>
-                          <div className="flex items-center gap-4">
+                          
+                          {/* Settings row */}
+                          <div className="flex flex-wrap items-center gap-4 mb-3">
                             <div className="flex items-center gap-2">
                               <label className="text-xs text-[var(--color-text-secondary)]">Min Score:</label>
                               <input
@@ -4124,12 +4230,185 @@ export default function Admin() {
                                 className="w-16 px-2 py-1 text-sm bg-[var(--color-surface)] border border-[var(--color-border)] rounded text-[var(--color-text)]"
                               />
                             </div>
+                          </div>
+                          
+                          {/* Required Keywords Section */}
+                          <div className="border-t border-[var(--color-border)] pt-3 mt-3">
+                            <div className="flex items-center gap-3 mb-2">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={store.require_keywords_enabled || false}
+                                  onChange={(e) => {
+                                    updateGlobalStoreSettings(
+                                      store,
+                                      store.global_min_score,
+                                      store.global_max_results,
+                                      e.target.checked,
+                                      store.required_keywords || []
+                                    );
+                                  }}
+                                  className="w-4 h-4 rounded border-[var(--color-border)] bg-[var(--color-surface)]"
+                                />
+                                <span className="text-sm text-[var(--color-text)]">Require Keywords</span>
+                              </label>
+                              <span className="text-xs text-[var(--color-text-secondary)]">
+                                (Only search when query contains keywords)
+                              </span>
+                            </div>
+                            
+                            {store.require_keywords_enabled && (
+                              <div className="ml-6">
+                                {/* Current keywords */}
+                                <div className="flex flex-wrap gap-1 mb-2">
+                                  {(store.required_keywords || []).map((kw, idx) => (
+                                    <span 
+                                      key={idx}
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-[var(--color-primary)]/20 text-[var(--color-primary)] rounded text-xs"
+                                    >
+                                      {kw}
+                                      <button
+                                        onClick={() => {
+                                          const newKw = (store.required_keywords || []).filter((_, i) => i !== idx);
+                                          updateGlobalStoreSettings(
+                                            store,
+                                            store.global_min_score,
+                                            store.global_max_results,
+                                            store.require_keywords_enabled,
+                                            newKw
+                                          );
+                                        }}
+                                        className="hover:text-red-400"
+                                      >
+                                        ×
+                                      </button>
+                                    </span>
+                                  ))}
+                                  {(store.required_keywords || []).length === 0 && (
+                                    <span className="text-xs text-[var(--color-text-secondary)] italic">
+                                      No keywords set - add some below
+                                    </span>
+                                  )}
+                                </div>
+                                
+                                {/* Add keyword input */}
+                                {editingKeywordsStoreId === store.id ? (
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      value={keywordsInput}
+                                      onChange={(e) => setKeywordsInput(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && keywordsInput.trim()) {
+                                          const newKw = [...(store.required_keywords || []), keywordsInput.trim()];
+                                          updateGlobalStoreSettings(
+                                            store,
+                                            store.global_min_score,
+                                            store.global_max_results,
+                                            store.require_keywords_enabled,
+                                            newKw
+                                          );
+                                          setKeywordsInput('');
+                                        }
+                                      }}
+                                      placeholder="Type keyword and press Enter"
+                                      className="flex-1 px-2 py-1 text-sm bg-[var(--color-surface)] border border-[var(--color-border)] rounded text-[var(--color-text)]"
+                                      autoFocus
+                                    />
+                                    <button
+                                      onClick={() => {
+                                        if (keywordsInput.trim()) {
+                                          const newKw = [...(store.required_keywords || []), keywordsInput.trim()];
+                                          updateGlobalStoreSettings(
+                                            store,
+                                            store.global_min_score,
+                                            store.global_max_results,
+                                            store.require_keywords_enabled,
+                                            newKw
+                                          );
+                                          setKeywordsInput('');
+                                        }
+                                      }}
+                                      className="px-2 py-1 text-sm bg-[var(--color-primary)] text-white rounded hover:opacity-90"
+                                    >
+                                      Add
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setEditingKeywordsStoreId(null);
+                                        setKeywordsInput('');
+                                      }}
+                                      className="px-2 py-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                                    >
+                                      Done
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => {
+                                      setEditingKeywordsStoreId(store.id);
+                                      setKeywordsInput('');
+                                    }}
+                                    className="text-xs text-[var(--color-primary)] hover:underline"
+                                  >
+                                    + Add keyword
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          
+                          {/* NC-0.8.0.1.1: Expandable Documents Section */}
+                          <div className="border-t border-[var(--color-border)] mt-3 pt-3">
                             <button
-                              onClick={() => toggleStoreGlobal(store, false)}
-                              className="px-3 py-1 text-sm bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                              onClick={() => toggleExpandGlobalKB(store.id)}
+                              className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
                             >
-                              Remove
+                              <svg 
+                                className={`w-4 h-4 transition-transform ${expandedGlobalKBId === store.id ? 'rotate-90' : ''}`} 
+                                fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                              >
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                              <span>Document Keyword Filters ({store.document_count} docs)</span>
                             </button>
+                            
+                            {expandedGlobalKBId === store.id && (
+                              <div className="mt-3 space-y-2">
+                                {globalKBDocsLoading ? (
+                                  <div className="text-sm text-[var(--color-text-secondary)]">Loading documents...</div>
+                                ) : globalKBDocs.length === 0 ? (
+                                  <div className="text-sm text-[var(--color-text-secondary)]">No documents in this store</div>
+                                ) : (
+                                  globalKBDocs.map(doc => (
+                                    <div 
+                                      key={doc.id}
+                                      className="flex items-center justify-between p-2 bg-[var(--color-surface)] rounded border border-[var(--color-border)]"
+                                    >
+                                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                                        <span className="text-sm">📄</span>
+                                        <span className="text-sm text-[var(--color-text)] truncate">{doc.name}</span>
+                                        {doc.require_keywords_enabled && (
+                                          <span className="px-1.5 py-0.5 text-[10px] bg-[var(--color-primary)]/20 text-[var(--color-primary)] rounded shrink-0">
+                                            🔑 {doc.keyword_match_mode || 'any'}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <button
+                                        onClick={() => openDocKeywordsModal(doc, store.id)}
+                                        className={`px-2 py-1 text-xs rounded shrink-0 ${
+                                          doc.require_keywords_enabled 
+                                            ? 'bg-[var(--color-primary)]/20 text-[var(--color-primary)]' 
+                                            : 'bg-[var(--color-background)] text-[var(--color-text-secondary)]'
+                                        } hover:opacity-80`}
+                                      >
+                                        {doc.require_keywords_enabled ? 'Edit Keywords' : 'Add Keywords'}
+                                      </button>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -4179,6 +4458,111 @@ export default function Admin() {
                       ))}
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+            
+            {/* NC-0.8.0.1.1: Document Keywords Modal */}
+            {editingDocKeywords && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEditingDocKeywords(null)}>
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-md border border-[var(--color-border)] m-4" onClick={(e) => e.stopPropagation()}>
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-2">
+                    Document Keyword Filter
+                  </h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-4 truncate">
+                    {editingDocKeywords.name}
+                  </p>
+                  
+                  <div className="space-y-4">
+                    {/* Enable toggle */}
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={editingDocKeywords.require_keywords_enabled}
+                        onChange={(e) => setEditingDocKeywords({
+                          ...editingDocKeywords,
+                          require_keywords_enabled: e.target.checked
+                        })}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)]"
+                      />
+                      <div>
+                        <div className="text-sm text-[var(--color-text)]">Enable Keyword Filter</div>
+                        <div className="text-xs text-[var(--color-text-secondary)]">
+                          Only include this document when keywords match query/history
+                        </div>
+                      </div>
+                    </label>
+                    
+                    {editingDocKeywords.require_keywords_enabled && (
+                      <>
+                        {/* Keywords input */}
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                            Required Keywords
+                          </label>
+                          <textarea
+                            value={editingDocKeywords.required_keywords}
+                            onChange={(e) => setEditingDocKeywords({
+                              ...editingDocKeywords,
+                              required_keywords: e.target.value
+                            })}
+                            placeholder={`"exact phrase", keyword1, keyword2`}
+                            rows={3}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                          <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                            Comma-separated. Use "quotes" for exact phrases.
+                          </p>
+                        </div>
+                        
+                        {/* Match mode */}
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-2">
+                            Match Mode
+                          </label>
+                          <div className="grid grid-cols-3 gap-2">
+                            {(['any', 'all', 'mixed'] as const).map(mode => (
+                              <button
+                                key={mode}
+                                type="button"
+                                onClick={() => setEditingDocKeywords({
+                                  ...editingDocKeywords,
+                                  keyword_match_mode: mode
+                                })}
+                                className={`px-3 py-2 rounded-lg text-sm border transition-all capitalize ${
+                                  editingDocKeywords.keyword_match_mode === mode
+                                    ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]'
+                                    : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'
+                                }`}
+                              >
+                                {mode}
+                              </button>
+                            ))}
+                          </div>
+                          <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
+                            {editingDocKeywords.keyword_match_mode === 'any' && 'Any phrase OR any keyword matches'}
+                            {editingDocKeywords.keyword_match_mode === 'all' && 'ALL phrases AND ALL keywords must match'}
+                            {editingDocKeywords.keyword_match_mode === 'mixed' && 'All phrases required, any keyword sufficient'}
+                          </p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  
+                  <div className="flex justify-end gap-3 mt-6">
+                    <button
+                      onClick={() => setEditingDocKeywords(null)}
+                      className="px-4 py-2 rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-background)]"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={saveDocKeywordsAdmin}
+                      className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90"
+                    >
+                      Save
+                    </button>
+                  </div>
                 </div>
               </div>
             )}

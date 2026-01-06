@@ -283,6 +283,9 @@ export interface GlobalKBStore {
   is_global: boolean;
   global_min_score: number;
   global_max_results: number;
+  // NC-0.8.0.1: Required keywords filter
+  require_keywords_enabled: boolean;
+  required_keywords: string[] | null;
 }
 
 export interface GPTCategory {

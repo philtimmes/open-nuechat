@@ -14,7 +14,8 @@ Index Strategy:
 import os
 import pickle
 import asyncio
-from typing import List, Dict, Any, Optional, Tuple
+import re
+from typing import List, Dict, Any, Optional, Tuple, Set
 from pathlib import Path
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +35,91 @@ _executor = ThreadPoolExecutor(max_workers=4)
 
 # Cache for debug_rag setting (refreshed on each search)
 _debug_rag_cache: Dict[str, bool] = {"enabled": False}
+
+
+def _parse_keywords_string(keywords_str: str) -> Tuple[List[str], List[str]]:
+    """
+    Parse a keyword string into phrases and keywords.
+    
+    NC-0.8.0.1.1: Supports:
+    - "exact phrases" in quotes
+    - comma-separated keywords
+    
+    Example: '"alien spacecraft", UFO, glimmer, "unidentified object"'
+    Returns: (phrases=["alien spacecraft", "unidentified object"], keywords=["ufo", "glimmer"])
+    """
+    if not keywords_str or not keywords_str.strip():
+        return [], []
+    
+    phrases = []
+    keywords = []
+    
+    # Extract quoted phrases first
+    phrase_pattern = r'"([^"]+)"'
+    found_phrases = re.findall(phrase_pattern, keywords_str)
+    phrases = [p.strip().lower() for p in found_phrases if p.strip()]
+    
+    # Remove quoted phrases from string
+    remaining = re.sub(phrase_pattern, '', keywords_str)
+    
+    # Split remaining by comma and clean up
+    for kw in remaining.split(','):
+        kw = kw.strip().lower()
+        if kw:
+            keywords.append(kw)
+    
+    return phrases, keywords
+
+
+def _check_keywords_match(
+    query: str,
+    history: str,
+    phrases: List[str],
+    keywords: List[str],
+    match_mode: str = 'any'
+) -> bool:
+    """
+    Check if query/history matches required keywords.
+    
+    NC-0.8.0.1.1 match modes:
+    - 'any': Any phrase OR any keyword matches
+    - 'all': ALL phrases AND ALL keywords must match
+    - 'mixed': ALL phrases must match, but only ANY keyword needs to match
+    
+    Args:
+        query: User's current query (lowercased)
+        history: Recent conversation history (lowercased)
+        phrases: Exact phrases that must appear
+        keywords: Individual keywords
+        match_mode: 'any', 'all', or 'mixed'
+    
+    Returns:
+        True if keywords match according to mode
+    """
+    if not phrases and not keywords:
+        return True  # No requirements = always match
+    
+    combined_text = f"{query} {history}".lower()
+    
+    # Check phrase matches
+    phrase_matches = [p in combined_text for p in phrases]
+    
+    # Check keyword matches
+    keyword_matches = [kw in combined_text for kw in keywords]
+    
+    if match_mode == 'all':
+        # All phrases AND all keywords must match
+        return all(phrase_matches) and all(keyword_matches) if (phrases or keywords) else True
+    
+    elif match_mode == 'mixed':
+        # All phrases must match, but only need any keyword
+        phrases_ok = all(phrase_matches) if phrases else True
+        keywords_ok = any(keyword_matches) if keywords else True
+        return phrases_ok and keywords_ok
+    
+    else:  # 'any' (default)
+        # Any phrase OR any keyword matches
+        return any(phrase_matches) or any(keyword_matches)
 
 
 async def _is_debug_rag_enabled(db: AsyncSession) -> bool:
@@ -1531,9 +1617,44 @@ class RAGService:
             logger.debug("[GLOBAL_RAG] No global knowledge stores configured")
             return [], []
         
-        logger.info(f"[GLOBAL_RAG] Searching {len(global_stores)} global stores for query: {query[:50]}...")
+        # NC-0.8.0.1: Filter stores by required keywords
+        # Only include stores where keywords match (or keyword filtering is disabled)
+        query_lower = query.lower()
+        original_query_lower = original_query.lower()
         
-        global_store_ids = [str(store.id) for store in global_stores]
+        def store_matches_keywords(store) -> bool:
+            """Check if store's required keywords match the query."""
+            if not store.require_keywords_enabled:
+                return True  # No keyword filter, always include
+            
+            keywords = store.required_keywords
+            if not keywords or not isinstance(keywords, list) or len(keywords) == 0:
+                return True  # No keywords defined, always include
+            
+            # Check if any keyword/phrase is present in the query
+            for keyword in keywords:
+                if not isinstance(keyword, str):
+                    continue
+                keyword_lower = keyword.lower().strip()
+                if keyword_lower and (keyword_lower in query_lower or keyword_lower in original_query_lower):
+                    logger.debug(f"[GLOBAL_RAG] Store '{store.name}' keyword matched: '{keyword}'")
+                    return True
+            
+            return False
+        
+        relevant_stores = [s for s in global_stores if store_matches_keywords(s)]
+        skipped_stores = len(global_stores) - len(relevant_stores)
+        
+        if skipped_stores > 0:
+            logger.info(f"[GLOBAL_RAG] Skipped {skipped_stores} stores due to keyword filter (no match)")
+        
+        if not relevant_stores:
+            logger.debug("[GLOBAL_RAG] No global stores matched keyword requirements")
+            return [], []
+        
+        logger.info(f"[GLOBAL_RAG] Searching {len(relevant_stores)} global stores for query: {query[:50]}...")
+        
+        global_store_ids = [str(store.id) for store in relevant_stores]
         
         # Run identifier search if identifiers were found
         identifier_results = []
@@ -1569,11 +1690,11 @@ class RAGService:
         matched_store_names = []
         index_manager = self.get_index_manager()
         
-        # Get the lowest min_score among all global stores (for initial filter)
+        # Get the lowest min_score among all relevant stores (for initial filter)
         # We'll do per-store filtering after merging
-        global_min_score = min((store.global_min_score or 0.7) for store in global_stores)
+        global_min_score = min((store.global_min_score or 0.7) for store in relevant_stores)
         
-        for store in global_stores:
+        for store in relevant_stores:
             store_start = time.time()
             store_id = str(store.id)
             min_score = store.global_min_score or 0.7
@@ -1611,7 +1732,13 @@ class RAGService:
             all_semantic_results.sort(key=lambda x: x[1], reverse=True)
             chunk_ids = [r[0] for r in all_semantic_results]
             scores_map = {r[0]: r[1] for r in all_semantic_results}
-            semantic_results = await self._get_chunks_by_ids(db, chunk_ids, scores_map)
+            # NC-0.8.0.1.1: Enable document-level keyword filtering for global KB
+            semantic_results = await self._get_chunks_by_ids(
+                db, chunk_ids, scores_map,
+                query=query,
+                history=original_query,  # Include original for broader matching
+                filter_by_doc_keywords=True
+            )
         else:
             semantic_results = []
         
@@ -1651,8 +1778,17 @@ class RAGService:
         db: AsyncSession,
         chunk_ids: List[str],
         scores: Dict[str, float],
+        query: str = "",
+        history: str = "",
+        filter_by_doc_keywords: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Fetch chunk details by IDs"""
+        """
+        Fetch chunk details by IDs.
+        
+        NC-0.8.0.1.1: Optional document-level keyword filtering
+        When filter_by_doc_keywords=True, chunks from documents with
+        require_keywords_enabled will be filtered based on keyword match.
+        """
         result = await db.execute(
             select(DocumentChunk, Document)
             .join(Document, DocumentChunk.document_id == Document.id)
@@ -1661,7 +1797,19 @@ class RAGService:
         rows = result.all()
         
         results = []
+        filtered_count = 0
+        
         for chunk, document in rows:
+            # NC-0.8.0.1.1: Check document-level keyword requirements
+            if filter_by_doc_keywords and document.require_keywords_enabled:
+                phrases, keywords = _parse_keywords_string(document.required_keywords or "")
+                match_mode = document.keyword_match_mode or 'any'
+                
+                if not _check_keywords_match(query, history, phrases, keywords, match_mode):
+                    filtered_count += 1
+                    logger.debug(f"[DOC_KEYWORD_FILTER] Document '{document.name}' filtered - keywords not matched (mode={match_mode})")
+                    continue
+            
             results.append({
                 "chunk_id": str(chunk.id),
                 "document_id": str(document.id),
@@ -1672,6 +1820,9 @@ class RAGService:
                 "similarity": scores.get(str(chunk.id), 0.0),
                 "metadata": chunk.chunk_metadata,
             })
+        
+        if filtered_count > 0:
+            logger.info(f"[DOC_KEYWORD_FILTER] Filtered {filtered_count} chunks due to document keyword requirements")
         
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results

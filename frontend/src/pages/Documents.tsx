@@ -56,6 +56,12 @@ export default function Documents() {
   const [ksIsPublic, setKsIsPublic] = useState(false);
   const [editingKS, setEditingKS] = useState<KnowledgeStore | null>(null);
   
+  // NC-0.8.0.1.1: Document keyword editing
+  const [editingDocKeywords, setEditingDocKeywords] = useState<Document | null>(null);
+  const [docKeywordsEnabled, setDocKeywordsEnabled] = useState(false);
+  const [docKeywordsText, setDocKeywordsText] = useState('');
+  const [docKeywordsMode, setDocKeywordsMode] = useState<'any' | 'all' | 'mixed'>('any');
+  
   // Expanded knowledge base in documents view
   const [expandedKS, setExpandedKS] = useState<string | null>(null);
   
@@ -240,6 +246,33 @@ export default function Documents() {
     setKsIcon('KB');
     setKsColor('#6366f1');
     setKsIsPublic(false);
+  };
+  
+  // NC-0.8.0.1.1: Document keyword editing functions
+  const openDocKeywordsEditor = (doc: Document) => {
+    setEditingDocKeywords(doc);
+    setDocKeywordsEnabled(doc.require_keywords_enabled || false);
+    setDocKeywordsText(doc.required_keywords || '');
+    setDocKeywordsMode(doc.keyword_match_mode || 'any');
+  };
+  
+  const saveDocKeywords = async () => {
+    if (!editingDocKeywords) return;
+    
+    try {
+      await api.patch(
+        `/knowledge-stores/${editingDocKeywords.knowledge_store_id}/documents/${editingDocKeywords.id}/keywords`,
+        {
+          require_keywords_enabled: docKeywordsEnabled,
+          required_keywords: docKeywordsText,
+          keyword_match_mode: docKeywordsMode,
+        }
+      );
+      await fetchData();
+      setEditingDocKeywords(null);
+    } catch (err) {
+      setError('Failed to save document keywords');
+    }
   };
   
   // Drag and drop handlers
@@ -542,7 +575,14 @@ export default function Documents() {
                               <div key={doc.id} className="flex items-center gap-3 p-3 rounded-lg bg-[var(--color-background)] hover:bg-[var(--color-border)]/30 transition-colors">
                                 {getFileIcon(doc.file_type)}
                                 <div className="flex-1 min-w-0">
-                                  <h4 className="text-sm font-medium text-[var(--color-text)] truncate">{doc.name}</h4>
+                                  <div className="flex items-center gap-2">
+                                    <h4 className="text-sm font-medium text-[var(--color-text)] truncate">{doc.name}</h4>
+                                    {doc.require_keywords_enabled && (
+                                      <span className="px-1.5 py-0.5 text-[10px] bg-[var(--color-primary)]/20 text-[var(--color-primary)] rounded" title="Has keyword filter">
+                                        🔑
+                                      </span>
+                                    )}
+                                  </div>
                                   <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
                                     <span>{formatFileSize(doc.file_size)}</span>
                                     <span>•</span>
@@ -555,6 +595,18 @@ export default function Documents() {
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-1">
+                                  {/* Keyword filter button */}
+                                  {ks.is_global && (
+                                    <button
+                                      onClick={() => openDocKeywordsEditor(doc)}
+                                      className={`p-1.5 rounded hover:bg-[var(--color-primary)]/10 ${doc.require_keywords_enabled ? 'text-[var(--color-primary)]' : 'text-[var(--color-text-secondary)]'}`}
+                                      title="Keyword Filter (Global KB)"
+                                    >
+                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                                      </svg>
+                                    </button>
+                                  )}
                                   {!doc.is_processed && (
                                     <button
                                       onClick={() => handleReprocess(doc.id)}
@@ -827,6 +879,121 @@ export default function Documents() {
                       className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
                     >
                       {editingKS ? 'Save' : 'Create'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* NC-0.8.0.1.1: Document Keyword Filter Modal */}
+            {editingDocKeywords && (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setEditingDocKeywords(null)}>
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-md border border-[var(--color-border)]" onClick={(e) => e.stopPropagation()}>
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-2">
+                    Document Keyword Filter
+                  </h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                    {editingDocKeywords.name}
+                  </p>
+                  
+                  <div className="space-y-4">
+                    {/* Enable toggle */}
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={docKeywordsEnabled}
+                        onChange={(e) => setDocKeywordsEnabled(e.target.checked)}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)]"
+                      />
+                      <div>
+                        <div className="text-sm text-[var(--color-text)]">Enable Keyword Filter</div>
+                        <div className="text-xs text-[var(--color-text-secondary)]">
+                          Only include this document when keywords match
+                        </div>
+                      </div>
+                    </label>
+                    
+                    {docKeywordsEnabled && (
+                      <>
+                        {/* Keywords input */}
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                            Required Keywords
+                          </label>
+                          <textarea
+                            value={docKeywordsText}
+                            onChange={(e) => setDocKeywordsText(e.target.value)}
+                            placeholder={`"exact phrase", keyword1, keyword2`}
+                            rows={3}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                          <p className="mt-1 text-xs text-[var(--color-text-secondary)]">
+                            Comma-separated. Use "quotes" for exact phrases.
+                          </p>
+                        </div>
+                        
+                        {/* Match mode */}
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-2">
+                            Match Mode
+                          </label>
+                          <div className="grid grid-cols-3 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setDocKeywordsMode('any')}
+                              className={`px-3 py-2 rounded-lg text-sm border transition-all ${
+                                docKeywordsMode === 'any'
+                                  ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]'
+                                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'
+                              }`}
+                            >
+                              Any
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDocKeywordsMode('all')}
+                              className={`px-3 py-2 rounded-lg text-sm border transition-all ${
+                                docKeywordsMode === 'all'
+                                  ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]'
+                                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'
+                              }`}
+                            >
+                              All
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDocKeywordsMode('mixed')}
+                              className={`px-3 py-2 rounded-lg text-sm border transition-all ${
+                                docKeywordsMode === 'mixed'
+                                  ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]'
+                                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'
+                              }`}
+                            >
+                              Mixed
+                            </button>
+                          </div>
+                          <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
+                            {docKeywordsMode === 'any' && 'Any phrase OR any keyword matches (most permissive)'}
+                            {docKeywordsMode === 'all' && 'ALL phrases AND ALL keywords must match (most restrictive)'}
+                            {docKeywordsMode === 'mixed' && 'All phrases must match, but only any keyword needed'}
+                          </p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  
+                  <div className="flex justify-end gap-3 mt-6">
+                    <button
+                      onClick={() => setEditingDocKeywords(null)}
+                      className="px-4 py-2 rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-background)]"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={saveDocKeywords}
+                      className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90"
+                    >
+                      Save
                     </button>
                   </div>
                 </div>
