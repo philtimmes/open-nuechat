@@ -111,7 +111,7 @@ export default function ArtifactsPanel({
   }, [isFullscreen]);
   
   const canPreview = (art: Artifact): boolean => {
-    return ['html', 'react', 'svg', 'markdown', 'mermaid'].includes(art.type);
+    return ['html', 'react', 'svg', 'markdown', 'mermaid', 'image'].includes(art.type);
   };
   
   const copyToClipboard = async () => {

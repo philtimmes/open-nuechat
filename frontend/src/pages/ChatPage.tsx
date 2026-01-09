@@ -1519,7 +1519,38 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
       const filename = artifact.filename || `${artifact.title.replace(/\s+/g, '_')}.txt`;
       // Double-check: skip any agent memory files
       if (isAgentFile(filename)) continue;
-      zip.file(filename, artifact.content);
+      
+      // NC-0.8.0.7: Handle image artifacts - fetch from URL or use base64
+      if (artifact.type === 'image') {
+        const imgSrc = artifact.imageData?.url || artifact.imageData?.base64 || artifact.content;
+        if (imgSrc) {
+          try {
+            if (imgSrc.startsWith('data:')) {
+              // Base64 data URL - extract the data part
+              const base64Data = imgSrc.split(',')[1];
+              zip.file(filename, base64Data, { base64: true });
+            } else if (imgSrc.startsWith('/') || imgSrc.startsWith('http')) {
+              // URL - fetch the image
+              const fullUrl = imgSrc.startsWith('/') ? `${window.location.origin}${imgSrc}` : imgSrc;
+              const response = await fetch(fullUrl);
+              if (response.ok) {
+                const blob = await response.blob();
+                zip.file(filename, blob);
+              } else {
+                console.warn(`Failed to fetch image ${filename}: ${response.status}`);
+              }
+            } else {
+              // Raw base64 without data: prefix
+              zip.file(filename, imgSrc, { base64: true });
+            }
+          } catch (err) {
+            console.error(`Failed to add image ${filename} to zip:`, err);
+          }
+        }
+      } else {
+        // Regular text/code artifact
+        zip.file(filename, artifact.content);
+      }
     }
     
     const blob = await zip.generateAsync({ 

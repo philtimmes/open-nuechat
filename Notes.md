@@ -16,6 +16,67 @@ Full-stack LLM chat application with:
 
 ## Recent Changes (NC-0.8.0.7)
 
+### Admin Image Generation Settings
+
+New **Admin Panel → Image Gen** tab for configuring default image generation settings:
+
+**Settings:**
+- `image_gen_default_width` (default: 1024, range: 256-2048)
+- `image_gen_default_height` (default: 1024, range: 256-2048)
+- `image_gen_default_aspect_ratio` (default: "1:1", options: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3)
+- `image_gen_available_resolutions` (JSON array of resolution options)
+
+**Endpoints:**
+- `GET /api/admin/image-gen-settings` - Admin fetch settings
+- `PUT /api/admin/image-gen-settings` - Admin save settings
+- `GET /api/admin/public/image-settings` - Public endpoint for frontend
+
+### Image Persistence Across Reloads
+
+**Problem:** Generated images disappeared when reloading the page or opening chat from another location.
+
+**Solution:**
+1. **Backend** (`tools/registry.py`): `generate_image` tool's `notify_completion` callback now saves image metadata to `message_metadata` in the database
+2. **Frontend** (`stores/chat/messageSlice.ts`): `fetchMessages` now loads `generated_image` from message metadata into `generatedImages` store
+
+**Key Changes:**
+- Tool handler fetches default dimensions from admin settings via `SettingsService.get_int()`
+- Image metadata saved with full details: `url`, `width`, `height`, `seed`, `prompt`, `job_id`
+- Proper TypeScript typing with `GeneratedImage` interface
+
+### Image Preview in Artifacts Panel
+
+**Problem:** Generated images showed as "Code" view displaying the URL text.
+
+**Solution:** Added `'image'` to the `canPreview()` function in `ArtifactsPanel.tsx`:
+
+```typescript
+const canPreview = (art: Artifact): boolean => {
+  return ['html', 'react', 'svg', 'markdown', 'mermaid', 'image'].includes(art.type);
+};
+```
+
+### Download All Includes Images
+
+**Problem:** "Download All" button created ZIP with image URLs as text files instead of actual images.
+
+**Solution:** Updated `handleDownloadAll()` in `ChatPage.tsx` to detect `artifact.type === 'image'` and:
+- Fetch images from URLs (relative or absolute)
+- Handle base64 data URLs
+- Handle raw base64 strings
+- Add actual image blob to ZIP
+
+### Image Context Hidden from Display
+
+**Problem:** When users attach generated images, technical context blocks were visible:
+```
+[IMAGE CONTEXT - USER-GENERATED, NOT BY LLM]
+...
+[END IMAGE CONTEXT]
+```
+
+**Solution:** Added regex to `preprocessContent()` in `MessageBubble.tsx` to strip these blocks from display while preserving in message history.
+
 ### Active Tools Filtering Fix
 
 **Problem:** Tool buttons in ActiveToolsBar had no effect - all tools were always sent to LLM.
@@ -1486,6 +1547,7 @@ The editor uses React Flow and supports all step types with intuitive configurat
 | NC-0.8.0.6 | 2026-01-08 | Smart RAG Compression - subject re-ranking (keyword overlap boost), extractive summarization for large chunks, token budget support |
 | NC-0.8.0.5 | 2026-01-08 | Per-chat token limits (max_input_tokens, max_output_tokens), Agent Memory tools (agent_search, agent_read), error sanitization, max output token validation |
 | NC-0.8.0.4 | 2026-01-08 | Mode/Category unification - Categories pull from AssistantModes, emojis derived from name, slug mapping for backward compatibility |
+| NC-0.8.0.7 | 2026-01-09 | Admin image gen settings tab (default resolution, aspect ratio, available resolutions), image persistence across reloads (metadata saved to message), image preview in artifacts panel, Download All includes actual images, image context blocks hidden from display, generate_image tool uses admin defaults, tool filtering fix, streaming tool calls fix, API model names by assistant name |
 | NC-0.8.0.3 | 2026-01-08 | Sidebar real-time updates (sidebarReloadTrigger), timestamp preservation (removed onupdate trigger), migration system fix, chat click fix (_assignedPeriod preservation), import preserves original timestamps |
 | NC-0.8.0.1.2 | 2026-01-07 | Chat source field for import tracking, sidebar filtering by source instead of title prefix |
 | NC-0.8.0.1.1 | 2026-01-07 | Generated images in Artifacts panel (imageNNN.ext), LLM image context injection |
@@ -1590,7 +1652,7 @@ Current: **NC-0.8.0.7**
 Migrations run automatically on startup in `backend/app/main.py`.
 
 Key tables added/modified:
-- NC-0.8.0.7: No schema changes (tool filtering is code-only, model name cleanup is code-only). Added indexes: `idx_document_owner`, `idx_document_store`, `idx_document_processed`, `idx_usage_user_created`, `idx_message_id_chat`
+- NC-0.8.0.7: No schema changes. New admin settings stored in `system_settings` table: `image_gen_default_width`, `image_gen_default_height`, `image_gen_default_aspect_ratio`, `image_gen_available_resolutions`. Image metadata stored in existing `messages.message_metadata` JSON column.
 - NC-0.8.0.6: No schema changes (Smart RAG Compression is code-only)
 - NC-0.8.0.5: `chats.max_input_tokens` and `chats.max_output_tokens` INTEGER columns for per-chat token limits
 - NC-0.8.0.4: No schema changes (mode/category unification is code-only, emoji derived from name)

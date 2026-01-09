@@ -1924,9 +1924,9 @@ The frontend ActiveToolsBar uses category IDs that map to backend tool names:
 | `code_exec` | `execute_python` | Sandboxed Python execution |
 | `file_ops` | `view_file_lines`, `search_in_file`, `list_uploaded_files`, `view_signature`, `request_file` | File viewing tools |
 | `kb_search` | `search_documents` | Knowledge base RAG search |
+| `image_gen` | `generate_image` | LLM-triggered image generation |
 | `user_chats_kb` | (always available) | Agent Memory toggle (UI only) |
 | `artifacts` | (frontend-only) | Artifact panel display |
-| `image_gen` | (separate flow) | Image generation |
 | `local_rag` | (auto injection) | Chat document RAG context |
 | `citations` | (prompt hint) | Citation formatting hint |
 
@@ -1960,12 +1960,127 @@ These tools are always sent to LLM when `enable_tools=true`:
 
 ---
 
+## Image Generation System (NC-0.8.0.7)
+
+### Admin Settings
+
+New admin panel tab for configuring image generation defaults:
+
+| Setting Key | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `image_gen_default_width` | int | 1024 | Default width (256-2048) |
+| `image_gen_default_height` | int | 1024 | Default height (256-2048) |
+| `image_gen_default_aspect_ratio` | string | "1:1" | Default aspect ratio |
+| `image_gen_available_resolutions` | JSON | [...] | Array of resolution options |
+
+### Admin Endpoints
+
+```python
+GET /api/admin/image-gen-settings
+  # Returns: ImageGenerationSettingsSchema
+  # - default_width, default_height, default_aspect_ratio
+  # - available_resolutions: [{label, width, height}, ...]
+
+PUT /api/admin/image-gen-settings
+  # Body: ImageGenerationSettingsSchema
+  # Updates all image gen settings
+
+GET /api/admin/public/image-settings
+  # Public endpoint for frontend (no auth required)
+  # Returns same as admin endpoint
+```
+
+### generate_image Tool
+
+LLM can call image generation directly:
+
+```python
+# Tool definition (registry.py)
+{
+    "name": "generate_image",
+    "description": "Generate an image based on a text prompt",
+    "parameters": {
+        "prompt": {"type": "string", "required": True},
+        "width": {"type": "integer"},  # Optional, uses admin default
+        "height": {"type": "integer"}, # Optional, uses admin default
+    }
+}
+
+# Tool handler flow:
+1. Fetch default dimensions from SettingsService
+2. Queue image generation task with notify_callback
+3. Return status to LLM immediately
+4. On completion, notify_callback:
+   - Saves image metadata to message_metadata in DB
+   - Sends WebSocket "image_generated" event to frontend
+```
+
+### Image Persistence
+
+Images persist across reloads via message metadata:
+
+```typescript
+// Message.metadata.generated_image
+{
+  url?: string;      // /api/images/generated/{job_id}.png
+  width: number;
+  height: number;
+  seed: number;
+  prompt: string;
+  job_id?: string;
+}
+
+// Frontend loads on fetchMessages (messageSlice.ts)
+for (const msg of messages) {
+  if (msg.metadata?.generated_image) {
+    generatedImagesFromMessages[msg.id] = {
+      url: genImg.url,
+      width: genImg.width,
+      height: genImg.height,
+      seed: genImg.seed ?? 0,
+      prompt: genImg.prompt ?? '',
+      job_id: genImg.job_id,
+    };
+  }
+}
+```
+
+### Artifacts Panel Image Preview
+
+Images now render in Preview tab instead of Code tab:
+
+```typescript
+// ArtifactsPanel.tsx
+const canPreview = (art: Artifact): boolean => {
+  return ['html', 'react', 'svg', 'markdown', 'mermaid', 'image'].includes(art.type);
+};
+```
+
+### Download All with Images
+
+```typescript
+// ChatPage.tsx - handleDownloadAll()
+if (artifact.type === 'image') {
+  const imgSrc = artifact.imageData?.url || artifact.content;
+  if (imgSrc.startsWith('/') || imgSrc.startsWith('http')) {
+    const response = await fetch(fullUrl);
+    const blob = await response.blob();
+    zip.file(filename, blob);
+  } else if (imgSrc.startsWith('data:')) {
+    const base64Data = imgSrc.split(',')[1];
+    zip.file(filename, base64Data, { base64: true });
+  }
+}
+```
+
+---
+
 ## Current Schema Version
 
 **NC-0.8.0.7**
 
 Changes:
-- NC-0.8.0.7: **Active Tools Filtering** - Fixed tool buttons in ActiveToolsBar not affecting LLM tool availability. WebSocket handler now reads `chat.active_tools` and filters tools based on category. Added `TOOL_CATEGORY_MAP` mapping frontend categories to backend tool names. Added `UTILITY_TOOLS` list (calculator, time, json, text analysis, agent memory) always available. **Streaming Tool Calls** - Fixed tools not being sent to LLM in streaming mode. Added tool call handling in `stream_message()` to execute tools and continue conversation. **API Model Names** - `/v1/models` now exposes assistants by cleaned name instead of UUID (spaces→underscores, non-alphanumeric removed, lowercased). **Performance Indexes** - Added indexes for documents, token_usage, and messages tables.
+- NC-0.8.0.7: **Admin Image Gen Settings** - New admin tab for default resolution, aspect ratio, available resolutions. Settings stored in `system_settings` table. **Image Persistence** - `generate_image` tool saves metadata to `message_metadata`, frontend loads on `fetchMessages`. **Image Preview** - Added 'image' to `canPreview()` for proper preview rendering. **Download All Images** - Fetches actual image files for ZIP. **Image Context Hidden** - `[IMAGE CONTEXT]` blocks stripped from display. **Active Tools Filtering** - Fixed tool buttons in ActiveToolsBar not affecting LLM tool availability. WebSocket handler now reads `chat.active_tools` and filters tools based on category. Added `TOOL_CATEGORY_MAP` mapping frontend categories to backend tool names. Added `UTILITY_TOOLS` list (calculator, time, json, text analysis, agent memory) always available. **Streaming Tool Calls** - Fixed tools not being sent to LLM in streaming mode. Added tool call handling in `stream_message()` to execute tools and continue conversation. **API Model Names** - `/v1/models` now exposes assistants by cleaned name instead of UUID (spaces→underscores, non-alphanumeric removed, lowercased). **Performance Indexes** - Added indexes for documents, token_usage, and messages tables.
 - NC-0.8.0.6: **Smart RAG Compression** - RAG results now re-ranked by subject relevance (keyword overlap boost), large chunks auto-summarized using extractive summarization (top sentences by query relevance), token budget support for context building. New methods: `_rerank_by_subject()`, `_summarize_chunk()`. `get_knowledge_store_context()` now accepts `max_context_tokens` and `enable_summarization` parameters. **Category filter fix** - Added `category` field to `AssistantPublicInfo`. Updated `/explore`, `/discover`, `/subscribed` to return category. `/assistants/categories` returns slugified mode names.
 - NC-0.8.0.5: **Token limits & Agent Memory tools** - Added `max_input_tokens` and `max_output_tokens` columns to `chats` table. Added `agent_search` and `agent_read` tools to tool registry for accessing archived conversation history in Agent Memory files. Error sanitization prevents raw API errors from reaching browser. Max output tokens validated against remaining context.
 - NC-0.8.0.4: **Mode/Category unification** - Categories now pull from AssistantModes table. Emojis derived from mode name in code (not stored). Category slugs mapped for backward compatibility.

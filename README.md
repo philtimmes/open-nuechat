@@ -30,7 +30,7 @@ cp .env.example .env
 
 ---
 
-## 🏗️ Architecture (NC-0.8.0.x)
+## 🏗️ Architecture (NC-0.8.0.7)
 
 ```mermaid
 flowchart TB
@@ -47,7 +47,8 @@ flowchart TB
         Toolbar[Active Tools Bar<br/>• Dynamic Icons<br/>• Mode Toggle]
         Sidebar[Sidebar<br/>• Real-time Reload<br/>• Period Groups<br/>• Source Filters]
         FlowEdit[Filter Chain Editor<br/>• Visual Node Graph<br/>• Resizable Panels]
-        Admin[Admin Panel<br/>• Assistant Modes<br/>• Branding]
+        Admin[Admin Panel<br/>• Assistant Modes<br/>• Image Gen Settings<br/>• Branding]
+        ArtifactsPanel[Artifacts Panel<br/>• Folder Navigation<br/>• Image Preview<br/>• Download All]
     end
 
     %% ===== Backend Core =====
@@ -90,7 +91,7 @@ flowchart TB
     subgraph MS[Optional Services]
         TTS[TTS - Kokoro]
         STT[STT - Whisper]
-        IMG[Image Gen]
+        IMG[Image Gen<br/>• Admin Settings<br/>• Default Resolution<br/>• Tool Integration]
     end
 
     %% ===== Connections =====
@@ -116,6 +117,10 @@ flowchart TB
     IMG --> API
 
     ChatMgr --> STORE
+    
+    %% Image persistence (NC-0.8.0.7)
+    IMG -.-> |Metadata| SQLite
+    ArtifactsPanel -.-> |Fetch Images| Files
     
     %% Sidebar real-time updates (NC-0.8.0.3)
     UI -.-> |Create/Delete| Sidebar
@@ -427,7 +432,17 @@ Full API documentation at `/docs` when running.
 
 ## Schema Version
 
-**Current: NC-0.8.0.3**
+**Current: NC-0.8.0.7**
+
+### NC-0.8.0.7 Changes
+- **Admin Image Gen Settings**: New tab in Admin panel for default resolution, aspect ratio, and available resolutions
+- **Image Persistence**: Generated images now persist across page reloads (metadata saved to message)
+- **Image Artifact Preview**: Images display in Artifacts panel preview mode instead of showing URL as code
+- **Download All Images**: "Download All" button now fetches and includes actual image files in ZIP
+- **Image Context Hidden**: `[IMAGE CONTEXT]` blocks hidden from user display but preserved in history
+- **generate_image Tool**: LLM can call image generation directly via tool (uses admin default settings)
+- **Tool Filtering Fix**: Tool buttons in ActiveToolsBar now properly affect LLM tool availability
+- **Streaming Tool Calls**: Fixed tools not being passed to LLM in streaming mode
 
 ### NC-0.8.0.3 Changes
 - **Sidebar Real-Time Updates**: Automatic reload on chat create/delete/message via `sidebarReloadTrigger`
