@@ -42,6 +42,10 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
     registration_enabled = await SettingsService.is_registration_enabled(db)
     billing_enabled = await SettingsService.is_billing_enabled(db)
     
+    # Get mermaid rendering setting (default to True)
+    from app.api.routes.admin import get_system_setting_bool
+    mermaid_enabled = await get_system_setting_bool(db, "enable_mermaid_rendering", default=True)
+    
     branding["features"] = {
         "registration": registration_enabled,
         "oauth_google": google_enabled,
@@ -49,6 +53,7 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
         "billing": billing_enabled,
         "public_assistants": settings.ENABLE_PUBLIC_ASSISTANTS,
         "public_knowledge_stores": settings.ENABLE_PUBLIC_KNOWLEDGE_STORES,
+        "mermaid_rendering": mermaid_enabled,
     }
     
     return branding

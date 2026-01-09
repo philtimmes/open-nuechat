@@ -34,6 +34,7 @@ export interface BrandingConfig {
     billing: boolean;
     public_assistants: boolean;
     public_knowledge_stores: boolean;
+    mermaid_rendering: boolean;
   };
   welcome: {
     title: string;
@@ -82,6 +83,7 @@ const defaultConfig: BrandingConfig = {
     billing: true,
     public_assistants: true,
     public_knowledge_stores: true,
+    mermaid_rendering: true,
   },
   welcome: {
     title: 'Welcome to Open-NueChat!',

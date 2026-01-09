@@ -121,12 +121,11 @@ class ProceduralMemoryService:
         if cls._embedding_model is None:
             try:
                 import os
-                import sys
                 
-                # CRITICAL: Disable accelerate's device_map which causes meta tensor issues
-                os.environ["ACCELERATE_DISABLE_RICH"] = "1"
-                os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
-                os.environ["ACCELERATE_USE_CPU"] = "1"
+                # CRITICAL: Set these BEFORE importing sentence_transformers
+                # to prevent accelerate from using device_map which causes meta tensor issues
+                os.environ["ACCELERATE_TORCH_DEVICE"] = "cpu"
+                os.environ["TRANSFORMERS_OFFLINE"] = "0"
                 
                 # Try to reuse the RAG service's model if already loaded
                 try:
@@ -139,45 +138,39 @@ class ProceduralMemoryService:
                 except Exception as e:
                     logger.debug(f"Could not reuse RAG model: {e}")
                 
-                # Force reload transformers modules to pick up env vars
-                for mod_name in list(sys.modules.keys()):
-                    if 'transformers' in mod_name or 'accelerate' in mod_name:
-                        try:
-                            del sys.modules[mod_name]
-                        except:
-                            pass
+                # Import torch and force CPU before loading model
+                import torch
                 
-                from sentence_transformers import SentenceTransformer
+                # Disable CUDA for this model load to avoid meta tensor issues
+                original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+                os.environ["CUDA_VISIBLE_DEVICES"] = ""
                 
-                # Try multiple loading strategies
-                model = None
-                strategies = [
-                    lambda: SentenceTransformer(
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    
+                    # Model should be pre-downloaded during Docker build
+                    logger.info("Loading embedding model for procedural memory...")
+                    
+                    # Load with explicit CPU and local_files_only to use cached model
+                    model = SentenceTransformer(
                         'sentence-transformers/all-MiniLM-L6-v2', 
                         device="cpu",
-                        model_kwargs={"low_cpu_mem_usage": False},
-                    ),
-                    lambda: SentenceTransformer(
-                        'sentence-transformers/all-MiniLM-L6-v2', 
-                        device="cpu",
-                    ),
-                ]
-                
-                for i, strategy in enumerate(strategies):
-                    try:
-                        logger.info(f"Procedural memory: trying loading strategy {i+1}...")
-                        model = strategy()
-                        logger.info(f"Strategy {i+1} succeeded!")
-                        break
-                    except Exception as e:
-                        logger.warning(f"Strategy {i+1} failed: {e}")
-                        model = None
-                
-                if model:
-                    cls._embedding_model = model
-                    logger.info("Loaded embedding model for procedural memory (on CPU)")
-                else:
-                    logger.error("All embedding loading strategies failed for procedural memory")
+                        cache_folder=None,  # Use default cache
+                    )
+                    
+                    # Verify the model works
+                    test_embed = model.encode("test", convert_to_numpy=True)
+                    if test_embed is not None and len(test_embed) > 0:
+                        cls._embedding_model = model
+                        logger.info("Loaded embedding model for procedural memory")
+                    else:
+                        logger.error("Embedding model loaded but encode failed")
+                finally:
+                    # Restore CUDA visibility
+                    if original_cuda_visible:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+                    else:
+                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                     
             except ImportError:
                 logger.warning("sentence-transformers not available, skill retrieval will use keyword matching")

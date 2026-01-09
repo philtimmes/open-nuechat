@@ -86,6 +86,7 @@ SETTING_DEFAULTS = {
     "llm_model": settings.LLM_MODEL,
     "llm_timeout": str(settings.LLM_TIMEOUT),
     "llm_max_tokens": str(settings.LLM_MAX_TOKENS),
+    "llm_context_size": "200000",  # NC-0.8.0.7: Model context window size
     "llm_temperature": str(settings.LLM_TEMPERATURE),
     "llm_stream_default": str(settings.LLM_STREAM_DEFAULT).lower(),
     "llm_multimodal": "false",  # Whether legacy model supports vision/images
@@ -121,9 +122,11 @@ async def get_system_setting(db: AsyncSession, key: str) -> str:
     return SETTING_DEFAULTS.get(key, "")
 
 
-async def get_system_setting_bool(db: AsyncSession, key: str) -> bool:
+async def get_system_setting_bool(db: AsyncSession, key: str, default: bool = False) -> bool:
     """Get a boolean system setting."""
     value = await get_system_setting(db, key)
+    if not value:
+        return default
     return value.lower() in ("true", "1", "yes", "on")
 
 
@@ -169,6 +172,11 @@ class SystemSettingsSchema(BaseModel):
     rag_prompt_user_docs: str = ""  # User's uploaded documents
     rag_prompt_chat_history: str = ""  # User's chat history knowledge
     
+    # RAG Thresholds (NC-0.8.0.6)
+    rag_threshold_global: float = Field(default=0.7, ge=0.0, le=1.0, description="Default threshold for global KB RAG (per-KB can override)")
+    rag_threshold_chat_history: float = Field(default=0.5, ge=0.0, le=1.0, description="Threshold for chat history KB RAG")
+    rag_threshold_local: float = Field(default=0.4, ge=0.0, le=1.0, description="Threshold for current chat local RAG (attachments/overflow)")
+    
     # Pricing
     input_token_price: float
     output_token_price: float
@@ -211,6 +219,7 @@ class LLMSettingsSchema(BaseModel):
     llm_model: str = "default"
     llm_timeout: int = Field(default=120, ge=10, le=600)
     llm_max_tokens: int = Field(default=4096, ge=1)
+    llm_context_size: int = Field(default=200000, ge=1024)  # NC-0.8.0.7: Model context window
     llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     llm_stream_default: bool = True
     llm_multimodal: bool = False  # Whether legacy model supports vision/images
@@ -221,12 +230,37 @@ class LLMSettingsSchema(BaseModel):
     history_compression_target_tokens: int = Field(default=8000, ge=2000, le=128000)
 
 
+# NC-0.8.0.7: Image generation settings
+class ImageResolutionOption(BaseModel):
+    """Single resolution option"""
+    width: int
+    height: int
+    label: str  # e.g., "Square (1024x1024)", "Portrait (768x1024)"
+
+
+class ImageGenerationSettingsSchema(BaseModel):
+    """Image generation settings"""
+    image_gen_default_width: int = Field(default=1024, ge=256, le=2048)
+    image_gen_default_height: int = Field(default=1024, ge=256, le=2048)
+    image_gen_default_aspect_ratio: str = "1:1"  # "1:1", "16:9", "9:16", "4:3", "3:4"
+    image_gen_available_resolutions: List[ImageResolutionOption] = Field(default_factory=lambda: [
+        ImageResolutionOption(width=512, height=512, label="Small Square (512x512)"),
+        ImageResolutionOption(width=768, height=768, label="Medium Square (768x768)"),
+        ImageResolutionOption(width=1024, height=1024, label="Large Square (1024x1024)"),
+        ImageResolutionOption(width=768, height=1024, label="Portrait (768x1024)"),
+        ImageResolutionOption(width=1024, height=768, label="Landscape (1024x768)"),
+        ImageResolutionOption(width=1024, height=1536, label="Tall Portrait (1024x1536)"),
+        ImageResolutionOption(width=1536, height=1024, label="Wide Landscape (1536x1024)"),
+    ])
+
+
 class FeatureFlagsSchema(BaseModel):
     """Feature flags"""
     enable_registration: bool = True
     enable_billing: bool = True
     freeforall: bool = False
     enable_safety_filters: bool = False  # Prompt injection & content moderation filters
+    enable_mermaid_rendering: bool = True  # Render mermaid diagrams as graphics
 
 
 class APIRateLimitsSchema(BaseModel):
@@ -334,6 +368,9 @@ async def get_admin_settings(
         rag_prompt_gpt_kb=await get_system_setting(db, "rag_prompt_gpt_kb"),
         rag_prompt_user_docs=await get_system_setting(db, "rag_prompt_user_docs"),
         rag_prompt_chat_history=await get_system_setting(db, "rag_prompt_chat_history"),
+        rag_threshold_global=await get_system_setting_float(db, "rag_threshold_global", 0.7),
+        rag_threshold_chat_history=await get_system_setting_float(db, "rag_threshold_chat_history", 0.5),
+        rag_threshold_local=await get_system_setting_float(db, "rag_threshold_local", 0.4),
         input_token_price=await get_system_setting_float(db, "input_token_price"),
         output_token_price=await get_system_setting_float(db, "output_token_price"),
         token_refill_interval_hours=await get_system_setting_int(db, "token_refill_interval_hours"),
@@ -363,6 +400,9 @@ async def update_admin_settings(
     await set_setting(db, "rag_prompt_gpt_kb", data.rag_prompt_gpt_kb)
     await set_setting(db, "rag_prompt_user_docs", data.rag_prompt_user_docs)
     await set_setting(db, "rag_prompt_chat_history", data.rag_prompt_chat_history)
+    await set_setting(db, "rag_threshold_global", str(data.rag_threshold_global))
+    await set_setting(db, "rag_threshold_chat_history", str(data.rag_threshold_chat_history))
+    await set_setting(db, "rag_threshold_local", str(data.rag_threshold_local))
     await set_setting(db, "input_token_price", str(data.input_token_price))
     await set_setting(db, "output_token_price", str(data.output_token_price))
     await set_setting(db, "token_refill_interval_hours", str(data.token_refill_interval_hours))
@@ -439,6 +479,7 @@ async def get_llm_settings(
         llm_model=await get_system_setting(db, "llm_model"),
         llm_timeout=await get_system_setting_int(db, "llm_timeout"),
         llm_max_tokens=await get_system_setting_int(db, "llm_max_tokens"),
+        llm_context_size=await get_system_setting_int(db, "llm_context_size") or 200000,  # NC-0.8.0.7
         llm_temperature=await get_system_setting_float(db, "llm_temperature"),
         llm_stream_default=await get_system_setting_bool(db, "llm_stream_default"),
         llm_multimodal=await get_system_setting_bool(db, "llm_multimodal"),
@@ -462,6 +503,7 @@ async def update_llm_settings(
     await set_setting(db, "llm_model", data.llm_model)
     await set_setting(db, "llm_timeout", str(data.llm_timeout))
     await set_setting(db, "llm_max_tokens", str(data.llm_max_tokens))
+    await set_setting(db, "llm_context_size", str(data.llm_context_size))  # NC-0.8.0.7
     await set_setting(db, "llm_temperature", str(data.llm_temperature))
     await set_setting(db, "llm_stream_default", str(data.llm_stream_default).lower())
     await set_setting(db, "llm_multimodal", str(data.llm_multimodal).lower())
@@ -527,6 +569,79 @@ async def test_llm_connection(
 
 
 # =============================================================================
+# IMAGE GENERATION SETTINGS (NC-0.8.0.7)
+# =============================================================================
+
+# Default resolutions
+DEFAULT_IMAGE_RESOLUTIONS = [
+    {"width": 512, "height": 512, "label": "Small Square (512x512)"},
+    {"width": 768, "height": 768, "label": "Medium Square (768x768)"},
+    {"width": 1024, "height": 1024, "label": "Large Square (1024x1024)"},
+    {"width": 768, "height": 1024, "label": "Portrait (768x1024)"},
+    {"width": 1024, "height": 768, "label": "Landscape (1024x768)"},
+    {"width": 1024, "height": 1536, "label": "Tall Portrait (1024x1536)"},
+    {"width": 1536, "height": 1024, "label": "Wide Landscape (1536x1024)"},
+]
+
+
+@router.get("/image-gen-settings", response_model=ImageGenerationSettingsSchema)
+async def get_image_gen_settings(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get image generation settings"""
+    import json
+    
+    default_width = await get_system_setting_int(db, "image_gen_default_width") or 1024
+    default_height = await get_system_setting_int(db, "image_gen_default_height") or 1024
+    default_aspect_ratio = await get_system_setting(db, "image_gen_default_aspect_ratio") or "1:1"
+    
+    # Get available resolutions (stored as JSON)
+    resolutions_json = await get_system_setting(db, "image_gen_available_resolutions")
+    if resolutions_json:
+        try:
+            resolutions = json.loads(resolutions_json)
+        except json.JSONDecodeError:
+            resolutions = DEFAULT_IMAGE_RESOLUTIONS
+    else:
+        resolutions = DEFAULT_IMAGE_RESOLUTIONS
+    
+    return ImageGenerationSettingsSchema(
+        image_gen_default_width=default_width,
+        image_gen_default_height=default_height,
+        image_gen_default_aspect_ratio=default_aspect_ratio,
+        image_gen_available_resolutions=[
+            ImageResolutionOption(**r) for r in resolutions
+        ],
+    )
+
+
+@router.put("/image-gen-settings", response_model=ImageGenerationSettingsSchema)
+async def update_image_gen_settings(
+    data: ImageGenerationSettingsSchema,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update image generation settings"""
+    import json
+    
+    await set_setting(db, "image_gen_default_width", str(data.image_gen_default_width))
+    await set_setting(db, "image_gen_default_height", str(data.image_gen_default_height))
+    await set_setting(db, "image_gen_default_aspect_ratio", data.image_gen_default_aspect_ratio)
+    
+    # Store resolutions as JSON
+    resolutions = [
+        {"width": r.width, "height": r.height, "label": r.label}
+        for r in data.image_gen_available_resolutions
+    ]
+    await set_setting(db, "image_gen_available_resolutions", json.dumps(resolutions))
+    
+    await db.commit()
+    
+    return data
+
+
+# =============================================================================
 # FEATURE FLAGS
 # =============================================================================
 
@@ -541,6 +656,8 @@ async def get_feature_flags(
         enable_billing=await get_system_setting_bool(db, "enable_billing"),
         freeforall=await get_system_setting_bool(db, "freeforall"),
         enable_safety_filters=await get_system_setting_bool(db, "enable_safety_filters"),
+        enable_mermaid_rendering=await get_system_setting_bool(db, "enable_mermaid_rendering", default=True),
+        enable_preemptive_rag=await get_system_setting_bool(db, "enable_preemptive_rag", default=True),
     )
 
 
@@ -555,6 +672,8 @@ async def update_feature_flags(
     await set_setting(db, "enable_billing", str(data.enable_billing).lower())
     await set_setting(db, "freeforall", str(data.freeforall).lower())
     await set_setting(db, "enable_safety_filters", str(data.enable_safety_filters).lower())
+    await set_setting(db, "enable_mermaid_rendering", str(data.enable_mermaid_rendering).lower())
+    await set_setting(db, "enable_preemptive_rag", str(data.enable_preemptive_rag).lower())
     
     await db.commit()
     
@@ -656,6 +775,35 @@ async def get_public_tiers(
     except json.JSONDecodeError:
         tiers = DEFAULT_TIERS
     return TiersSchema(tiers=[TierConfig(**t) for t in tiers])
+
+
+@router.get("/public/image-settings")
+async def get_public_image_settings(
+    db: AsyncSession = Depends(get_db),
+):
+    """Get image generation settings (public endpoint for chat interface)"""
+    import json
+    
+    default_width = await get_system_setting_int(db, "image_gen_default_width") or 1024
+    default_height = await get_system_setting_int(db, "image_gen_default_height") or 1024
+    default_aspect_ratio = await get_system_setting(db, "image_gen_default_aspect_ratio") or "1:1"
+    
+    # Get available resolutions (stored as JSON)
+    resolutions_json = await get_system_setting(db, "image_gen_available_resolutions")
+    if resolutions_json:
+        try:
+            resolutions = json.loads(resolutions_json)
+        except json.JSONDecodeError:
+            resolutions = DEFAULT_IMAGE_RESOLUTIONS
+    else:
+        resolutions = DEFAULT_IMAGE_RESOLUTIONS
+    
+    return {
+        "default_width": default_width,
+        "default_height": default_height,
+        "default_aspect_ratio": default_aspect_ratio,
+        "available_resolutions": resolutions,
+    }
 
 
 # =============================================================================
@@ -1515,6 +1663,8 @@ class DebugSettingsResponse(BaseModel):
     debug_document_queue: bool
     debug_rag: bool
     debug_filter_chains: bool
+    enable_preemptive_rag: bool  # NC-0.8.0.7
+    disable_image_request_filter: bool  # NC-0.8.0.7: Let LLM use image gen tool instead
     last_token_reset_timestamp: Optional[str] = None
     token_refill_interval_hours: int
 
@@ -1524,6 +1674,8 @@ class DebugSettingsUpdate(BaseModel):
     debug_document_queue: Optional[bool] = None
     debug_rag: Optional[bool] = None
     debug_filter_chains: Optional[bool] = None
+    enable_preemptive_rag: Optional[bool] = None  # NC-0.8.0.7
+    disable_image_request_filter: Optional[bool] = None  # NC-0.8.0.7
 
 
 @router.get("/debug-settings", response_model=DebugSettingsResponse)
@@ -1536,6 +1688,11 @@ async def get_debug_settings(
     debug_document_queue = await get_system_setting(db, "debug_document_queue") == "true"
     debug_rag = await get_system_setting(db, "debug_rag") == "true"
     debug_filter_chains = await get_system_setting(db, "debug_filter_chains") == "true"
+    # NC-0.8.0.7: Pre-emptive RAG (default True for backward compatibility)
+    enable_preemptive_rag_val = await get_system_setting(db, "enable_preemptive_rag")
+    enable_preemptive_rag = enable_preemptive_rag_val != "false"  # Default true if not set
+    # NC-0.8.0.7: Image request filter (default False - filter enabled)
+    disable_image_request_filter = await get_system_setting(db, "disable_image_request_filter") == "true"
     last_token_reset = await get_system_setting(db, "last_token_reset_timestamp")
     refill_hours = await get_system_setting_int(db, "token_refill_interval_hours")
     
@@ -1544,6 +1701,8 @@ async def get_debug_settings(
         debug_document_queue=debug_document_queue,
         debug_rag=debug_rag,
         debug_filter_chains=debug_filter_chains,
+        enable_preemptive_rag=enable_preemptive_rag,
+        disable_image_request_filter=disable_image_request_filter,
         last_token_reset_timestamp=last_token_reset if last_token_reset else None,
         token_refill_interval_hours=refill_hours,
     )
@@ -1564,6 +1723,12 @@ async def update_debug_settings(
         await set_setting(db, "debug_rag", "true" if data.debug_rag else "false")
     if data.debug_filter_chains is not None:
         await set_setting(db, "debug_filter_chains", "true" if data.debug_filter_chains else "false")
+    # NC-0.8.0.7: Pre-emptive RAG toggle
+    if data.enable_preemptive_rag is not None:
+        await set_setting(db, "enable_preemptive_rag", "true" if data.enable_preemptive_rag else "false")
+    # NC-0.8.0.7: Image request filter toggle
+    if data.disable_image_request_filter is not None:
+        await set_setting(db, "disable_image_request_filter", "true" if data.disable_image_request_filter else "false")
     
     await db.commit()
     

@@ -29,6 +29,7 @@ class AssistantCategory(Base):
     """
     Categories for organizing Custom Assistants/GPTs.
     Admin-managed, used for filtering in the marketplace.
+    Each category is linked to an AssistantMode that defines the default tools.
     """
     __tablename__ = "assistant_categories"
     
@@ -39,9 +40,13 @@ class AssistantCategory(Base):
     description = Column(String(255), nullable=True)
     sort_order = Column(Integer, default=0)  # For custom ordering
     is_active = Column(Boolean, default=True)  # Can be disabled without deleting
+    mode_id = Column(String(36), ForeignKey("assistant_modes.id", ondelete="SET NULL"), nullable=True)
     
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    
+    # Relationship to mode
+    mode = relationship("AssistantMode", lazy="joined")
     
     __table_args__ = (
         Index("idx_category_sort", "sort_order", "label"),

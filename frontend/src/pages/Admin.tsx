@@ -8,7 +8,6 @@ import {
   SystemTab, 
   OAuthTab, 
   FeaturesTab, 
-  CategoriesTab,
   AssistantModesTab,
   SystemSettings,
   OAuthSettings,
@@ -62,6 +61,8 @@ export default function Admin() {
   const [debugDocumentQueue, setDebugDocumentQueue] = useState(false);
   const [debugRag, setDebugRag] = useState(false);
   const [debugFilterChains, setDebugFilterChains] = useState(false);
+  const [enablePreemptiveRag, setEnablePreemptiveRag] = useState(true);  // NC-0.8.0.7
+  const [disableImageRequestFilter, setDisableImageRequestFilter] = useState(false);  // NC-0.8.0.7
   const [lastTokenReset, setLastTokenReset] = useState<string | null>(null);
   const [tokenRefillHours, setTokenRefillHours] = useState(720);
   const [debugSettingsLoading, setDebugSettingsLoading] = useState(false);
@@ -179,6 +180,7 @@ export default function Admin() {
   const [filterChainJsonMode, setFilterChainJsonMode] = useState(false);
   const [filterChainJson, setFilterChainJson] = useState('');
   const [previewJsonChain, setPreviewJsonChain] = useState<FilterChainDef | null>(null);
+  const [showMobileChainSettings, setShowMobileChainSettings] = useState(false);
   
   // Global Knowledge Store state
   const [globalKBStores, setGlobalKBStores] = useState<GlobalKBStore[]>([]);
@@ -227,6 +229,27 @@ export default function Admin() {
   // LLM test state
   const [llmTestResult, setLLMTestResult] = useState<{ success: boolean; message: string; models?: string[] } | null>(null);
   const [llmTesting, setLLMTesting] = useState(false);
+  
+  // NC-0.8.0.7: Image Generation Settings state
+  const [imageGenSettings, setImageGenSettings] = useState<{
+    default_width: number;
+    default_height: number;
+    default_aspect_ratio: string;
+    available_resolutions: Array<{ width: number; height: number; label: string }>;
+  }>({
+    default_width: 1024,
+    default_height: 1024,
+    default_aspect_ratio: '1:1',
+    available_resolutions: [
+      { width: 512, height: 512, label: 'Small Square (512x512)' },
+      { width: 768, height: 768, label: 'Medium Square (768x768)' },
+      { width: 1024, height: 1024, label: 'Large Square (1024x1024)' },
+      { width: 768, height: 1024, label: 'Portrait (768x1024)' },
+      { width: 1024, height: 768, label: 'Landscape (1024x768)' },
+    ],
+  });
+  const [imageGenLoading, setImageGenLoading] = useState(false);
+  const [newResolution, setNewResolution] = useState({ width: 1024, height: 1024, label: '' });
   
   const PAGE_SIZE = 10;
   
@@ -509,6 +532,8 @@ export default function Admin() {
       setDebugDocumentQueue(res.data.debug_document_queue);
       setDebugRag(res.data.debug_rag);
       setDebugFilterChains(res.data.debug_filter_chains);
+      setEnablePreemptiveRag(res.data.enable_preemptive_rag ?? true);  // NC-0.8.0.7
+      setDisableImageRequestFilter(res.data.disable_image_request_filter ?? false);  // NC-0.8.0.7
       setLastTokenReset(res.data.last_token_reset_timestamp);
       setTokenRefillHours(res.data.token_refill_interval_hours);
     } catch (err: any) {
@@ -559,6 +584,30 @@ export default function Admin() {
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to save debug setting');
+    }
+  };
+  
+  // NC-0.8.0.7: Pre-emptive RAG toggle
+  const saveEnablePreemptiveRag = async (value: boolean) => {
+    try {
+      await api.put('/admin/debug-settings', { enable_preemptive_rag: value });
+      setEnablePreemptiveRag(value);
+      setSuccess('Pre-emptive RAG setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save setting');
+    }
+  };
+  
+  // NC-0.8.0.7: Image request filter toggle
+  const saveDisableImageRequestFilter = async (value: boolean) => {
+    try {
+      await api.put('/admin/debug-settings', { disable_image_request_filter: value });
+      setDisableImageRequestFilter(value);
+      setSuccess('Image request filter setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save setting');
     }
   };
   
@@ -982,6 +1031,68 @@ export default function Admin() {
     }
   }, [activeTab]);
   
+  // NC-0.8.0.7: Load image generation settings
+  useEffect(() => {
+    if (activeTab === 'image_gen') {
+      fetchImageGenSettings();
+    }
+  }, [activeTab]);
+  
+  const fetchImageGenSettings = async () => {
+    setImageGenLoading(true);
+    try {
+      const res = await api.get('/admin/image-gen-settings');
+      setImageGenSettings({
+        default_width: res.data.image_gen_default_width,
+        default_height: res.data.image_gen_default_height,
+        default_aspect_ratio: res.data.image_gen_default_aspect_ratio,
+        available_resolutions: res.data.image_gen_available_resolutions,
+      });
+    } catch (err: any) {
+      console.error('Failed to load image gen settings:', err);
+    } finally {
+      setImageGenLoading(false);
+    }
+  };
+  
+  const saveImageGenSettings = async () => {
+    setImageGenLoading(true);
+    try {
+      await api.put('/admin/image-gen-settings', {
+        image_gen_default_width: imageGenSettings.default_width,
+        image_gen_default_height: imageGenSettings.default_height,
+        image_gen_default_aspect_ratio: imageGenSettings.default_aspect_ratio,
+        image_gen_available_resolutions: imageGenSettings.available_resolutions,
+      });
+      setSuccess('Image generation settings saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save settings');
+    } finally {
+      setImageGenLoading(false);
+    }
+  };
+  
+  const addResolution = () => {
+    if (newResolution.width && newResolution.height && newResolution.label) {
+      setImageGenSettings(prev => ({
+        ...prev,
+        available_resolutions: [
+          ...prev.available_resolutions,
+          { ...newResolution },
+        ],
+      }));
+      setNewResolution({ width: 1024, height: 1024, label: '' });
+    }
+  };
+  
+  const removeResolution = (index: number) => {
+    setImageGenSettings(prev => ({
+      ...prev,
+      available_resolutions: prev.available_resolutions.filter((_, i) => i !== index),
+    }));
+  };
+  
   const resetToolForm = () => {
     setToolForm({
       name: '',
@@ -1248,10 +1359,13 @@ export default function Admin() {
     // Fallback: build from tools state
     const toolList: Array<{ value: string; label: string; category: string }> = [
       // Built-in tools that are always available
-      { value: 'web_search', label: '🌐 Web Search', category: 'Built-in' },
-      { value: 'web_fetch', label: '📄 Fetch Web Page', category: 'Built-in' },
+      { value: 'fetch_webpage', label: '📄 Fetch Web Page', category: 'Built-in' },
+      { value: 'fetch_urls', label: '📄 Fetch URLs (batch)', category: 'Built-in' },
       { value: 'calculator', label: '🔢 Calculator', category: 'Built-in' },
-      { value: 'code_interpreter', label: '💻 Run Code', category: 'Built-in' },
+      { value: 'execute_python', label: '💻 Run Code', category: 'Built-in' },
+      { value: 'search_documents', label: '🔍 Search Documents', category: 'Built-in' },
+      { value: 'get_current_time', label: '🕐 Get Current Time', category: 'Built-in' },
+      { value: 'analyze_text', label: '📊 Analyze Text', category: 'Built-in' },
     ];
     
     // Add MCP/OpenAPI tools and their sub-tools
@@ -1491,6 +1605,8 @@ export default function Admin() {
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>;
       case 'features':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>;
+      case 'image':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>;
       case 'filters':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" /></svg>;
       case 'tiers':
@@ -1520,11 +1636,11 @@ export default function Admin() {
     { id: 'system', label: 'System', iconType: 'system' },
     { id: 'oauth', label: 'OAuth', iconType: 'oauth' },
     { id: 'llm', label: 'LLM', iconType: 'llm' },
+    { id: 'image_gen', label: 'Image Gen', iconType: 'image' },  // NC-0.8.0.7
     { id: 'features', label: 'Features', iconType: 'features' },
     { id: 'filters', label: 'Filters', iconType: 'filters' },
     { id: 'filter_chains', label: 'Filter Chains', iconType: 'filter_chains' },
     { id: 'global_kb', label: 'Global KB', iconType: 'global_kb' },
-    { id: 'categories', label: 'GPT Categories', iconType: 'categories' },
     { id: 'modes', label: 'Assistant Modes', iconType: 'modes' },
     { id: 'tiers', label: 'Tiers', iconType: 'tiers' },
     { id: 'users', label: 'Users', iconType: 'users' },
@@ -2273,6 +2389,18 @@ export default function Admin() {
                             className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
                           />
                         </div>
+                        
+                        <div>
+                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Context Window Size</label>
+                          <input
+                            type="number"
+                            min="1024"
+                            value={llmSettings.llm_context_size || 200000}
+                            onChange={(e) => setLLMSettings({ ...llmSettings, llm_context_size: parseInt(e.target.value) || 200000 })}
+                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                          />
+                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">Model's total context window (e.g., 128000, 200000, 1000000)</p>
+                        </div>
                       
                         <div>
                           <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Temperature (default)</label>
@@ -2429,6 +2557,154 @@ export default function Admin() {
               </div>
             )}
             
+            {/* IMAGE GENERATION SETTINGS TAB - NC-0.8.0.7 */}
+            {activeTab === 'image_gen' && (
+              <div className="space-y-6">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Default Image Settings</h2>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    Configure default settings for image generation.
+                  </p>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1">
+                        Default Width
+                      </label>
+                      <input
+                        type="number"
+                        value={imageGenSettings.default_width}
+                        onChange={(e) => setImageGenSettings(prev => ({
+                          ...prev,
+                          default_width: parseInt(e.target.value) || 1024
+                        }))}
+                        min={256}
+                        max={2048}
+                        step={64}
+                        className="w-full bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-[var(--color-text)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1">
+                        Default Height
+                      </label>
+                      <input
+                        type="number"
+                        value={imageGenSettings.default_height}
+                        onChange={(e) => setImageGenSettings(prev => ({
+                          ...prev,
+                          default_height: parseInt(e.target.value) || 1024
+                        }))}
+                        min={256}
+                        max={2048}
+                        step={64}
+                        className="w-full bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-[var(--color-text)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1">
+                        Default Aspect Ratio
+                      </label>
+                      <select
+                        value={imageGenSettings.default_aspect_ratio}
+                        onChange={(e) => setImageGenSettings(prev => ({
+                          ...prev,
+                          default_aspect_ratio: e.target.value
+                        }))}
+                        className="w-full bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-[var(--color-text)]"
+                      >
+                        <option value="1:1">Square (1:1)</option>
+                        <option value="16:9">Landscape (16:9)</option>
+                        <option value="9:16">Portrait (9:16)</option>
+                        <option value="4:3">Standard (4:3)</option>
+                        <option value="3:4">Portrait (3:4)</option>
+                        <option value="3:2">Photo (3:2)</option>
+                        <option value="2:3">Portrait Photo (2:3)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">Available Resolutions</h2>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    Define the resolution options available to users in the image size selector.
+                  </p>
+                  
+                  {/* Resolution List */}
+                  <div className="space-y-2 mb-6">
+                    {imageGenSettings.available_resolutions.map((res, idx) => (
+                      <div key={idx} className="flex items-center gap-3 p-3 bg-[var(--color-background)] rounded-lg">
+                        <span className="text-[var(--color-text)] flex-1">{res.label}</span>
+                        <span className="text-[var(--color-text-secondary)] text-sm">{res.width}×{res.height}</span>
+                        <button
+                          onClick={() => removeResolution(idx)}
+                          className="text-red-400 hover:text-red-300 p-1"
+                          title="Remove resolution"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  
+                  {/* Add New Resolution */}
+                  <div className="border-t border-[var(--color-border)] pt-4">
+                    <h3 className="text-sm font-medium text-[var(--color-text)] mb-3">Add Resolution</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                      <input
+                        type="number"
+                        placeholder="Width"
+                        value={newResolution.width}
+                        onChange={(e) => setNewResolution(prev => ({ ...prev, width: parseInt(e.target.value) || 0 }))}
+                        min={256}
+                        max={2048}
+                        step={64}
+                        className="bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-[var(--color-text)]"
+                      />
+                      <input
+                        type="number"
+                        placeholder="Height"
+                        value={newResolution.height}
+                        onChange={(e) => setNewResolution(prev => ({ ...prev, height: parseInt(e.target.value) || 0 }))}
+                        min={256}
+                        max={2048}
+                        step={64}
+                        className="bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-[var(--color-text)]"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Label (e.g., 'HD Landscape')"
+                        value={newResolution.label}
+                        onChange={(e) => setNewResolution(prev => ({ ...prev, label: e.target.value }))}
+                        className="bg-[var(--color-background)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-[var(--color-text)]"
+                      />
+                      <button
+                        onClick={addResolution}
+                        disabled={!newResolution.label}
+                        className="px-4 py-2 bg-[var(--color-primary)] text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Save Button */}
+                <button
+                  onClick={saveImageGenSettings}
+                  disabled={imageGenLoading}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {imageGenLoading ? 'Saving...' : 'Save Image Settings'}
+                </button>
+              </div>
+            )}
+            
             {/* FEATURE FLAGS TAB */}
             {activeTab === 'features' && featureFlags && (
               <div className="space-y-6">
@@ -2485,6 +2761,20 @@ export default function Admin() {
                         type="checkbox"
                         checked={featureFlags.enable_safety_filters}
                         onChange={(e) => setFeatureFlags({ ...featureFlags, enable_safety_filters: e.target.checked })}
+                        className="w-5 h-5 rounded"
+                      />
+                    </div>
+                    
+                    <div className="flex items-start justify-between p-4 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)]">
+                      <div>
+                        <h3 className="text-sm font-medium text-[var(--color-text)]">Enable Mermaid Rendering</h3>
+                        <p className="text-xs text-[var(--color-text-secondary)]">Render Mermaid diagrams as interactive graphics</p>
+                        <p className="text-xs text-[var(--color-text-secondary)] mt-1">Disable to show raw Mermaid code instead</p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={featureFlags.enable_mermaid_rendering}
+                        onChange={(e) => setFeatureFlags({ ...featureFlags, enable_mermaid_rendering: e.target.checked })}
                         className="w-5 h-5 rounded"
                       />
                     </div>
@@ -3732,10 +4022,10 @@ export default function Admin() {
                 <div className="bg-[var(--color-surface)] rounded-xl w-[95vw] h-[95vh] border border-[var(--color-border)] flex flex-col">
                   {/* Header - Mobile Responsive */}
                   <div className="px-3 md:px-4 py-2 md:py-3 border-b border-[var(--color-border)] shrink-0">
-                    {/* Top row: Title, Name, Cancel/Save */}
-                    <div className="flex items-center gap-2 md:gap-4 mb-2">
+                    {/* Top row: Title, Name, Settings (mobile), Cancel */}
+                    <div className="flex items-center gap-2 md:gap-4">
                       <h3 className="text-sm md:text-lg font-semibold text-[var(--color-text)] whitespace-nowrap">
-                        {editingFilterChain ? '✏️ Edit' : '➕ New'}
+                        {editingFilterChain ? '✏️' : '➕'}
                       </h3>
                       <input
                         type="text"
@@ -3744,13 +4034,103 @@ export default function Admin() {
                         className="px-2 md:px-3 py-1 md:py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm flex-1 min-w-0"
                         placeholder="Chain name..."
                       />
+                      {/* Mobile: Settings button */}
+                      <button
+                        onClick={() => setShowMobileChainSettings(true)}
+                        className="md:hidden px-2 py-1 rounded text-xs bg-[var(--color-background)] text-[var(--color-text-secondary)] border border-[var(--color-border)]"
+                      >
+                        ⚙️ Settings
+                      </button>
+                      {/* Desktop: Show description inline */}
                       <input
                         type="text"
                         value={filterChainForm.description || ''}
                         onChange={(e) => setFilterChainForm({ ...filterChainForm, description: e.target.value })}
-                        className="hidden md:block px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm flex-1 min-w-0"
+                        className="hidden lg:block px-3 py-1.5 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm flex-1 min-w-0"
                         placeholder="Description..."
                       />
+                      {/* Desktop: Show options inline */}
+                      <div className="hidden md:flex items-center gap-3 text-sm">
+                        <select
+                          value={filterChainForm.priority}
+                          onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
+                          className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                        >
+                          <option value={10}>Priority: 10</option>
+                          <option value={50}>Priority: 50</option>
+                          <option value={100}>Priority: 100</option>
+                          <option value={200}>Priority: 200</option>
+                          <option value={500}>Priority: 500</option>
+                        </select>
+                        <label className="flex items-center gap-1.5 cursor-pointer whitespace-nowrap">
+                          <input
+                            type="checkbox"
+                            checked={filterChainForm.enabled}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, enabled: e.target.checked })}
+                            className="rounded"
+                          />
+                          <span className="text-[var(--color-text)]">Enabled</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 cursor-pointer whitespace-nowrap" title="Retain History">
+                          <input
+                            type="checkbox"
+                            checked={filterChainForm.retain_history}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
+                            className="rounded"
+                          />
+                          <span className="text-[var(--color-text)]">History</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 cursor-pointer whitespace-nowrap" title="Bidirectional">
+                          <input
+                            type="checkbox"
+                            checked={filterChainForm.bidirectional}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, bidirectional: e.target.checked })}
+                            className="rounded"
+                          />
+                          <span className="text-[var(--color-text)]">Bidir</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 cursor-pointer whitespace-nowrap" title="Skip if RAG hit">
+                          <input
+                            type="checkbox"
+                            checked={filterChainForm.skip_if_rag_hit}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, skip_if_rag_hit: e.target.checked })}
+                            className="rounded"
+                          />
+                          <span className="text-[var(--color-text)]">Skip RAG</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 cursor-pointer whitespace-nowrap">
+                          <input
+                            type="checkbox"
+                            checked={filterChainForm.debug}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
+                            className="rounded"
+                          />
+                          <span className="text-[var(--color-text)]">🐛</span>
+                        </label>
+                        <div className="flex items-center gap-1 whitespace-nowrap">
+                          <span className="text-[var(--color-text-secondary)]">Max:</span>
+                          <input
+                            type="number"
+                            value={filterChainForm.max_iterations}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, max_iterations: parseInt(e.target.value) || 10 })}
+                            className="w-14 px-1.5 py-0.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                            min={1}
+                            max={100}
+                          />
+                        </div>
+                        {filterChainForm.bidirectional && (
+                          <select
+                            value={filterChainForm.outbound_chain_id || ''}
+                            onChange={(e) => setFilterChainForm({ ...filterChainForm, outbound_chain_id: e.target.value || undefined })}
+                            className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                          >
+                            <option value="">Outbound: Same</option>
+                            {filterChains.filter(c => c.id !== filterChainForm.id).map(c => (
+                              <option key={c.id} value={c.id}>{c.name}</option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
                       <button
                         onClick={() => setFilterChainJsonMode(!filterChainJsonMode)}
                         className={`px-2 py-1 rounded text-xs md:text-sm whitespace-nowrap ${
@@ -3759,7 +4139,7 @@ export default function Admin() {
                             : 'bg-[var(--color-background)] text-[var(--color-text-secondary)]'
                         }`}
                       >
-                        {filterChainJsonMode ? '← Visual' : 'JSON'}
+                        {filterChainJsonMode ? '←' : 'JSON'}
                       </button>
                       <button
                         onClick={resetFilterChainForm}
@@ -3768,90 +4148,156 @@ export default function Admin() {
                         Cancel
                       </button>
                     </div>
-                    
-                    {/* Second row: Options (scrollable on mobile) */}
-                    <div className="flex items-center gap-2 md:gap-3 overflow-x-auto pb-1 text-xs md:text-sm">
-                      <select
-                        value={filterChainForm.priority}
-                        onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
-                        className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-xs md:text-sm shrink-0"
-                      >
-                        <option value={10}>P:10</option>
-                        <option value={50}>P:50</option>
-                        <option value={100}>P:100</option>
-                        <option value={200}>P:200</option>
-                        <option value={500}>P:500</option>
-                      </select>
-                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.enabled}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, enabled: e.target.checked })}
-                          className="rounded w-3 h-3 md:w-4 md:h-4"
-                        />
-                        <span className="text-[var(--color-text)]">On</span>
-                      </label>
-                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0" title="Retain History">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.retain_history}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
-                          className="rounded w-3 h-3 md:w-4 md:h-4"
-                        />
-                        <span className="text-[var(--color-text)]">History</span>
-                      </label>
-                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0" title="Bidirectional">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.bidirectional}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, bidirectional: e.target.checked })}
-                          className="rounded w-3 h-3 md:w-4 md:h-4"
-                        />
-                        <span className="text-[var(--color-text)]">Bidir</span>
-                      </label>
-                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0" title="Skip if RAG hit">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.skip_if_rag_hit}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, skip_if_rag_hit: e.target.checked })}
-                          className="rounded w-3 h-3 md:w-4 md:h-4"
-                        />
-                        <span className="text-[var(--color-text)]">Skip RAG</span>
-                      </label>
-                      <label className="flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0">
-                        <input
-                          type="checkbox"
-                          checked={filterChainForm.debug}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
-                          className="rounded w-3 h-3 md:w-4 md:h-4"
-                        />
-                        <span className="text-[var(--color-text)]">🐛</span>
-                      </label>
-                      <div className="flex items-center gap-1 whitespace-nowrap shrink-0">
-                        <span className="text-[var(--color-text-secondary)]">Max:</span>
-                        <input
-                          type="number"
-                          value={filterChainForm.max_iterations}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, max_iterations: parseInt(e.target.value) || 10 })}
-                          className="w-12 px-1 py-0.5 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-xs md:text-sm"
-                          min={1}
-                          max={100}
-                        />
-                      </div>
-                      {filterChainForm.bidirectional && (
-                        <select
-                          value={filterChainForm.outbound_chain_id || ''}
-                          onChange={(e) => setFilterChainForm({ ...filterChainForm, outbound_chain_id: e.target.value || undefined })}
-                          className="px-2 py-1 rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-xs md:text-sm shrink-0"
-                        >
-                          <option value="">Outbound: Same</option>
-                          {filterChains.filter(c => c.id !== filterChainForm.id).map(c => (
-                            <option key={c.id} value={c.id}>{c.name}</option>
-                          ))}
-                        </select>
-                      )}
-                    </div>
                   </div>
+                  
+                  {/* Mobile Settings Modal */}
+                  {showMobileChainSettings && (
+                    <div className="fixed inset-0 bg-black/50 flex items-end justify-center z-[60] md:hidden" onClick={() => setShowMobileChainSettings(false)}>
+                      <div 
+                        className="bg-[var(--color-surface)] rounded-t-xl w-full max-h-[80vh] overflow-y-auto border-t border-[var(--color-border)] p-4"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex items-center justify-between mb-4">
+                          <h4 className="text-lg font-semibold text-[var(--color-text)]">Chain Settings</h4>
+                          <button 
+                            onClick={() => setShowMobileChainSettings(false)}
+                            className="p-2 text-[var(--color-text-secondary)]"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                        
+                        <div className="space-y-4">
+                          {/* Description */}
+                          <div>
+                            <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Description</label>
+                            <input
+                              type="text"
+                              value={filterChainForm.description || ''}
+                              onChange={(e) => setFilterChainForm({ ...filterChainForm, description: e.target.value })}
+                              className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                              placeholder="Description..."
+                            />
+                          </div>
+                          
+                          {/* Priority */}
+                          <div>
+                            <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Priority</label>
+                            <select
+                              value={filterChainForm.priority}
+                              onChange={(e) => setFilterChainForm({ ...filterChainForm, priority: parseInt(e.target.value) })}
+                              className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            >
+                              <option value={10}>First (10)</option>
+                              <option value={50}>Early (50)</option>
+                              <option value={100}>Normal (100)</option>
+                              <option value={200}>Late (200)</option>
+                              <option value={500}>Last (500)</option>
+                            </select>
+                          </div>
+                          
+                          {/* Max Iterations */}
+                          <div>
+                            <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Max Iterations</label>
+                            <input
+                              type="number"
+                              value={filterChainForm.max_iterations}
+                              onChange={(e) => setFilterChainForm({ ...filterChainForm, max_iterations: parseInt(e.target.value) || 10 })}
+                              className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                              min={1}
+                              max={100}
+                            />
+                          </div>
+                          
+                          {/* Checkboxes */}
+                          <div className="space-y-3">
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={filterChainForm.enabled}
+                                onChange={(e) => setFilterChainForm({ ...filterChainForm, enabled: e.target.checked })}
+                                className="w-5 h-5 rounded"
+                              />
+                              <span className="text-[var(--color-text)]">Enabled</span>
+                            </label>
+                            
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={filterChainForm.retain_history}
+                                onChange={(e) => setFilterChainForm({ ...filterChainForm, retain_history: e.target.checked })}
+                                className="w-5 h-5 rounded"
+                              />
+                              <div>
+                                <span className="text-[var(--color-text)]">Retain History</span>
+                                <p className="text-xs text-[var(--color-text-secondary)]">Don't modify conversation messages</p>
+                              </div>
+                            </label>
+                            
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={filterChainForm.bidirectional}
+                                onChange={(e) => setFilterChainForm({ ...filterChainForm, bidirectional: e.target.checked })}
+                                className="w-5 h-5 rounded"
+                              />
+                              <div>
+                                <span className="text-[var(--color-text)]">Bidirectional</span>
+                                <p className="text-xs text-[var(--color-text-secondary)]">Process both incoming and outgoing</p>
+                              </div>
+                            </label>
+                            
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={filterChainForm.skip_if_rag_hit}
+                                onChange={(e) => setFilterChainForm({ ...filterChainForm, skip_if_rag_hit: e.target.checked })}
+                                className="w-5 h-5 rounded"
+                              />
+                              <div>
+                                <span className="text-[var(--color-text)]">Skip if RAG Hit</span>
+                                <p className="text-xs text-[var(--color-text-secondary)]">Skip when knowledge base has results</p>
+                              </div>
+                            </label>
+                            
+                            <label className="flex items-center gap-3 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={filterChainForm.debug}
+                                onChange={(e) => setFilterChainForm({ ...filterChainForm, debug: e.target.checked })}
+                                className="w-5 h-5 rounded"
+                              />
+                              <span className="text-[var(--color-text)]">🐛 Debug Mode</span>
+                            </label>
+                          </div>
+                          
+                          {/* Outbound Chain (if bidirectional) */}
+                          {filterChainForm.bidirectional && (
+                            <div>
+                              <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Outbound Chain</label>
+                              <select
+                                value={filterChainForm.outbound_chain_id || ''}
+                                onChange={(e) => setFilterChainForm({ ...filterChainForm, outbound_chain_id: e.target.value || undefined })}
+                                className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                              >
+                                <option value="">Same chain</option>
+                                {filterChains.filter(c => c.id !== filterChainForm.id).map(c => (
+                                  <option key={c.id} value={c.id}>{c.name}</option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </div>
+                        
+                        <button
+                          onClick={() => setShowMobileChainSettings(false)}
+                          className="w-full mt-6 px-4 py-3 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg font-medium"
+                        >
+                          Done
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   
                   {/* Export as Tool Section */}
                   <div className="px-4 py-3 border-b border-[var(--color-border)] bg-[var(--color-background)]/50">
@@ -4567,192 +5013,6 @@ export default function Admin() {
               </div>
             )}
             
-            {/* GPT CATEGORIES TAB */}
-            {activeTab === 'categories' && (
-              <div className="space-y-6">
-                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h3 className="text-lg font-semibold text-[var(--color-text)]">GPT Categories</h3>
-                      <p className="text-sm text-[var(--color-text-secondary)]">
-                        Manage categories for organizing Custom GPTs in the marketplace
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => {
-                        resetCategoryForm();
-                        setShowCategoryModal(true);
-                      }}
-                      className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90"
-                    >
-                      + Add Category
-                    </button>
-                  </div>
-                  
-                  {categoriesLoading ? (
-                    <div className="text-[var(--color-text-secondary)]">Loading...</div>
-                  ) : gptCategories.length === 0 ? (
-                    <div className="text-center py-8 text-[var(--color-text-secondary)]">
-                      No categories yet. Click "Add Category" to create one.
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {gptCategories.map(cat => (
-                        <div
-                          key={cat.id}
-                          className={`flex items-center justify-between p-4 rounded-lg transition-colors ${
-                            cat.is_active 
-                              ? 'bg-[var(--color-background)]' 
-                              : 'bg-[var(--color-background)]/50 opacity-60'
-                          }`}
-                        >
-                          <div className="flex items-center gap-3">
-                            <span className="text-2xl w-10 text-center">{cat.icon}</span>
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-[var(--color-text)]">{cat.label}</span>
-                                <code className="text-xs px-2 py-0.5 rounded bg-[var(--color-surface)] text-[var(--color-text-secondary)]">
-                                  {cat.value}
-                                </code>
-                                {!cat.is_active && (
-                                  <span className="text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
-                                    Disabled
-                                  </span>
-                                )}
-                              </div>
-                              {cat.description && (
-                                <div className="text-sm text-[var(--color-text-secondary)]">{cat.description}</div>
-                              )}
-                            </div>
-                          </div>
-                          
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-[var(--color-text-secondary)] mr-2">
-                              Order: {cat.sort_order}
-                            </span>
-                            <button
-                              onClick={() => startEditCategory(cat)}
-                              className="px-3 py-1 text-sm bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] rounded hover:bg-[var(--color-border)]"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => toggleCategoryActive(cat)}
-                              className={`px-3 py-1 text-sm rounded ${
-                                cat.is_active
-                                  ? 'bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30'
-                                  : 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
-                              }`}
-                            >
-                              {cat.is_active ? 'Disable' : 'Enable'}
-                            </button>
-                            {cat.value !== 'general' && (
-                              <button
-                                onClick={() => deleteCategory(cat)}
-                                className="px-3 py-1 text-sm bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
-                              >
-                                Delete
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                
-                {/* Category Modal */}
-                {showCategoryModal && (
-                  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-                    <div className="bg-[var(--color-surface)] rounded-xl p-6 w-full max-w-md border border-[var(--color-border)]">
-                      <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">
-                        {editingCategory ? 'Edit Category' : 'New Category'}
-                      </h3>
-                      
-                      <div className="space-y-4">
-                        <div>
-                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
-                            Value (URL-friendly) {!editingCategory && '*'}
-                          </label>
-                          <input
-                            type="text"
-                            value={categoryForm.value}
-                            onChange={(e) => setCategoryForm({ ...categoryForm, value: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-                            placeholder="e.g., data-science"
-                            disabled={!!editingCategory}
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] disabled:opacity-50"
-                          />
-                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-                            Lowercase letters, numbers, and hyphens only
-                          </p>
-                        </div>
-                        
-                        <div>
-                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Label *</label>
-                          <input
-                            type="text"
-                            value={categoryForm.label}
-                            onChange={(e) => setCategoryForm({ ...categoryForm, label: e.target.value })}
-                            placeholder="e.g., Data Science"
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
-                          />
-                        </div>
-                        
-                        <div>
-                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Icon (emoji)</label>
-                          <input
-                            type="text"
-                            value={categoryForm.icon}
-                            onChange={(e) => setCategoryForm({ ...categoryForm, icon: e.target.value })}
-                            placeholder="📁"
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
-                          />
-                        </div>
-                        
-                        <div>
-                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Description</label>
-                          <input
-                            type="text"
-                            value={categoryForm.description}
-                            onChange={(e) => setCategoryForm({ ...categoryForm, description: e.target.value })}
-                            placeholder="Optional description..."
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
-                          />
-                        </div>
-                        
-                        <div>
-                          <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Sort Order</label>
-                          <input
-                            type="number"
-                            value={categoryForm.sort_order}
-                            onChange={(e) => setCategoryForm({ ...categoryForm, sort_order: parseInt(e.target.value) || 0 })}
-                            className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
-                          />
-                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-                            Lower numbers appear first
-                          </p>
-                        </div>
-                      </div>
-                      
-                      <div className="flex justify-end gap-3 mt-6">
-                        <button
-                          onClick={resetCategoryForm}
-                          className="px-4 py-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={saveCategory}
-                          className="px-4 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90"
-                        >
-                          {editingCategory ? 'Save Changes' : 'Create Category'}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
             
             {/* ASSISTANT MODES TAB */}
             {activeTab === 'modes' && (
@@ -4861,36 +5121,86 @@ export default function Admin() {
                           </div>
                         </div>
                       </label>
-                      
-                      {/* Token Reset Info */}
-                      <div className="mt-4 p-4 bg-[var(--color-background)] rounded-lg border border-[var(--color-border)]">
-                        <h4 className="text-sm font-medium text-[var(--color-text)] mb-2">Token Reset Status</h4>
-                        <div className="space-y-1 text-sm text-[var(--color-text-secondary)]">
-                          <div>
-                            <span className="font-medium">Refill Interval:</span> {tokenRefillHours} hours ({Math.round(tokenRefillHours / 24)} days)
-                          </div>
-                          <div>
-                            <span className="font-medium">Last Reset:</span>{' '}
-                            {lastTokenReset 
-                              ? new Date(lastTokenReset).toLocaleString() 
-                              : 'Never (will reset on next check)'}
-                          </div>
-                          {lastTokenReset && (
-                            <div>
-                              <span className="font-medium">Next Reset:</span>{' '}
-                              {(() => {
-                                const lastResetDate = new Date(lastTokenReset);
-                                const nextReset = new Date(lastResetDate.getTime() + tokenRefillHours * 60 * 60 * 1000);
-                                const now = new Date();
-                                const hoursUntil = Math.max(0, (nextReset.getTime() - now.getTime()) / (1000 * 60 * 60));
-                                return `${nextReset.toLocaleString()} (${Math.round(hoursUntil)} hours from now)`;
-                              })()}
-                            </div>
-                          )}
-                        </div>
-                      </div>
                     </div>
                   )}
+                </div>
+                
+                {/* RAG Settings - NC-0.8.0.7 */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">RAG Settings</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    Control automatic knowledge base searches before LLM processing.
+                  </p>
+                  
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={enablePreemptiveRag}
+                        onChange={(e) => saveEnablePreemptiveRag(e.target.checked)}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                      />
+                      <div>
+                        <div className="text-[var(--color-text)] font-medium">Enable Pre-emptive RAG</div>
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                          Auto-search Chat History KB and Assistant KBs before LLM. When disabled, only Global KB runs and filter chains (web search) execute unconditionally.
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* Image Generation Settings - NC-0.8.0.7 */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Image Generation</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    Control how image generation requests are handled.
+                  </p>
+                  
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={disableImageRequestFilter}
+                        onChange={(e) => saveDisableImageRequestFilter(e.target.checked)}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                      />
+                      <div>
+                        <div className="text-[var(--color-text)] font-medium">Disable Image Request Filter</div>
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                          When enabled, the system won't auto-detect image generation requests. Instead, let the LLM decide when to use the image generation tool.
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* Token Reset Info */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Token Reset Status</h3>
+                  <div className="space-y-1 text-sm text-[var(--color-text-secondary)]">
+                    <div>
+                      <span className="font-medium">Refill Interval:</span> {tokenRefillHours} hours ({Math.round(tokenRefillHours / 24)} days)
+                    </div>
+                    <div>
+                      <span className="font-medium">Last Reset:</span>{' '}
+                      {lastTokenReset 
+                        ? new Date(lastTokenReset).toLocaleString() 
+                        : 'Never (will reset on next check)'}
+                    </div>
+                    {lastTokenReset && (
+                      <div>
+                        <span className="font-medium">Next Reset:</span>{' '}
+                        {(() => {
+                          const lastResetDate = new Date(lastTokenReset);
+                          const nextReset = new Date(lastResetDate.getTime() + tokenRefillHours * 60 * 60 * 1000);
+                          const now = new Date();
+                          const hoursUntil = Math.max(0, (nextReset.getTime() - now.getTime()) / (1000 * 60 * 60));
+                          return `${nextReset.toLocaleString()} (${Math.round(hoursUntil)} hours from now)`;
+                        })()}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}

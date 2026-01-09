@@ -162,7 +162,7 @@ async def export_user_data(
         "user": {
             "id": user.id,
             "email": user.email,
-            "display_name": user.display_name,
+            "username": user.username,
             "created_at": user.created_at.isoformat() if user.created_at else None,
         }
     }
@@ -189,8 +189,10 @@ async def export_user_data(
             "created_at": chat.created_at.isoformat() if chat.created_at else None,
             "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
             "system_prompt": chat.system_prompt,
-            "model_id": chat.model_id,
-            "is_knowledge_indexed": chat.is_knowledge_indexed,
+            "model": chat.model,
+            "source": chat.source,
+            "assistant_id": chat.assistant_id,
+            "assistant_name": chat.assistant_name,
             "messages": [
                 {
                     "id": msg.id,
@@ -416,8 +418,18 @@ def index_user_chats_sync(user_id: str):
                 for msg in messages:
                     role_label = "User" if msg.role.value == "user" else "Assistant"
                     content = msg.content or ""
-                    if len(content) > 5000:
-                        content = content[:5000] + "... [truncated]"
+                    
+                    # Include attachment content (PDFs, docs, etc.)
+                    if msg.attachments:
+                        for att in msg.attachments:
+                            att_content = att.get("content", "")
+                            att_name = att.get("filename", att.get("name", "attachment"))
+                            if att_content and len(att_content) > 100:
+                                # Add attachment content with header
+                                content += f"\n\n[Attached: {att_name}]\n{att_content}"
+                    
+                    if len(content) > 50000:  # Increased limit for attachments
+                        content = content[:50000] + "... [truncated]"
                     conversation_parts.append(f"**{role_label}:** {content}")
                     conversation_parts.append("")
                 

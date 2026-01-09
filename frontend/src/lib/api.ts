@@ -145,8 +145,8 @@ export const chatApi = {
     });
   },
   
-  getZipFile: (chatId: string, path: string) =>
-    api.get(`/chats/${chatId}/zip-file`, { params: { path } }),
+  getZipFile: (chatId: string, path: string, offset: number = 0) =>
+    api.get(`/chats/${chatId}/zip-file`, { params: { path, offset } }),
   
   getUploadedFiles: (chatId: string) =>
     api.get(`/chats/${chatId}/uploaded-files`),

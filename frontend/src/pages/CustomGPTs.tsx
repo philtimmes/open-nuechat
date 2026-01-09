@@ -393,9 +393,16 @@ export default function CustomGPTs() {
     }
   };
   
-  // Category options - fetched from API
-  const [categories, setCategories] = useState<{ value: string; label: string; icon?: string }[]>([
-    { value: 'general', label: 'General' }, // Fallback default
+  // Category options - fetched from API (now sourced from AssistantModes)
+  const [categories, setCategories] = useState<{ 
+    id: string;
+    value: string; 
+    label: string; 
+    icon?: string; 
+    active_tools?: string[];
+    description?: string;
+  }[]>([
+    { id: '', value: 'general', label: 'General' }, // Fallback default
   ]);
   
   // Fetch categories on mount
@@ -404,10 +411,20 @@ export default function CustomGPTs() {
       try {
         const res = await api.get('/assistants/categories');
         if (res.data && res.data.length > 0) {
-          setCategories(res.data.map((c: { value: string; label: string; icon: string }) => ({
+          setCategories(res.data.map((c: { 
+            id: string;
+            value: string; 
+            label: string; 
+            icon: string; 
+            active_tools?: string[];
+            description?: string;
+          }) => ({
+            id: c.id,
             value: c.value,
             label: c.label,
             icon: c.icon,
+            active_tools: c.active_tools,
+            description: c.description,
           })));
         }
       } catch (err) {

@@ -56,14 +56,57 @@ class AssistantModeUpdate(BaseModel):
     is_global: Optional[bool] = None
 
 
-class AssistantModeResponse(AssistantModeBase):
+# Emoji mapping for response serialization
+MODE_EMOJIS = {
+    "General": "🤖",
+    "Creative Writing": "✍️",
+    "Coding": "💻",
+    "Deep Research": "🔬",
+    "Legal": "⚖️",
+    "Data Analysis": "📊",
+    "Image Generation": "🎨",
+}
+
+
+class AssistantModeResponse(BaseModel):
     id: str
+    name: str
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    emoji: str = "🤖"  # Derived, not from DB
+    active_tools: List[str] = []
+    advertised_tools: List[str] = []
+    filter_chain_id: Optional[str] = None
+    sort_order: int = 0
+    enabled: bool = True
+    is_global: bool = True
     created_by: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+    
+    @classmethod
+    def from_orm_with_emoji(cls, mode):
+        """Create response with derived emoji."""
+        data = {
+            "id": mode.id,
+            "name": mode.name,
+            "description": mode.description,
+            "icon": mode.icon,
+            "emoji": MODE_EMOJIS.get(mode.name, "🤖"),
+            "active_tools": mode.active_tools or [],
+            "advertised_tools": mode.advertised_tools or [],
+            "filter_chain_id": mode.filter_chain_id,
+            "sort_order": mode.sort_order,
+            "enabled": mode.enabled,
+            "is_global": mode.is_global,
+            "created_by": mode.created_by,
+            "created_at": mode.created_at,
+            "updated_at": mode.updated_at,
+        }
+        return cls(**data)
 
 
 # ============================================================================
@@ -94,7 +137,7 @@ async def list_assistant_modes(
     result = await db.execute(query)
     modes = result.scalars().all()
     
-    return modes
+    return [AssistantModeResponse.from_orm_with_emoji(m) for m in modes]
 
 
 @router.get("/{mode_id}", response_model=AssistantModeResponse)
@@ -115,7 +158,7 @@ async def get_assistant_mode(
             detail="Assistant mode not found"
         )
     
-    return mode
+    return AssistantModeResponse.from_orm_with_emoji(mode)
 
 
 @router.post("", response_model=AssistantModeResponse, status_code=status.HTTP_201_CREATED)
@@ -160,7 +203,7 @@ async def create_assistant_mode(
     
     logger.info(f"Created assistant mode: {mode.name} (id={mode.id})")
     
-    return mode
+    return AssistantModeResponse.from_orm_with_emoji(mode)
 
 
 @router.put("/{mode_id}", response_model=AssistantModeResponse)
@@ -212,7 +255,7 @@ async def update_assistant_mode(
     
     logger.info(f"Updated assistant mode: {mode.name} (id={mode.id})")
     
-    return mode
+    return AssistantModeResponse.from_orm_with_emoji(mode)
 
 
 @router.delete("/{mode_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -306,4 +349,4 @@ async def duplicate_assistant_mode(
     
     logger.info(f"Duplicated assistant mode: {mode.name} -> {new_mode.name}")
     
-    return new_mode
+    return AssistantModeResponse.from_orm_with_emoji(new_mode)

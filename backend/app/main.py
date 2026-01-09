@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.8.0.1.1"
+SCHEMA_VERSION = "NC-0.8.0.7"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -391,6 +391,53 @@ async def run_migrations(conn):
             ("ALTER TABLE documents ADD COLUMN required_keywords TEXT", "documents.required_keywords"),
             ("ALTER TABLE documents ADD COLUMN keyword_match_mode VARCHAR(10) DEFAULT 'any'", "documents.keyword_match_mode"),
         ],
+        "NC-0.8.0.1.2": [
+            # Chat source tracking for imports
+            ("ALTER TABLE chats ADD COLUMN source VARCHAR(50) DEFAULT 'native'", "chats.source"),
+            # Backfill source from title prefix for existing imported chats
+            ("UPDATE chats SET source = 'chatgpt' WHERE title LIKE 'ChatGPT: %' AND source = 'native'", "backfill_chatgpt_source"),
+            ("UPDATE chats SET source = 'grok' WHERE title LIKE 'Grok: %' AND source = 'native'", "backfill_grok_source"),
+            ("UPDATE chats SET source = 'claude' WHERE title LIKE 'Claude: %' AND source = 'native'", "backfill_claude_source"),
+            # Remove prefix from titles now that source field exists
+            ("UPDATE chats SET title = SUBSTR(title, 10) WHERE title LIKE 'ChatGPT: %'", "clean_chatgpt_title_prefix"),
+            ("UPDATE chats SET title = SUBSTR(title, 7) WHERE title LIKE 'Grok: %'", "clean_grok_title_prefix"),
+            ("UPDATE chats SET title = SUBSTR(title, 9) WHERE title LIKE 'Claude: %'", "clean_claude_title_prefix"),
+        ],
+        "NC-0.8.0.4": [
+            # Ensure all base modes exist (INSERT OR IGNORE won't fail if they already exist)
+            ("INSERT OR IGNORE INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'General', 'Balanced tool availability for everyday tasks', '[\"web_search\", \"artifacts\", \"kb_search\"]', '[]', 0)", "seed mode: General"),
+            ("INSERT OR IGNORE INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Creative Writing', 'Focused writing without tool distractions - pure creative flow', '[]', '[]', 1)", "seed mode: Creative Writing"),
+            ("INSERT OR IGNORE INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Coding', 'Web search, chat history, and full development tools', '[\"web_search\", \"user_chats_kb\", \"artifacts\", \"file_ops\", \"code_exec\"]', '[\"web_search\", \"artifacts\", \"file_ops\"]', 2)", "seed mode: Coding"),
+            ("INSERT OR IGNORE INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Deep Research', 'Comprehensive research with web, knowledge bases, and citations', '[\"web_search\", \"kb_search\", \"local_rag\", \"user_chats_kb\", \"citations\", \"artifacts\"]', '[\"web_search\", \"kb_search\", \"citations\"]', 3)", "seed mode: Deep Research"),
+            ("INSERT OR IGNORE INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Legal', 'Legal research with all knowledge bases and file tools, no web search', '[\"kb_search\", \"local_rag\", \"user_chats_kb\", \"file_ops\", \"artifacts\"]', '[\"kb_search\", \"file_ops\"]', 4)", "seed mode: Legal"),
+            ("INSERT OR IGNORE INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Data Analysis', 'Code execution and file tools for data processing', '[\"code_exec\", \"file_ops\", \"artifacts\", \"local_rag\"]', '[\"code_exec\", \"file_ops\"]', 5)", "seed mode: Data Analysis"),
+            ("INSERT OR IGNORE INTO assistant_modes (id, name, description, active_tools, advertised_tools, sort_order) VALUES (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(6))), 'Image Generation', 'Focused on creating and discussing images', '[\"image_gen\", \"artifacts\"]', '[\"image_gen\"]', 6)", "seed mode: Image Generation"),
+            
+            # Update existing modes with better configurations (in case they exist from old migrations with wrong tools)
+            ("UPDATE assistant_modes SET active_tools = '[\"web_search\", \"artifacts\", \"kb_search\"]' WHERE name = 'General'", "update mode: General"),
+            ("UPDATE assistant_modes SET active_tools = '[]' WHERE name = 'Creative Writing'", "update mode: Creative Writing"),
+            ("UPDATE assistant_modes SET active_tools = '[\"web_search\", \"user_chats_kb\", \"artifacts\", \"file_ops\", \"code_exec\"]' WHERE name = 'Coding'", "update mode: Coding"),
+            ("UPDATE assistant_modes SET active_tools = '[\"web_search\", \"kb_search\", \"local_rag\", \"user_chats_kb\", \"citations\", \"artifacts\"]' WHERE name = 'Deep Research'", "update mode: Deep Research"),
+            
+            # Add mode_id to assistant_categories (may already exist - will fail silently)
+            ("ALTER TABLE assistant_categories ADD COLUMN mode_id VARCHAR(36) REFERENCES assistant_modes(id) ON DELETE SET NULL", "assistant_categories.mode_id"),
+        ],
+        "NC-0.8.0.5": [
+            # Add token limit columns to chats
+            ("ALTER TABLE chats ADD COLUMN max_input_tokens INTEGER", "chats.max_input_tokens"),
+            ("ALTER TABLE chats ADD COLUMN max_output_tokens INTEGER", "chats.max_output_tokens"),
+        ],
+        "NC-0.8.0.6": [
+            # Performance indexes for growing data volumes
+            # Document indexes for user/store lookups
+            ("CREATE INDEX IF NOT EXISTS idx_document_owner ON documents(owner_id)", "documents.idx_owner"),
+            ("CREATE INDEX IF NOT EXISTS idx_document_store ON documents(knowledge_store_id)", "documents.idx_store"),
+            ("CREATE INDEX IF NOT EXISTS idx_document_processed ON documents(is_processed)", "documents.idx_processed"),
+            # TokenUsage index for daily history queries
+            ("CREATE INDEX IF NOT EXISTS idx_usage_user_created ON token_usage(user_id, created_at)", "token_usage.idx_user_created"),
+            # Message index for lookups within a chat
+            ("CREATE INDEX IF NOT EXISTS idx_message_id_chat ON messages(id, chat_id)", "messages.idx_id_chat"),
+        ],
     }
     
     # Sort versions and run migrations in order
@@ -399,12 +446,12 @@ async def run_migrations(conn):
     for version in sorted_versions:
         version_tuple = parse_version(version)
         
-        # Run migrations for versions we haven't fully processed
-        # Note: We always check individual migrations even for "completed" versions
-        # because the version might have been bumped without all migrations running
-        # (e.g., version updated for a code change, then migration added later)
+        # ONLY run migrations for versions NEWER than current DB version
+        if version_tuple <= current:
+            logger.debug(f"Skipping migrations for {version} (already at {current_version})")
+            continue
         
-        logger.info(f"Checking migrations for {version}...")
+        logger.info(f"Running migrations for {version}...")
         
         for sql, name in migrations[version]:
             try:
@@ -538,12 +585,27 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await run_migrations(conn)
     
-    # Initialize RAG service (loads embedding model)
+    # Initialize RAG service and load embedding model
+    # This must complete before server accepts requests to avoid blocking during first RAG call
+    # Run in thread pool since model loading is CPU-intensive and blocks
     try:
+        from app.services.rag import RAGService
+        import concurrent.futures
+        
         rag_service = RAGService()
-        logger.info(f"RAG service initialized with model: {settings.EMBEDDING_MODEL}")
+        logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL}...")
+        
+        # Load model in thread pool to not block the event loop
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            model = await loop.run_in_executor(executor, rag_service.get_model)
+        
+        if model is not None:
+            logger.info(f"Embedding model loaded successfully (dim={model.get_sentence_embedding_dimension()})")
+        else:
+            logger.warning("Embedding model failed to load - RAG features will be disabled")
     except Exception as e:
-        logger.warning(f"RAG service initialization deferred: {e}")
+        logger.error(f"RAG service initialization failed: {e}")
     
     # Initialize Procedural Memory service (separate database)
     try:
@@ -860,20 +922,49 @@ async def list_models(request: Request):
             payload = AuthService.decode_token(token)
             if payload and "sub" in payload:
                 user_id = payload["sub"]
-                logger.info(f"Fetching subscribed assistants for user {user_id}")
                 
                 async with async_session_maker() as db:
                     from sqlalchemy import text
                     import json
                     
-                    # Get user preferences with raw SQL
+                    # Get user info for logging
+                    result = await db.execute(
+                        text("SELECT username, email FROM users WHERE id = :user_id"),
+                        {"user_id": user_id}
+                    )
+                    user_row = result.fetchone()
+                    user_display = (user_row[0] or user_row[1]) if user_row else user_id
+                    logger.info(f"[API_MODELS] Fetching assistants for {user_display}")
+                    
+                    # 1. Get user's OWN created assistants first
+                    result = await db.execute(
+                        select(CustomAssistant).where(
+                            CustomAssistant.owner_id == user_id
+                        )
+                    )
+                    own_assistants = result.scalars().all()
+                    logger.info(f"[API_MODELS] {user_display}: Found {len(own_assistants)} user-created assistants")
+                    
+                    own_ids = set()
+                    for asst in own_assistants:
+                        own_ids.add(asst.id)
+                        logger.info(f"[API_MODELS] {user_display}: Adding own assistant: {asst.name}")
+                        subscribed_assistants.append({
+                            "id": f"gpt:{asst.id}",
+                            "name": asst.name,
+                            "type": "assistant",
+                            "assistant_id": asst.id,
+                            "icon": asst.icon,
+                            "color": asst.color,
+                            "is_own": True,  # Mark as user's own
+                        })
+                    
+                    # 2. Get user preferences for subscribed assistants
                     result = await db.execute(
                         text("SELECT preferences FROM users WHERE id = :user_id"),
                         {"user_id": user_id}
                     )
                     row = result.fetchone()
-                    
-                    logger.info(f"Raw preferences from DB: {row[0] if row else 'NOT FOUND'}")
                     
                     if row and row[0]:
                         prefs_raw = row[0]
@@ -883,30 +974,42 @@ async def list_models(request: Request):
                             prefs = dict(prefs_raw)
                         
                         subscribed_ids = prefs.get("subscribed_assistants", [])
-                        logger.info(f"Subscribed IDs: {subscribed_ids}")
+                        logger.info(f"[API_MODELS] {user_display}: Subscribed IDs: {subscribed_ids}")
+                        
+                        # Filter out user's own assistants (already added above)
+                        subscribed_ids = [id for id in subscribed_ids if id not in own_ids]
                         
                         if subscribed_ids:
-                            # Get assistant details
+                            # Get subscribed assistant details
                             result = await db.execute(
                                 select(CustomAssistant).where(
                                     CustomAssistant.id.in_(subscribed_ids)
                                 )
                             )
                             assistants = result.scalars().all()
-                            logger.info(f"Found {len(assistants)} assistants")
+                            logger.info(f"[API_MODELS] {user_display}: Found {len(assistants)} subscribed assistants")
                             
                             for asst in assistants:
+                                logger.info(f"[API_MODELS] {user_display}: Adding subscribed: {asst.name}")
                                 subscribed_assistants.append({
                                     "id": f"gpt:{asst.id}",
-                                    "name": f"🤖 {asst.name}",
+                                    "name": asst.name,
                                     "type": "assistant",
                                     "assistant_id": asst.id,
                                     "icon": asst.icon,
                                     "color": asst.color,
                                 })
+                        else:
+                            logger.info(f"[API_MODELS] {user_display}: No subscribed assistants (or all are own)")
+                    else:
+                        logger.info(f"[API_MODELS] {user_display}: No preferences found")
+        else:
+            logger.debug("[API_MODELS] No auth header provided")
     except Exception as e:
         # Silently fail - just don't include subscribed assistants
-        logger.error(f"Could not load subscribed assistants: {e}", exc_info=True)
+        logger.error(f"[API_MODELS] Could not load subscribed assistants: {e}", exc_info=True)
+    
+    logger.info(f"[API_MODELS] Returning {len(subscribed_assistants)} subscribed assistants")
     
     return {
         "api_base": settings.LLM_API_BASE_URL,
@@ -1228,7 +1331,7 @@ if STATIC_DIR.exists():
     async def serve_spa(request: Request, full_path: str):
         """Serve SPA - return index.html for all non-API routes"""
         # Don't serve index.html for API or WebSocket routes
-        if full_path.startswith(("api/", "ws/", "docs", "redoc", "openapi")):
+        if full_path.startswith(("api/", "ws/", "v1/", "docs", "redoc", "openapi")):
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "Not found"}, status_code=404)
         

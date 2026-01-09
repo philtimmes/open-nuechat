@@ -76,6 +76,11 @@ SETTING_DEFAULTS = {
     "api_rate_limit_embeddings": "200",  # Embeddings requests per minute
     "api_rate_limit_images": "10",  # Image generations per minute
     "api_rate_limit_models": "100",  # Model list requests per minute
+    
+    # NC-0.8.0.7: Image Generation Defaults
+    "image_gen_default_width": "1024",
+    "image_gen_default_height": "1024",
+    "image_gen_default_aspect_ratio": "1:1",
 }
 
 
@@ -94,9 +99,11 @@ class SettingsService:
         return SETTING_DEFAULTS.get(key, "")
     
     @staticmethod
-    async def get_bool(db: AsyncSession, key: str) -> bool:
+    async def get_bool(db: AsyncSession, key: str, default: bool = False) -> bool:
         """Get a boolean system setting."""
         value = await SettingsService.get(db, key)
+        if not value:
+            return default
         return value.lower() in ("true", "1", "yes", "on")
     
     @staticmethod

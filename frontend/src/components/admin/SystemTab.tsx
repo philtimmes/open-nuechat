@@ -107,6 +107,52 @@ export default function SystemTab({ settings, setSettings, onSave, isSaving }: P
               className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
             />
           </div>
+          
+          {/* RAG Thresholds (NC-0.8.0.6) */}
+          <div className="pt-4 border-t border-[var(--color-border)]">
+            <h3 className="text-sm font-semibold text-[var(--color-text)] mb-3">RAG Similarity Thresholds</h3>
+            <p className="text-xs text-[var(--color-text-secondary)] mb-3">
+              Minimum similarity score (0.0-1.0) for RAG results to be included. Higher = stricter matching. Per-KB thresholds override global.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Global KB Default</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  max="1"
+                  value={settings.rag_threshold_global ?? 0.7}
+                  onChange={(e) => setSettings({ ...settings, rag_threshold_global: parseFloat(e.target.value) || 0.7 })}
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Chat History KB</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  max="1"
+                  value={settings.rag_threshold_chat_history ?? 0.5}
+                  onChange={(e) => setSettings({ ...settings, rag_threshold_chat_history: parseFloat(e.target.value) || 0.5 })}
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Local Chat (Attachments/Overflow)</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  max="1"
+                  value={settings.rag_threshold_local ?? 0.4}
+                  onChange={(e) => setSettings({ ...settings, rag_threshold_local: parseFloat(e.target.value) || 0.4 })}
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       

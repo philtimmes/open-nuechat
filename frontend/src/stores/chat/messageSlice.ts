@@ -1,7 +1,7 @@
 /**
  * Message slice - Message CRUD and branching operations
  */
-import type { Message, Artifact, MessageBranch } from '../../types';
+import type { Message, Artifact, MessageBranch, Chat, GeneratedImage } from '../../types';
 import type { MessageSlice, SliceCreator } from './types';
 import api from '../../lib/api';
 import { extractArtifacts, collectChatArtifacts } from '../../lib/artifacts';
@@ -21,6 +21,9 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
       // Use stored artifacts' timestamps when available
       const allArtifacts: Artifact[] = [];
       
+      // NC-0.8.0.7: Collect generated images from message metadata
+      const generatedImagesFromMessages: Record<string, GeneratedImage> = {};
+      
       for (const msg of messages) {
         // Always extract from content to catch everything
         const { artifacts: extractedArtifacts } = extractArtifacts(msg.content || '');
@@ -36,12 +39,28 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
           }
           allArtifacts.push(...extractedArtifacts);
         }
+        
+        // NC-0.8.0.7: Load generated images from message metadata
+        // Only add if required fields are present
+        const genImg = msg.metadata?.generated_image;
+        if (genImg && typeof genImg.width === 'number' && typeof genImg.height === 'number') {
+          generatedImagesFromMessages[msg.id] = {
+            url: genImg.url,
+            base64: undefined,  // Not stored in DB
+            width: genImg.width,
+            height: genImg.height,
+            seed: genImg.seed ?? 0,
+            prompt: genImg.prompt ?? '',
+            job_id: genImg.job_id,
+          };
+        }
       }
       
       set({ 
         messages, 
         isLoadingMessages: false,
         artifacts: allArtifacts,
+        generatedImages: generatedImagesFromMessages,  // NC-0.8.0.7: Restore generated images
       });
       
       // Also fetch uploaded artifacts and code summary
@@ -58,7 +77,7 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
   },
 
   addMessage: (message: Message) => {
-    const { currentChat, messages: existingMessages } = get();
+    const { currentChat, messages: existingMessages, chats, chatGroupCounts } = get();
     
     // Validate: Only add messages for the current chat
     if (message.chat_id && currentChat?.id && message.chat_id !== currentChat.id) {
@@ -84,11 +103,43 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
       newArtifacts = extracted;
     }
     
-    set((state) => ({
-      messages: [...state.messages, message],
-      // Append new artifacts to existing - don't replace!
-      artifacts: [...state.artifacts, ...newArtifacts],
-    }));
+    // Move chat to Today if it's not already there (for Modified sort)
+    const currentChatWithPeriod = chats.find(c => c.id === currentChat?.id) as (Chat & { _assignedPeriod?: string }) | undefined;
+    const oldPeriod = currentChatWithPeriod?._assignedPeriod;
+    const needsMove = oldPeriod && oldPeriod !== 'Today';
+    
+    set((state) => {
+      let updatedChats = state.chats;
+      let updatedCounts = state.chatGroupCounts;
+      
+      if (needsMove && currentChat) {
+        // Update chat's period to Today and move to front
+        updatedChats = [
+          { ...currentChatWithPeriod!, _assignedPeriod: 'Today' } as Chat & { _assignedPeriod: string },
+          ...state.chats.filter(c => c.id !== currentChat.id)
+        ] as Chat[];
+        
+        // Update counts: decrement old period, increment Today
+        if (updatedCounts && oldPeriod) {
+          updatedCounts = {
+            ...updatedCounts,
+            [oldPeriod]: Math.max(0, (updatedCounts[oldPeriod] || 0) - 1),
+            'Today': (updatedCounts['Today'] || 0) + 1
+          };
+        }
+      }
+      
+      return {
+        messages: [...state.messages, message],
+        // Append new artifacts to existing - don't replace!
+        artifacts: [...state.artifacts, ...newArtifacts],
+        chats: updatedChats,
+        chatGroupCounts: updatedCounts,
+      };
+    });
+    
+    // Trigger sidebar reload when message added (chat was updated)
+    get().triggerSidebarReload();
   },
 
   clearMessages: () => {

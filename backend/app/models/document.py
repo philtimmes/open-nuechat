@@ -61,6 +61,12 @@ class Document(Base):
     owner = relationship("User", back_populates="documents")
     knowledge_store = relationship("KnowledgeStore", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
+    
+    __table_args__ = (
+        Index("idx_document_owner", "owner_id"),
+        Index("idx_document_store", "knowledge_store_id"),
+        Index("idx_document_processed", "is_processed"),
+    )
 
 
 class DocumentChunk(Base):

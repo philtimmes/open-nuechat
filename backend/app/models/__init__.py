@@ -16,6 +16,7 @@ Module Structure:
 - upload.py: UploadedFile, UploadedArchive
 - settings.py: SystemSetting, Theme
 - llm_provider.py: LLMProvider (multi-model support)
+- knowledge_graph.py: KnowledgeEdge, ChunkValidity, EntityMention (NC-0.8.0.2)
 
 All models are re-exported here for backward compatibility.
 Usage:
@@ -45,6 +46,9 @@ from .chat import Chat, Message, ChatParticipant
 
 # Document and knowledge store models
 from .document import Document, DocumentChunk, KnowledgeStore, KnowledgeStoreShare
+
+# Knowledge graph models (NC-0.8.0.2)
+from .knowledge_graph import KnowledgeEdge, ChunkValidity, EntityMention, EdgeType
 
 # Assistant models
 from .assistant import CustomAssistant, AssistantConversation, AssistantCategory, assistant_knowledge_stores
@@ -83,6 +87,7 @@ __all__ = [
     "ToolType",
     "FilterType",
     "FilterPriority",
+    "EdgeType",
     # User
     "User",
     "OAuthAccount",
@@ -96,6 +101,10 @@ __all__ = [
     "DocumentChunk",
     "KnowledgeStore",
     "KnowledgeStoreShare",
+    # Knowledge Graph
+    "KnowledgeEdge",
+    "ChunkValidity",
+    "EntityMention",
     # Assistant
     "CustomAssistant",
     "AssistantConversation",

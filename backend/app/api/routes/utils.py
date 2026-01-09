@@ -1,6 +1,8 @@
 """
 Utility API routes
 """
+import tempfile
+import os
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -30,8 +32,18 @@ async def convert_markdown_to_pdf(
         pdf = MarkdownPdf(toc_level=2)
         pdf.add_section(Section(request.content))
         
-        # Generate PDF bytes
-        pdf_bytes = pdf.out_pdf
+        # Generate PDF to a temporary file
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+            tmp_path = tmp.name
+        
+        pdf.save(tmp_path)
+        
+        # Read the PDF bytes
+        with open(tmp_path, 'rb') as f:
+            pdf_bytes = f.read()
+        
+        # Clean up temp file
+        os.unlink(tmp_path)
         
         # Determine filename
         filename = request.filename or request.title or "document"

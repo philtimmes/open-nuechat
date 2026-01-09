@@ -1574,11 +1574,405 @@ GET  /generate/result/{job_id} -> { job_id, status, image_base64, width, height,
 
 ---
 
+## OpenAI-Compatible API (v1)
+
+NueChat provides an OpenAI-compatible REST API for programmatic access.
+
+### Base URL
+
+```
+https://your-nuechat-instance.com/v1
+```
+
+### Authentication
+
+All API requests require a Bearer token using a user-generated API key:
+
+```bash
+curl https://chat.example.com/v1/chat/completions \
+  -H "Authorization: Bearer nxs_your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3.2", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+**Key format:** `nxs_` prefix + 64 hex characters
+
+### API Key Management
+
+Users create/manage API keys via Settings → API Keys or programmatically:
+
+```python
+# Endpoints (require JWT auth, not API key)
+POST   /api/api-keys              # Create key (returns full key ONCE)
+GET    /api/api-keys              # List keys (prefix only)
+GET    /api/api-keys/{id}         # Get key details
+PATCH  /api/api-keys/{id}         # Update key settings
+DELETE /api/api-keys/{id}         # Delete/revoke key
+POST   /api/api-keys/{id}/regenerate  # New key value, keep settings
+```
+
+**Create Key Request:**
+```json
+{
+  "name": "My App Key",
+  "scopes": ["completions", "models", "images"],
+  "rate_limit": 100,
+  "allowed_ips": ["1.2.3.4"],
+  "allowed_assistants": ["assistant-id-1"],
+  "expires_in_days": 90
+}
+```
+
+**Scopes:**
+| Scope | Access |
+|-------|--------|
+| `completions` | `/v1/chat/completions` |
+| `models` | `/v1/models` |
+| `images` | `/v1/images/generations` |
+| `embeddings` | `/v1/embeddings` |
+| `full` | All endpoints |
+
+### Chat Completions
+
+```
+POST /v1/chat/completions
+```
+
+**Request:**
+```json
+{
+  "model": "llama3.2",
+  "messages": [
+    {"role": "system", "content": "You are helpful."},
+    {"role": "user", "content": "Hello!"}
+  ],
+  "temperature": 0.7,
+  "max_tokens": 1000,
+  "stream": false,
+  "tools": [...],
+  "tool_choice": "auto",
+  "knowledge_store_ids": ["kb-id-1"]
+}
+```
+
+**Model Selection:**
+- Base model: `"llama3.2"`, `"gpt-4"`, etc.
+- Custom GPT: `"gpt:<assistant-id>"`
+
+**Response (non-streaming):**
+```json
+{
+  "id": "chatcmpl-abc123...",
+  "object": "chat.completion",
+  "created": 1704825600,
+  "model": "llama3.2",
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "Hello!"},
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 5,
+    "total_tokens": 15
+  }
+}
+```
+
+**Streaming (`stream: true`):**
+```
+data: {"id":"chatcmpl-...","choices":[{"delta":{"role":"assistant"}}]}
+data: {"id":"chatcmpl-...","choices":[{"delta":{"content":"Hello"}}]}
+data: {"id":"chatcmpl-...","choices":[{"delta":{"content":"!"}}]}
+data: {"id":"chatcmpl-...","choices":[{"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+```
+
+### Models
+
+```
+GET /v1/models
+```
+
+Returns base models + user's Custom GPTs (owned + subscribed).
+
+**Response:**
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "llama3.2",
+      "object": "model",
+      "owned_by": "system",
+      "is_custom_gpt": false
+    },
+    {
+      "id": "gpt:abc123",
+      "object": "model",
+      "owned_by": "user@example.com",
+      "description": "My Custom Assistant",
+      "is_custom_gpt": true,
+      "root": "llama3.2"
+    }
+  ]
+}
+```
+
+**Filtered by API Key:** If `allowed_assistants` is set on the key, only those Custom GPTs appear.
+
+```
+GET /v1/models/{model_id}
+```
+
+Get details for a specific model.
+
+### Image Generation
+
+```
+POST /v1/images/generations
+```
+
+**Request:**
+```json
+{
+  "prompt": "A beautiful sunset over mountains",
+  "model": "z-image-turbo",
+  "n": 1,
+  "size": "1024x1024",
+  "quality": "standard",
+  "response_format": "b64_json"
+}
+```
+
+**Supported Sizes:**
+- Square: `512x512`, `768x768`, `1024x1024`, `1080x1080`
+- Landscape: `1280x720`, `1920x1080`, `1024x768`
+- Portrait: `720x1280`, `1080x1920`, `768x1024`
+
+**Response:**
+```json
+{
+  "created": 1704825600,
+  "data": [{
+    "b64_json": "iVBORw0KGgo...",
+    "revised_prompt": "A beautiful sunset over mountains"
+  }]
+}
+```
+
+```
+GET /v1/images/models
+```
+
+List available image generation models.
+
+### Embeddings
+
+```
+POST /v1/embeddings
+```
+
+**Request:**
+```json
+{
+  "model": "text-embedding-ada-002",
+  "input": "The food was delicious"
+}
+```
+
+**Response:**
+```json
+{
+  "object": "list",
+  "data": [{
+    "object": "embedding",
+    "embedding": [0.0023, -0.0091, ...],
+    "index": 0
+  }],
+  "model": "text-embedding-ada-002",
+  "usage": {"prompt_tokens": 5, "total_tokens": 5}
+}
+```
+
+### Error Responses
+
+```json
+{
+  "error": {
+    "message": "Invalid API key",
+    "type": "authentication_error",
+    "code": 401
+  }
+}
+```
+
+| Code | Meaning |
+|------|---------|
+| 401 | Invalid/expired API key |
+| 403 | Missing scope or IP not allowed |
+| 404 | Model/resource not found |
+| 429 | Rate limit exceeded |
+| 500 | Server error |
+| 503 | Service unavailable (image gen down) |
+
+---
+
+## Frontend File Operation Tools (NC-0.8.0.6)
+
+These tools allow the LLM to view and modify files in the Artifacts panel. They are processed client-side in `WebSocketContext.tsx` during streaming.
+
+### Tool Tags (LLM Output)
+
+```xml
+<!-- Request file content (chunked, 20KB at a time) -->
+<request_file path="src/Main.cpp"/>
+<request_file path="src/Main.cpp" offset="20000"/>
+
+<!-- Find line number containing text -->
+<find_line path="src/Main.cpp" contains="xbox360.lib"/>
+
+<!-- Search for text in file(s) -->
+<find path="src/Main.cpp" search="pragma comment"/>
+<find search="xbox360"/>  <!-- Search all artifacts -->
+
+<!-- Replace text in file -->
+<search_replace path="src/Main.cpp">
+===== SEARCH
+#pragma comment(lib, "xbox360.lib")
+===== Replace
+#pragma comment(lib, "xinput2.lib")
+</search_replace>
+```
+
+### Processing Flow
+
+1. LLM outputs tool tag during streaming
+2. Frontend detects complete tag via regex pattern
+3. Frontend sends `stop_generation` to backend
+4. Frontend executes tool against artifacts in store
+5. Frontend sends tool result via WebSocket `chat_message` with `save_user_message: false`
+6. Backend continues LLM generation with tool result injected
+
+### Key Functions (WebSocketContext.tsx)
+
+```typescript
+// Pattern matching
+STREAM_REQUEST_FILE_PATTERN   // <request_file path="..." offset="..."/>
+STREAM_FIND_LINE_PATTERN      // <find_line path="..." contains="..."/>  
+STREAM_FIND_PATTERN_WITH_PATH // <find path="..." search="..."/>
+STREAM_FIND_PATTERN_NO_PATH   // <find search="..."/>
+STREAM_SEARCH_REPLACE_PATTERN // <search_replace>...</search_replace>
+
+// Extraction
+extractFileRequests(content): FileRequest[]
+extractFindLineOperations(content): FindLineOp[]
+extractFindOperations(content): FindOp[]
+extractSearchReplaceOperations(content): SearchReplaceOp[]
+
+// Execution
+findArtifactByPath(artifacts, path): Artifact | undefined
+executeSearchReplaceOperations(artifacts, ops): { updatedArtifacts, results, modifiedFiles }
+
+// Result delivery
+sendToolResult(toolName, results): void  // Sends to backend for LLM continuation
+```
+
+### Artifact Matching (findArtifactByPath)
+
+Matches request path against artifact `filename` or `title`:
+- Exact match (case-insensitive)
+- Path suffix match (`src/Main.cpp` matches `project/src/Main.cpp`)
+- Basename match (`Main.cpp` matches `src/Main.cpp`)
+- Partial match (either direction)
+
+### Tool Result Format
+
+```
+[SYSTEM TOOL RESULT - search_replace]
+The following results were generated by the system, not typed by the user.
+
+[SEARCH_REPLACE: Successfully replaced in src/Main.cpp (1 lines → 1 lines)]
+
+[FILES SAVED] The following files were saved during your response: Main.cpp
+You can reference these files in your continued response.
+
+[END TOOL RESULT]
+```
+
+### Display Hiding (MessageBubble.tsx)
+
+Tool tags are stripped from user display via `preprocessContent()`:
+- `<request_file .../>` - hidden
+- `<find_line .../>` - hidden
+- `<find .../>` - hidden
+- `<search_replace>...</search_replace>` - hidden
+
+Tags remain in message history for context.
+
+---
+
+## Tool System (NC-0.8.0.7)
+
+### Tool Categories
+
+The frontend ActiveToolsBar uses category IDs that map to backend tool names:
+
+| Category ID | Backend Tools | Description |
+|-------------|---------------|-------------|
+| `web_search` | `fetch_webpage`, `fetch_urls` | Web page fetching |
+| `code_exec` | `execute_python` | Sandboxed Python execution |
+| `file_ops` | `view_file_lines`, `search_in_file`, `list_uploaded_files`, `view_signature`, `request_file` | File viewing tools |
+| `kb_search` | `search_documents` | Knowledge base RAG search |
+| `user_chats_kb` | (always available) | Agent Memory toggle (UI only) |
+| `artifacts` | (frontend-only) | Artifact panel display |
+| `image_gen` | (separate flow) | Image generation |
+| `local_rag` | (auto injection) | Chat document RAG context |
+| `citations` | (prompt hint) | Citation formatting hint |
+
+### Utility Tools (Always Available)
+
+These tools are always sent to LLM when `enable_tools=true`:
+- `calculator` - Math expressions
+- `get_current_time` - Current datetime
+- `format_json` - JSON formatting/validation
+- `analyze_text` - Text statistics
+- `agent_search` - Search archived conversation history
+- `agent_read` - Read specific Agent Memory files
+
+### Data Flow
+
+1. **Frontend** stores `active_tools: string[]` in chat via `PUT /chats/{id}/tools`
+2. **Frontend** displays ActiveToolsBar buttons based on stored categories
+3. **Frontend** sends WebSocket message with `enable_tools: true`
+4. **Backend** reads `chat.active_tools` from database
+5. **Backend** maps categories to tool names via `TOOL_CATEGORY_MAP`
+6. **Backend** filters `tool_registry.get_tool_definitions()` to allowed tools
+7. **Backend** sends filtered tools to LLM
+
+### Key Files
+
+- `frontend/src/components/ActiveToolsBar.tsx` - Tool toggle UI
+- `frontend/src/lib/api.ts` - `chatToolsApi.getActiveTools()`, `updateActiveTools()`
+- `backend/app/api/routes/chats.py` - `GET/PUT /{chat_id}/tools`
+- `backend/app/api/routes/websocket.py` - `TOOL_CATEGORY_MAP`, tool filtering logic
+- `backend/app/tools/registry.py` - Tool definitions and handlers
+
+---
+
 ## Current Schema Version
 
-**NC-0.8.0.0**
+**NC-0.8.0.7**
 
 Changes:
+- NC-0.8.0.7: **Active Tools Filtering** - Fixed tool buttons in ActiveToolsBar not affecting LLM tool availability. WebSocket handler now reads `chat.active_tools` and filters tools based on category. Added `TOOL_CATEGORY_MAP` mapping frontend categories to backend tool names. Added `UTILITY_TOOLS` list (calculator, time, json, text analysis, agent memory) always available. **Streaming Tool Calls** - Fixed tools not being sent to LLM in streaming mode. Added tool call handling in `stream_message()` to execute tools and continue conversation. **API Model Names** - `/v1/models` now exposes assistants by cleaned name instead of UUID (spaces→underscores, non-alphanumeric removed, lowercased). **Performance Indexes** - Added indexes for documents, token_usage, and messages tables.
+- NC-0.8.0.6: **Smart RAG Compression** - RAG results now re-ranked by subject relevance (keyword overlap boost), large chunks auto-summarized using extractive summarization (top sentences by query relevance), token budget support for context building. New methods: `_rerank_by_subject()`, `_summarize_chunk()`. `get_knowledge_store_context()` now accepts `max_context_tokens` and `enable_summarization` parameters. **Category filter fix** - Added `category` field to `AssistantPublicInfo`. Updated `/explore`, `/discover`, `/subscribed` to return category. `/assistants/categories` returns slugified mode names.
+- NC-0.8.0.5: **Token limits & Agent Memory tools** - Added `max_input_tokens` and `max_output_tokens` columns to `chats` table. Added `agent_search` and `agent_read` tools to tool registry for accessing archived conversation history in Agent Memory files. Error sanitization prevents raw API errors from reaching browser. Max output tokens validated against remaining context.
+- NC-0.8.0.4: **Mode/Category unification** - Categories now pull from AssistantModes table. Emojis derived from mode name in code (not stored). Category slugs mapped for backward compatibility.
+- NC-0.8.0.3: **Sidebar real-time updates & timestamp preservation** - Sidebar now reloads automatically on chat create/delete/message via `sidebarReloadTrigger`. Removed SQLAlchemy `onupdate` trigger from `Chat.updated_at` - timestamps only update when user actually sends a message. Fixed migration system to only run new migrations (was running all on every startup). Import preserves original timestamps (created_at = first message, updated_at = last message). Fixed chat click removing chat from sidebar (_assignedPeriod preservation).
+- NC-0.8.0.1.2: **Chat source field** - Added `source` column to chats table for tracking import origin (native, chatgpt, grok, claude). Migration backfills from title prefixes and cleans titles. Sidebar filtering uses source field instead of title parsing.
+- NC-0.8.0.1.1: **Generated images in artifacts** - Images now appear in Artifacts panel as `imageNNN.ext`. Added `image` type to Artifact interface with `imageData` field. **Image context for LLM** - Backend injects generated image metadata into chat history so LLM knows what was previously generated.
+- NC-0.8.0.1: **User data export fixes** - Fixed `model_id` → `model` and `display_name` → `username` in export endpoint.
 - NC-0.8.0.0: **Dynamic Tools & Assistant Modes** - Major architecture change. See dedicated section below.
 - NC-0.7.17: **Agentic Task Queue** - FIFO task queue for multi-step workflows. New service `task_queue.py` with `TaskQueueService`, tools (`add_task`, `add_tasks_batch`, `get_task_queue`, `clear_task_queue`), WebSocket `task_log` events, `chats.chat_metadata` column for queue storage
 - NC-0.7.16: **Hybrid RAG search** - combines semantic FAISS search with exact identifier matching for legal statutes, rule references, case numbers, and product codes. New methods: `_extract_identifiers()`, `_identifier_search()`, `_merge_search_results()`

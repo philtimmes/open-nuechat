@@ -14,6 +14,7 @@ export const createArtifactSlice: SliceCreator<ArtifactSlice> = (set, get) => ({
   zipUploadResult: null,
   zipContext: null,
   generatedImages: {},
+  pendingImageContext: null,
 
   setSelectedArtifact: (artifact: Artifact | null) => {
     set({ selectedArtifact: artifact, showArtifacts: artifact !== null });
@@ -107,6 +108,10 @@ export const createArtifactSlice: SliceCreator<ArtifactSlice> = (set, get) => ({
     set((state) => ({
       generatedImages: { ...state.generatedImages, [messageId]: image },
     }));
+  },
+
+  setPendingImageContext: (image: GeneratedImage | null) => {
+    set({ pendingImageContext: image });
   },
 
   setArtifacts: (artifacts: Artifact[]) => {

@@ -393,11 +393,14 @@ async def get_schema(
     
     # Build flat tool list
     available_tools = [
-        # Built-in tools
-        {"value": "web_search", "label": "🌐 Web Search", "category": "Built-in"},
-        {"value": "web_fetch", "label": "📄 Fetch Web Page", "category": "Built-in"},
+        # Built-in tools (must match names in app/tools/registry.py)
+        {"value": "fetch_webpage", "label": "📄 Fetch Web Page", "category": "Built-in"},
+        {"value": "fetch_urls", "label": "📄 Fetch URLs (batch)", "category": "Built-in"},
         {"value": "calculator", "label": "🔢 Calculator", "category": "Built-in"},
-        {"value": "code_interpreter", "label": "💻 Run Code", "category": "Built-in"},
+        {"value": "execute_python", "label": "💻 Run Code", "category": "Built-in"},
+        {"value": "search_documents", "label": "🔍 Search Documents", "category": "Built-in"},
+        {"value": "get_current_time", "label": "🕐 Get Current Time", "category": "Built-in"},
+        {"value": "analyze_text", "label": "📊 Analyze Text", "category": "Built-in"},
     ]
     
     # Add MCP/OpenAPI tools and sub-tools

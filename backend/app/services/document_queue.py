@@ -228,6 +228,17 @@ class DocumentQueueService:
                 }
                 mime_type = type_to_mime.get(task.file_type, task.file_type)
                 
+                # Skip image files - they cannot be embedded and may crash the model
+                image_types = {'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 
+                              'image/bmp', 'image/svg+xml', 'png', 'jpg', 'jpeg', 'gif', 'webp'}
+                if task.file_type in image_types or mime_type.startswith('image/'):
+                    logger.info(f"[DOC_QUEUE] Skipping image file {task.document_id} (type={task.file_type})")
+                    document.is_processed = True
+                    document.chunk_count = 0
+                    await db.commit()
+                    self.remove_task(task.task_id)
+                    return True
+                
                 # Extract text content
                 if self._debug_enabled:
                     logger.info(f"[DOC_QUEUE] Extracting text from {task.file_path}")
@@ -335,7 +346,7 @@ class DocumentQueueService:
                     # Process one task at a time
                     task = pending[0]
                     await self.process_task(task)
-                    # Small delay between tasks
+                    # Small delay between tasks to yield to other coroutines
                     await asyncio.sleep(1)
                 else:
                     # No pending tasks

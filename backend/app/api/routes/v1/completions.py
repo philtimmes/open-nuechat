@@ -131,6 +131,30 @@ class ChatCompletionChunk(BaseModel):
 
 # === Helper Functions ===
 
+def assistant_name_to_model_id(name: str) -> str:
+    """
+    Convert assistant name to a clean model ID.
+    
+    - Replace spaces with underscores
+    - Remove any characters that aren't alphanumeric, dash, or underscore
+    - Lowercase for consistency
+    
+    Example: "My Cool Assistant!" -> "my_cool_assistant"
+    """
+    import re
+    # Replace spaces with underscores
+    clean = name.replace(" ", "_")
+    # Remove any non-alphanumeric characters except - and _
+    clean = re.sub(r'[^a-zA-Z0-9_-]', '', clean)
+    # Lowercase
+    clean = clean.lower()
+    # Remove consecutive underscores/dashes
+    clean = re.sub(r'[-_]+', '_', clean)
+    # Strip leading/trailing underscores
+    clean = clean.strip('_-')
+    return clean
+
+
 async def resolve_model(
     model_id: str,
     user: User,
@@ -140,8 +164,16 @@ async def resolve_model(
     """
     Resolve model ID to actual model and optional assistant.
     
+    Supports:
+    - Base model names (e.g., "llama3.2", "gpt-4")
+    - Cleaned assistant names (e.g., "my_research_assistant")  
+    - Legacy gpt: prefix format (e.g., "gpt:uuid")
+    
     Returns: (model_name, assistant_or_none)
     """
+    from sqlalchemy import or_
+    
+    # Legacy gpt: format (still supported)
     if model_id.startswith("gpt:"):
         assistant_id = model_id[4:]
         
@@ -163,7 +195,9 @@ async def resolve_model(
         is_owner = assistant.user_id == user.id
         is_public = assistant.is_public
         
-        prefs = json.loads(user.preferences or "{}")
+        prefs = user.preferences or {}
+        if isinstance(prefs, str):
+            prefs = json.loads(prefs)
         subscribed_ids = prefs.get("subscribed_assistants", [])
         is_subscribed = assistant.id in subscribed_ids
         
@@ -172,7 +206,40 @@ async def resolve_model(
         
         return assistant.model, assistant
     
-    # Base model
+    # Try to find assistant by cleaned name
+    result = await db.execute(
+        select(CustomAssistant).where(
+            or_(
+                CustomAssistant.user_id == user.id,
+                CustomAssistant.is_public == True,
+            )
+        )
+    )
+    all_assistants = result.scalars().all()
+    
+    # Find assistant matching the model_id
+    for assistant in all_assistants:
+        if assistant_name_to_model_id(assistant.name) == model_id:
+            # Check API key restrictions
+            if api_key.allowed_assistants and assistant.id not in api_key.allowed_assistants:
+                raise HTTPException(status_code=403, detail="Access to this model is not allowed")
+            
+            # Check access
+            is_owner = assistant.user_id == user.id
+            is_public = assistant.is_public
+            
+            prefs = user.preferences or {}
+            if isinstance(prefs, str):
+                prefs = json.loads(prefs)
+            subscribed_ids = prefs.get("subscribed_assistants", [])
+            is_subscribed = assistant.id in subscribed_ids
+            
+            if not (is_owner or is_public or is_subscribed):
+                raise HTTPException(status_code=403, detail="Access denied to this model")
+            
+            return assistant.model, assistant
+    
+    # Base model - no assistant
     return model_id, None
 
 
@@ -634,3 +701,244 @@ async def create_chat_completion(
         )
     
     return result
+
+
+# Legacy /v1/completions endpoint (text completion API)
+# Some clients like SillyTavern use this instead of /v1/chat/completions
+class LegacyCompletionRequest(BaseModel):
+    """Legacy OpenAI text completion request - accepts extra fields for SillyTavern compatibility"""
+    model: Optional[str] = None  # SillyTavern doesn't always send this
+    prompt: Union[str, List[str]]
+    max_tokens: Optional[int] = Field(default=None, ge=1)
+    max_new_tokens: Optional[int] = None  # SillyTavern uses this
+    temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    top_p: Optional[float] = Field(default=None, ge=0, le=1)
+    top_k: Optional[int] = None
+    n: Optional[int] = Field(default=1, ge=1, le=10)
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    stopping_strings: Optional[List[str]] = None  # SillyTavern uses this
+    presence_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
+    frequency_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
+    repetition_penalty: Optional[float] = None  # SillyTavern
+    rep_pen: Optional[float] = None  # SillyTavern alias
+    user: Optional[str] = None
+    
+    # Allow any extra fields SillyTavern sends (typical_p, min_p, mirostat, etc.)
+    model_config = {"extra": "allow"}
+
+
+class LegacyCompletionChoice(BaseModel):
+    """Legacy completion choice"""
+    text: str
+    index: int
+    logprobs: Optional[dict] = None
+    finish_reason: Optional[str] = None
+
+
+class LegacyCompletionResponse(BaseModel):
+    """Legacy completion response"""
+    id: str
+    object: str = "text_completion"
+    created: int
+    model: str
+    choices: List[LegacyCompletionChoice]
+    usage: Optional[ChatCompletionUsage] = None
+
+
+def _create_legacy_streaming_response(
+    completion_id: str,
+    created: int,
+    model: str,
+    model_name: str,
+    messages: List[dict],
+    temperature: float,
+    max_tokens: int,
+    stop: Optional[Union[str, List[str]]],
+    user: User,
+    db: AsyncSession,
+    llm_service: LLMService,
+) -> AsyncGenerator[str, None]:
+    """Create a legacy streaming completion response."""
+    
+    async def generate():
+        completion_tokens = 0
+        
+        try:
+            # Stream content in legacy format
+            async for chunk in llm_service.stream_complete(
+                messages=messages,
+                model=model_name,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop=stop,
+            ):
+                content = chunk.get("content", "")
+                if content:
+                    completion_tokens += len(content.split()) * 1.3
+                    # Legacy format uses "text" instead of "delta.content"
+                    yield format_sse_message({
+                        "id": completion_id,
+                        "object": "text_completion",
+                        "created": created,
+                        "model": model,
+                        "choices": [{
+                            "text": content,
+                            "index": 0,
+                            "logprobs": None,
+                            "finish_reason": None,
+                        }]
+                    })
+            
+            # Final chunk with finish reason
+            yield format_sse_message({
+                "id": completion_id,
+                "object": "text_completion",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "text": "",
+                    "index": 0,
+                    "logprobs": None,
+                    "finish_reason": "stop",
+                }]
+            })
+            
+            yield "data: [DONE]\n\n"
+            
+            # Bill tokens after streaming
+            prompt_tokens = sum(len(str(m.get("content", "")).split()) * 1.3 for m in messages)
+            billing = BillingService()
+            await billing.record_usage(
+                db=db,
+                user_id=user.id,
+                input_tokens=int(prompt_tokens),
+                output_tokens=int(completion_tokens),
+                model=model_name,
+                source="v1_api",
+            )
+            
+        except Exception as e:
+            logger.error(f"Legacy streaming error: {e}")
+            yield format_sse_message({"error": str(e)})
+    
+    return generate()
+
+
+@router.post("/completions")
+async def create_legacy_completion(
+    request: LegacyCompletionRequest,
+    client_request: Request,
+    auth: tuple[User, APIKey] = Depends(require_scope("completions")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Legacy text completion endpoint.
+    
+    Converts to chat completion format internally.
+    For compatibility with older clients like SillyTavern.
+    """
+    user, api_key = auth
+    
+    # Convert prompt to messages format
+    prompt = request.prompt
+    if isinstance(prompt, list):
+        prompt = "\n".join(prompt)
+    
+    # Resolve model - use default if not provided (SillyTavern doesn't always send model)
+    model_id = request.model or "default"
+    model_name, assistant = await resolve_model(model_id, user, api_key, db)
+    
+    # Build messages
+    messages = [{"role": "user", "content": prompt}]
+    
+    # Add assistant system prompt if applicable
+    if assistant and assistant.system_prompt:
+        messages.insert(0, {"role": "system", "content": assistant.system_prompt})
+    
+    completion_id = f"cmpl-{uuid.uuid4().hex[:24]}"
+    created = int(datetime.now(timezone.utc).timestamp())
+    
+    temperature = request.temperature if request.temperature is not None else 0.7
+    # Use max_tokens or max_new_tokens (SillyTavern preference)
+    max_tokens = request.max_tokens or request.max_new_tokens or 1000
+    # Combine stop sequences from both fields
+    stop = request.stop or request.stopping_strings
+    
+    llm_service = LLMService()
+    
+    if request.stream:
+        # Use legacy streaming format
+        result = _create_legacy_streaming_response(
+            completion_id=completion_id,
+            created=created,
+            model=model_id,
+            model_name=model_name,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            user=user,
+            db=db,
+            llm_service=llm_service,
+        )
+        return StreamingResponse(
+            result,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    
+    # Non-streaming response
+    try:
+        result = await llm_service.complete(
+            messages=messages,
+            model=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            stream=False,
+        )
+        
+        response_content = result.get("content", "")
+        finish_reason = result.get("finish_reason", "stop")
+        
+    except Exception as e:
+        logger.error(f"Legacy completion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Completion failed: {str(e)}")
+    
+    # Estimate token usage
+    prompt_tokens = int(len(prompt.split()) * 1.3)
+    completion_tokens = int(len(response_content.split()) * 1.3)
+    
+    # Bill tokens
+    billing = BillingService()
+    await billing.record_usage(
+        db=db,
+        user_id=user.id,
+        input_tokens=prompt_tokens,
+        output_tokens=completion_tokens,
+        model=model_name,
+        source="v1_api",
+    )
+    
+    return LegacyCompletionResponse(
+        id=completion_id,
+        created=created,
+        model=model_id,
+        choices=[
+            LegacyCompletionChoice(
+                text=response_content,
+                index=0,
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=ChatCompletionUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        ),
+    )

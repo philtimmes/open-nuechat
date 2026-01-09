@@ -587,18 +587,30 @@ class ChainExecutor:
         
         step_index = 0
         step_map = {s.get("id", str(i)): i for i, s in enumerate(steps)}
+        iteration_count = 0
+        max_step_iterations = max_iterations * len(steps)  # Safety limit
         
         while step_index < len(steps):
+            iteration_count += 1
+            if iteration_count > max_step_iterations:
+                logger.error(f"[FILTER] Step execution exceeded max iterations ({max_step_iterations})")
+                ctx.signal = FlowSignal.ERROR
+                ctx.error_message = "Step execution exceeded maximum iterations"
+                break
+            
             # Check for signals
             if ctx.signal in (FlowSignal.STOP, FlowSignal.FILTER_COMPLETE, FlowSignal.ERROR):
+                ctx.debug_log(f"  Loop break - signal={ctx.signal.name}")
                 break
             
             # Handle jump
             if ctx.signal == FlowSignal.JUMP and ctx.jump_target:
+                ctx.debug_log(f"  Processing JUMP to {ctx.jump_target}")
                 if ctx.jump_target in step_map:
                     step_index = step_map[ctx.jump_target]
                     ctx.signal = FlowSignal.CONTINUE
                     ctx.jump_target = None
+                    ctx.debug_log(f"  JUMP resolved to step_index={step_index}")
                 else:
                     logger.warning(f"Jump target not found: {ctx.jump_target}")
                     ctx.signal = FlowSignal.CONTINUE
@@ -616,6 +628,7 @@ class ChainExecutor:
             
             step_index += 1
         
+        ctx.debug_log(f"  Loop complete - final step_index={step_index}, iterations={iteration_count}")
         return ctx
     
     async def _execute_step(
@@ -762,6 +775,14 @@ class ChainExecutor:
             if not branch_steps:
                 ctx.debug_log("    No on_true steps, executing step primitive")
                 ctx = await self._execute_primitive(step, ctx)
+                # Handle jump_to_step after successful execution
+                step_type = step.get("type", "unknown")
+                if step_type != "branch" and ctx.signal == FlowSignal.CONTINUE:
+                    jump_target = step.get("jump_to_step")
+                    if jump_target:
+                        ctx.debug_log(f"    Jump to step: {jump_target}")
+                        ctx.signal = FlowSignal.JUMP
+                        ctx.jump_target = jump_target
         else:
             branch_steps = conditional.get("on_false", [])
             ctx.debug_log(f"    Executing on_false branch ({len(branch_steps)} steps)")
@@ -1004,13 +1025,15 @@ class ChainExecutor:
             raise RuntimeError("Tool function not configured")
         
         tool_name = config.get("tool_name", config.get("tool"))
-        params_template = config.get("params", {})
+        params_template = config.get("params") or {}  # Handle None explicitly
+        input_var = config.get("input_var")
         output_var = config.get("output_var")
         add_to_context = config.get("add_to_context", False)
         context_label = config.get("context_label", tool_name)
         
         ctx.debug_log("  Tool step - tool_name", tool_name)
         ctx.debug_log("  Tool step - params_template", params_template)
+        ctx.debug_log("  Tool step - input_var", input_var)
         
         # Build params with interpolation (use interpolate_value for typed results like arrays)
         params = {}
@@ -1023,15 +1046,40 @@ class ChainExecutor:
             else:
                 params[key] = value
         
-        # If no params but we have a previous result, use it as query
+        # If no params but input_var is set, resolve it and use as primary param
+        if not params and input_var:
+            resolved_input = ctx.resolve_variable(input_var)
+            ctx.debug_log("  Tool step - resolved input_var", f"{input_var} -> {repr(resolved_input)}")
+            
+            if resolved_input is not None:
+                # Determine the parameter name based on the tool and input type
+                if isinstance(resolved_input, list):
+                    # For arrays, use 'urls' for fetch tools, otherwise 'items' or 'query'
+                    if tool_name in ("fetch_webpage", "fetch_urls"):
+                        params = {"urls": resolved_input}
+                    else:
+                        params = {"items": resolved_input}
+                elif isinstance(resolved_input, str):
+                    params = {"query": resolved_input}
+                else:
+                    params = {"input": resolved_input}
+                ctx.debug_log("  Tool step - using input_var as params", params)
+        
+        # If still no params but we have a previous result, use it
         if not params and ctx.previous_result:
-            params = {"query": str(ctx.previous_result)}
-            ctx.debug_log("  Tool step - using previous_result as query", params)
+            prev = ctx.previous_result
+            if isinstance(prev, list) and tool_name in ("fetch_webpage", "fetch_urls"):
+                params = {"urls": prev}
+            else:
+                params = {"query": str(prev)}
+            ctx.debug_log("  Tool step - using previous_result as params", params)
         
         ctx.debug_log("  Tool step - final params", params)
         
         # Call tool
+        ctx.debug_log("  Tool step - calling tool...")
         result = await self._tool_func(tool_name, params)
+        ctx.debug_log("  Tool step - tool returned", f"result_type={type(result).__name__}, result_len={len(str(result)) if result else 0}")
         
         ctx.previous_result = result
         

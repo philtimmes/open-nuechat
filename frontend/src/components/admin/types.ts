@@ -10,6 +10,10 @@ export interface SystemSettings {
   rag_prompt_gpt_kb: string;
   rag_prompt_user_docs: string;
   rag_prompt_chat_history: string;
+  // RAG Thresholds (NC-0.8.0.6)
+  rag_threshold_global: number;
+  rag_threshold_chat_history: number;
+  rag_threshold_local: number;
   input_token_price: number;
   output_token_price: number;
   token_refill_interval_hours: number;
@@ -41,6 +45,7 @@ export interface LLMSettings {
   llm_model: string;
   llm_timeout: number;
   llm_max_tokens: number;
+  llm_context_size: number;  // NC-0.8.0.7: Model context window size
   llm_temperature: number;
   llm_stream_default: boolean;
   llm_multimodal: boolean;
@@ -77,6 +82,7 @@ export interface FeatureFlags {
   enable_billing: boolean;
   freeforall: boolean;
   enable_safety_filters: boolean;
+  enable_mermaid_rendering: boolean;
 }
 
 export interface APIRateLimits {
@@ -300,7 +306,21 @@ export interface GPTCategory {
   updated_at: string;
 }
 
-export type TabId = 'system' | 'oauth' | 'llm' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'categories' | 'modes' | 'dev';
+// NC-0.8.0.7: Image generation settings
+export interface ImageResolutionOption {
+  width: number;
+  height: number;
+  label: string;
+}
+
+export interface ImageGenSettings {
+  image_gen_default_width: number;
+  image_gen_default_height: number;
+  image_gen_default_aspect_ratio: string;
+  image_gen_available_resolutions: ImageResolutionOption[];
+}
+
+export type TabId = 'system' | 'oauth' | 'llm' | 'image_gen' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'categories' | 'modes' | 'dev';
 
 // Common props for tab components
 export interface TabProps {

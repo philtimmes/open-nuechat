@@ -61,6 +61,9 @@ RUN pip install faiss-gpu
 COPY backend/requirements.txt .
 RUN pip install -r requirements.txt
 
+# Pre-download the embedding model during build (avoids runtime download issues)
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
 # Copy application code
 COPY backend/app/ ./app/
 

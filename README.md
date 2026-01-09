@@ -45,6 +45,7 @@ flowchart TB
     subgraph FE[React Frontend]
         UI[Chat UI<br/>• Voice Mode<br/>• Artifacts<br/>• Version Trees]
         Toolbar[Active Tools Bar<br/>• Dynamic Icons<br/>• Mode Toggle]
+        Sidebar[Sidebar<br/>• Real-time Reload<br/>• Period Groups<br/>• Source Filters]
         FlowEdit[Filter Chain Editor<br/>• Visual Node Graph<br/>• Resizable Panels]
         Admin[Admin Panel<br/>• Assistant Modes<br/>• Branding]
     end
@@ -54,6 +55,7 @@ flowchart TB
         API[REST + WebSocket]
         Auth[Auth Service<br/>JWT / OAuth]
         LLM[LLM Service<br/>• Streaming<br/>• History Compression<br/>• Tool Calls]
+        ChatMgr[Chat Manager<br/>• Timestamp Control<br/>• Import/Export]
     end
 
     %% ===== Filter Chain System (NC-0.8.0.0) =====
@@ -95,6 +97,7 @@ flowchart TB
     FE <--> |WebSocket / REST| API
     API --> Auth
     API --> LLM
+    API --> ChatMgr
     EXT --> API
 
     LLM --> Executor
@@ -112,7 +115,13 @@ flowchart TB
     STT --> API
     IMG --> API
 
-    API --> STORE
+    ChatMgr --> STORE
+    
+    %% Sidebar real-time updates (NC-0.8.0.3)
+    UI -.-> |Create/Delete| Sidebar
+    LLM -.-> |Message Sent| Sidebar
+    Sidebar -.-> |sidebarReloadTrigger| API
+    ChatMgr -.-> |updated_at only on message| SQLite
 ```
 
 ---
@@ -418,7 +427,14 @@ Full API documentation at `/docs` when running.
 
 ## Schema Version
 
-**Current: NC-0.8.0.1**
+**Current: NC-0.8.0.3**
+
+### NC-0.8.0.3 Changes
+- **Sidebar Real-Time Updates**: Automatic reload on chat create/delete/message via `sidebarReloadTrigger`
+- **Timestamp Preservation**: `updated_at` only changes when user sends a message (not on any DB update)
+- **Migration System Fix**: Only runs new migrations (was running all on every startup)
+- **Import Timestamps**: Preserves original timestamps (created_at = first message, updated_at = last message)
+- **Chat Click Fix**: Clicking chats no longer removes them from sidebar
 
 ### NC-0.8.0.1 Changes
 - **Global Anti-aliasing**: Smooth text/icon rendering across all UI

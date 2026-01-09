@@ -42,6 +42,9 @@ class Chat(Base):
     # Chat type
     is_shared = Column(Boolean, default=False)  # For client-to-client chat
     
+    # Import source - tracks where chat was imported from (e.g., "claude", "chatgpt", "native")
+    source = Column(String(50), default="native")
+    
     # Public sharing
     share_id = Column(String(36), nullable=True, unique=True, index=True)
     share_anonymous = Column(Boolean, default=False)  # If True, hide owner name in shared view
@@ -68,12 +71,21 @@ class Chat(Base):
     mode_id = Column(String(36), ForeignKey("assistant_modes.id", ondelete="SET NULL"), nullable=True)
     active_tools = Column(JSON, nullable=True)  # ["web_search", "artifacts", ...]
     
+    # Token limits (NC-0.8.0.4)
+    # max_input_tokens: Limit on total input context (messages + system prompt + RAG)
+    # max_output_tokens: Limit on completion length (max_tokens for LLM call)
+    max_input_tokens = Column(Integer, nullable=True)  # None = use model default
+    max_output_tokens = Column(Integer, nullable=True)  # None = use model default
+    
     # Knowledge base indexing
     is_knowledge_indexed = Column(Boolean, default=False)
     
     # Timestamps
+    # NOTE: updated_at does NOT auto-update on row changes. It should only be
+    # updated when the user actually interacts with the chat (sends a message).
+    # This preserves the user's temporal relationship to the chat.
     created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    updated_at = Column(DateTime, default=func.now())
     
     # Relationships
     owner = relationship("User", back_populates="chats")

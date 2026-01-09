@@ -61,7 +61,23 @@ const DEFAULT_TOOLS: ToolDefinition[] = [
     label: 'Knowledge Base',
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`,
     category: 'mode',
-    description: 'Search knowledge bases',
+    description: 'Search assistant knowledge bases',
+  },
+  {
+    id: 'local_rag',
+    name: 'local_rag',
+    label: 'Chat Documents',
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
+    category: 'mode',
+    description: 'Search documents uploaded to this chat',
+  },
+  {
+    id: 'user_chats_kb',
+    name: 'user_chats_kb',
+    label: 'Chat History',
+    icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+    category: 'mode',
+    description: 'Search your indexed chat history',
   },
   {
     id: 'citations',
@@ -92,25 +108,26 @@ export function ActiveToolsBar({ chatId, className = '', compact = false }: Acti
     loadModes();
   }, []);
 
-  // Load active tools when chat changes
+  // Load active tools when chat changes OR when modes finish loading
   useEffect(() => {
     if (chatId) {
-      loadChatTools();
+      if (modes.length > 0) {
+        loadChatTools();
+      } else {
+        // If modes aren't available yet, still set loading to false
+        // so the toolbar renders with default state
+        setIsLoading(false);
+      }
     }
-  }, [chatId]);
+  }, [chatId, modes.length]);
 
   const loadModes = async () => {
     try {
       const response = await assistantModeApi.list();
       setModes(response.data);
-      // Default to "General" mode if available
-      const generalMode = response.data.find((m: AssistantMode) => m.name === 'General');
-      if (generalMode && !currentMode) {
-        setCurrentMode(generalMode);
-        setActiveTools(generalMode.active_tools || []);
-      }
     } catch (err) {
       console.error('Failed to load assistant modes:', err);
+      setIsLoading(false); // Still show toolbar even if modes fail
     }
   };
 
@@ -125,20 +142,35 @@ export function ActiveToolsBar({ chatId, className = '', compact = false }: Acti
         if (mode) {
           setCurrentMode(mode);
           // Check if user has customized tools
-          if (active_tools && JSON.stringify(active_tools.sort()) !== JSON.stringify((mode.active_tools || []).sort())) {
+          if (active_tools && JSON.stringify([...active_tools].sort()) !== JSON.stringify([...(mode.active_tools || [])].sort())) {
             setIsCustom(true);
             setActiveTools(active_tools);
           } else {
             setActiveTools(mode.active_tools || []);
           }
+        } else {
+          // Mode not found, just use the active_tools
+          setActiveTools(active_tools || []);
         }
-      } else if (active_tools) {
+      } else if (active_tools && active_tools.length > 0) {
         setActiveTools(active_tools);
         setIsCustom(true);
+      } else {
+        // No mode and no tools - set defaults from General mode
+        const generalMode = modes.find(m => m.name === 'General');
+        if (generalMode) {
+          setCurrentMode(generalMode);
+          setActiveTools(generalMode.active_tools || []);
+        }
       }
     } catch (err) {
       // Chat might not have tools set yet, use defaults
       console.debug('No tools configured for chat, using defaults');
+      const generalMode = modes.find(m => m.name === 'General');
+      if (generalMode) {
+        setCurrentMode(generalMode);
+        setActiveTools(generalMode.active_tools || []);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -238,10 +270,10 @@ export function ActiveToolsBar({ chatId, className = '', compact = false }: Acti
               onClick={() => handleToolToggle(tool.id)}
               className={`group relative p-1.5 rounded transition-all duration-150
                          ${isActive 
-                           ? 'text-white/90 tool-icon-active' 
-                           : 'text-white/30 hover:text-white/50'}`}
+                           ? 'text-gray-300' 
+                           : 'text-gray-500 hover:text-gray-400'}`}
               style={isActive ? {
-                filter: 'drop-shadow(0 0 6px rgba(255,255,255,0.3))',
+                filter: 'drop-shadow(0 0 8px rgba(59, 130, 246, 0.6))',
               } : undefined}
               title={tool.label}
             >

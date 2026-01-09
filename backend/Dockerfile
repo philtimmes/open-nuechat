@@ -29,7 +29,7 @@ ENV PYTORCH_ROCM_ARCH=gfx90a
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --fix-missing \
     build-essential \
     cmake \
     git \
@@ -47,6 +47,9 @@ RUN pip install /tmp/faiss*.whl && rm /tmp/faiss*.whl
 # Copy and install Python dependencies
 COPY backend/requirements.txt .
 RUN pip install -r requirements.txt
+
+# Pre-download the embedding model during build (avoids runtime download issues)
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
 # Copy application code
 COPY backend/app/ ./app/

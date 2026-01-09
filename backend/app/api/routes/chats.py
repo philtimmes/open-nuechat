@@ -5,9 +5,9 @@ import logging
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete, or_
+from sqlalchemy import select, func, delete, or_, and_
 from typing import Optional, List, Dict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel
 
 from app.db.database import get_db
@@ -121,54 +121,147 @@ async def list_chats(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
+    sort_by: Optional[str] = Query("modified", description="Sort by: modified, created, alphabetical, source"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List user's chats with pagination. Search queries both title and message content."""
+    """List user's chats with pagination. Returns group counts for sidebar accordions.
     
+    For grouped views (source, period), frontend should use /chats/group/{type}/{name} endpoint
+    to fetch chats for each accordion independently.
+    """
     base_filter = Chat.owner_id == user.id
     
-    if search:
-        # Search in both title and message content
-        # Find chat IDs that have matching messages
-        message_search = (
-            select(Message.chat_id)
-            .join(Chat, Message.chat_id == Chat.id)
-            .where(Chat.owner_id == user.id)
-            .where(Message.content.ilike(f"%{search}%"))
-            .distinct()
-        )
-        message_result = await db.execute(message_search)
-        matching_chat_ids = [row[0] for row in message_result.all()]
-        
-        # Combine: title matches OR has matching messages
-        search_filter = or_(
-            Chat.title.ilike(f"%{search}%"),
-            Chat.id.in_(matching_chat_ids) if matching_chat_ids else False
-        )
-        query = select(Chat).where(base_filter, search_filter)
-        count_query = select(func.count(Chat.id)).where(base_filter, search_filter)
-    else:
-        query = select(Chat).where(base_filter)
-        count_query = select(func.count(Chat.id)).where(base_filter)
+    # Get group counts for sidebar display (only when not searching)
+    group_counts = None
+    if not search:
+        group_counts = await _get_group_counts(db, user.id, sort_by or "modified")
     
-    # Get total count
-    total_result = await db.execute(count_query)
+    # For alphabetical, return paginated list (no grouping)
+    if sort_by == "alphabetical":
+        if search:
+            message_search = (
+                select(Message.chat_id)
+                .join(Chat, Message.chat_id == Chat.id)
+                .where(Chat.owner_id == user.id)
+                .where(Message.content.ilike(f"%{search}%"))
+                .distinct()
+            )
+            message_result = await db.execute(message_search)
+            matching_chat_ids = [row[0] for row in message_result.all()]
+            
+            search_filter = or_(
+                Chat.title.ilike(f"%{search}%"),
+                Chat.id.in_(matching_chat_ids) if matching_chat_ids else False
+            )
+            query = select(Chat).where(base_filter, search_filter)
+            count_query = select(func.count(Chat.id)).where(base_filter, search_filter)
+        else:
+            query = select(Chat).where(base_filter)
+            count_query = select(func.count(Chat.id)).where(base_filter)
+        
+        total_result = await db.execute(count_query)
+        total = total_result.scalar()
+        
+        query = query.order_by(Chat.title.asc())
+        query = query.offset((page - 1) * page_size).limit(page_size)
+        
+        result = await db.execute(query)
+        chats = result.scalars().all()
+        
+        return ChatListResponse(
+            chats=[ChatResponse.model_validate(c) for c in chats],
+            total=total,
+            page=page,
+            page_size=page_size,
+            group_counts=group_counts,
+        )
+    
+    # For grouped views (source, period), just return counts
+    # Frontend fetches each group via /chats/group/{type}/{name}
+    total_result = await db.execute(select(func.count(Chat.id)).where(base_filter))
     total = total_result.scalar()
     
-    # Get paginated results
-    query = query.order_by(Chat.updated_at.desc())
-    query = query.offset((page - 1) * page_size).limit(page_size)
-    
-    result = await db.execute(query)
-    chats = result.scalars().all()
-    
     return ChatListResponse(
-        chats=[ChatResponse.model_validate(c) for c in chats],
+        chats=[],  # Empty - frontend fetches per-group
         total=total,
         page=page,
         page_size=page_size,
+        group_counts=group_counts,
     )
+
+
+async def _get_group_counts(db: AsyncSession, user_id: str, sort_by: str) -> dict:
+    """Get counts of chats per group for sidebar display."""
+    from sqlalchemy import case, literal
+    
+    if sort_by == "source":
+        # Count by source field
+        source_case = case(
+            (Chat.source == 'chatgpt', literal('ChatGPT')),
+            (Chat.source == 'grok', literal('Grok')),
+            (Chat.source == 'claude', literal('Claude')),
+            else_=literal('Native')
+        )
+        query = (
+            select(source_case.label('group_name'), func.count(Chat.id).label('count'))
+            .where(Chat.owner_id == user_id)
+            .group_by(source_case)
+        )
+        result = await db.execute(query)
+        return {row.group_name: row.count for row in result.all()}
+    
+    elif sort_by == "alphabetical":
+        # Single group - just return total
+        query = select(func.count(Chat.id)).where(Chat.owner_id == user_id)
+        result = await db.execute(query)
+        total = result.scalar() or 0
+        return {"All Chats": total}
+    
+    else:
+        # Date-based grouping (modified or created)
+        # Need to fetch dates and categorize in Python since SQLite date functions are limited
+        date_field = Chat.updated_at if sort_by == "modified" else Chat.created_at
+        query = select(date_field).where(Chat.owner_id == user_id)
+        result = await db.execute(query)
+        raw_dates = [row[0] for row in result.all()]
+        
+        # Use naive local datetime for comparison (SQLite stores naive datetimes as text)
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        seven_days_ago = today_start - timedelta(days=7)
+        thirty_days_ago = today_start - timedelta(days=30)
+        
+        counts = {"Today": 0, "Last 7 Days": 0, "Last 30 Days": 0, "Older": 0}
+        
+        for raw_dt in raw_dates:
+            if raw_dt is None:
+                counts["Older"] += 1
+                continue
+            
+            # Parse string to datetime if needed (SQLite returns text)
+            if isinstance(raw_dt, str):
+                try:
+                    dt = datetime.fromisoformat(raw_dt.replace(' ', 'T'))
+                except ValueError:
+                    counts["Older"] += 1
+                    continue
+            else:
+                dt = raw_dt
+                # Strip timezone if present (compare as naive)
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+            
+            if dt >= today_start:
+                counts["Today"] += 1
+            elif dt >= seven_days_ago:
+                counts["Last 7 Days"] += 1
+            elif dt >= thirty_days_ago:
+                counts["Last 30 Days"] += 1
+            else:
+                counts["Older"] += 1
+        
+        return counts
 
 
 @router.post("", response_model=ChatResponse)
@@ -249,6 +342,18 @@ async def update_chat(
                 chat.assistant_id = assistant.id
                 chat.assistant_name = assistant.name
                 
+                # Copy mode and tools from assistant
+                if assistant.mode_id:
+                    chat.mode_id = assistant.mode_id
+                    # Get mode's active_tools
+                    from app.models import AssistantMode
+                    mode_result = await db.execute(
+                        select(AssistantMode).where(AssistantMode.id == assistant.mode_id)
+                    )
+                    mode = mode_result.scalar_one_or_none()
+                    if mode:
+                        chat.active_tools = mode.active_tools
+                
                 # Check if already linked to this assistant
                 existing_conv = await db.execute(
                     select(AssistantConversation).where(
@@ -290,6 +395,12 @@ async def update_chat(
             
     if updates.system_prompt is not None:
         chat.system_prompt = updates.system_prompt
+    
+    # Handle token limits
+    if updates.max_input_tokens is not None:
+        chat.max_input_tokens = updates.max_input_tokens if updates.max_input_tokens > 0 else None
+    if updates.max_output_tokens is not None:
+        chat.max_output_tokens = updates.max_output_tokens if updates.max_output_tokens > 0 else None
     
     chat.updated_at = datetime.now(timezone.utc)
     await db.commit()
@@ -447,6 +558,151 @@ async def delete_all_chats(
     await db.commit()
     
     return {"status": "deleted", "message": "All chats deleted", "images_deleted": deleted_images}
+
+
+@router.get("/group/{group_type}/{group_name}")
+async def get_chats_by_group(
+    group_type: str,  # "source" or "period"
+    group_name: str,  # e.g., "chatgpt", "native" or "Today", "This Week"
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    date_field: str = Query("updated_at", description="For period type: 'updated_at' (modified) or 'created_at'"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get chats for a specific group (source or time period) with pagination."""
+    base_filter = Chat.owner_id == user.id
+    
+    if group_type == "source":
+        # Source-based filtering
+        source_map = {"Native": "native", "ChatGPT": "chatgpt", "Grok": "grok", "Claude": "claude"}
+        source_val = source_map.get(group_name, group_name.lower())
+        
+        if source_val == "native":
+            group_filter = or_(Chat.source == 'native', Chat.source.is_(None))
+        else:
+            group_filter = Chat.source == source_val
+        
+        query = (
+            select(Chat)
+            .where(base_filter, group_filter)
+            .order_by(Chat.updated_at.desc())
+        )
+        count_query = select(func.count(Chat.id)).where(base_filter, group_filter)
+        
+    elif group_type == "period":
+        # Time period filtering - use specified date field
+        db_date_field = Chat.created_at if date_field == "created_at" else Chat.updated_at
+        
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        seven_days_ago = today_start - timedelta(days=7)
+        thirty_days_ago = today_start - timedelta(days=30)
+        
+        if group_name == "Today":
+            group_filter = db_date_field >= today_start
+        elif group_name == "Last 7 Days":
+            group_filter = and_(db_date_field >= seven_days_ago, db_date_field < today_start)
+        elif group_name == "Last 30 Days":
+            group_filter = and_(db_date_field >= thirty_days_ago, db_date_field < seven_days_ago)
+        else:  # Older
+            group_filter = db_date_field < thirty_days_ago
+        
+        query = (
+            select(Chat)
+            .where(base_filter, group_filter)
+            .order_by(db_date_field.desc())
+        )
+        count_query = select(func.count(Chat.id)).where(base_filter, group_filter)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid group_type. Use 'source' or 'period'")
+    
+    # Get total count for this group
+    total_result = await db.execute(count_query)
+    total = total_result.scalar()
+    
+    # Paginate
+    query = query.offset((page - 1) * page_size).limit(page_size)
+    result = await db.execute(query)
+    chats = result.scalars().all()
+    
+    return {
+        "chats": [ChatResponse.model_validate(c) for c in chats],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "group_name": group_name,
+    }
+
+
+@router.delete("/group/{group_type}/{group_name}")
+async def delete_chats_by_group(
+    group_type: str,  # "source" or "period"
+    group_name: str,  # e.g., "chatgpt", "native" or "Today", "This Week"
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete all chats in a specific group (source or time period)."""
+    base_filter = Chat.owner_id == user.id
+    
+    if group_type == "source":
+        # Source-based filtering
+        source_map = {"Native": "native", "ChatGPT": "chatgpt", "Grok": "grok", "Claude": "claude"}
+        source_val = source_map.get(group_name, group_name.lower())
+        
+        if source_val == "native":
+            group_filter = or_(Chat.source == 'native', Chat.source.is_(None))
+        else:
+            group_filter = Chat.source == source_val
+            
+    elif group_type == "period":
+        # Time period filtering
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        seven_days_ago = today_start - timedelta(days=7)
+        thirty_days_ago = today_start - timedelta(days=30)
+        
+        if group_name == "Today":
+            group_filter = Chat.updated_at >= today_start
+        elif group_name == "Last 7 Days":
+            group_filter = and_(Chat.updated_at >= seven_days_ago, Chat.updated_at < today_start)
+        elif group_name == "Last 30 Days":
+            group_filter = and_(Chat.updated_at >= thirty_days_ago, Chat.updated_at < seven_days_ago)
+        else:  # Older
+            group_filter = Chat.updated_at < thirty_days_ago
+    else:
+        raise HTTPException(status_code=400, detail="Invalid group_type. Use 'source' or 'period'")
+    
+    # Get chat IDs to delete (for image cleanup)
+    result = await db.execute(
+        select(Chat.id).where(base_filter, group_filter)
+    )
+    chat_ids = [row[0] for row in result.all()]
+    
+    if not chat_ids:
+        return {"status": "deleted", "count": 0, "group": group_name}
+    
+    # Delete generated images for these chats
+    deleted_images = 0
+    for chat_id in chat_ids:
+        try:
+            count = await delete_chat_images(db, chat_id)
+            deleted_images += count
+        except Exception as e:
+            logger.warning(f"Failed to delete images for chat {chat_id}: {e}")
+    
+    # Delete the chats
+    await db.execute(delete(Chat).where(Chat.id.in_(chat_ids)))
+    await db.commit()
+    
+    logger.info(f"User {user.id} deleted {len(chat_ids)} chats from group {group_type}/{group_name}")
+    
+    return {
+        "status": "deleted",
+        "count": len(chat_ids),
+        "group": group_name,
+        "images_deleted": deleted_images,
+    }
 
 
 # ============ Messages ============
@@ -1297,12 +1553,16 @@ async def upload_zip(
 async def get_zip_file(
     chat_id: str,
     path: str,
+    offset: int = 0,  # NC-0.8.0.6: Support chunked retrieval
+    length: int = 20000,  # Default 20KB chunks
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Retrieve a specific file's content from the uploaded zip.
     Used for lazy-loading file contents when LLM requests them.
+    
+    NC-0.8.0.6: Now supports offset and length for chunked retrieval.
     """
     # Verify chat ownership
     await _get_user_chat(db, user, chat_id)
@@ -1336,13 +1596,48 @@ async def get_zip_file(
             detail=f"File not found: {path}",
         )
     
-    # Format for LLM context
-    formatted = format_file_content_for_llm(uploaded_file.filepath, uploaded_file.content, "user_upload")
+    full_content = uploaded_file.content or ""
+    total_size = len(full_content)
+    
+    # NC-0.8.0.6: Apply offset and length for chunked retrieval
+    if offset >= total_size:
+        return {
+            "path": uploaded_file.filepath,
+            "content": "",
+            "formatted": f"[ERROR: Offset {offset} exceeds file size {total_size}]",
+            "offset": offset,
+            "total_size": total_size,
+            "more_available": False,
+        }
+    
+    # Extract chunk
+    end_offset = min(offset + length, total_size)
+    chunk = full_content[offset:end_offset]
+    
+    # Try to break at line boundary if not at end
+    if end_offset < total_size:
+        last_newline = chunk.rfind('\n')
+        if last_newline > length // 2:
+            chunk = chunk[:last_newline + 1]
+            end_offset = offset + len(chunk)
+    
+    # Format for LLM context with offset info
+    formatted = format_file_content_for_llm(uploaded_file.filepath, chunk, "user_upload")
+    
+    # Add continuation hint if more content
+    if end_offset < total_size:
+        remaining = total_size - end_offset
+        formatted += f"\n\n[... {remaining:,} more chars available ...]\n"
+        formatted += f"[Use <request_file path=\"{uploaded_file.filepath}\" offset=\"{end_offset}\"/> to continue]"
     
     return {
         "path": uploaded_file.filepath,
-        "content": uploaded_file.content,
-        "formatted": formatted,  # Pre-formatted for LLM injection
+        "content": chunk,
+        "formatted": formatted,
+        "offset": offset,
+        "end_offset": end_offset,
+        "total_size": total_size,
+        "more_available": end_offset < total_size,
     }
 
 
@@ -1464,6 +1759,30 @@ class ImportResponse(BaseModel):
     results: List[ImportResult]
 
 
+def _normalize_timestamp(ts) -> datetime | None:
+    """Normalize timestamp to datetime, handling both seconds and milliseconds."""
+    if ts is None:
+        return None
+    try:
+        # Convert to float if string
+        if isinstance(ts, str):
+            ts = float(ts)
+        
+        # If timestamp is too large, it's likely in milliseconds
+        # Unix timestamp for year 3000 is about 32503680000 (11 digits)
+        # Milliseconds would be 13+ digits
+        if ts > 32503680000:  # Likely milliseconds
+            ts = ts / 1000
+        
+        # Sanity check: should be between 1970 and 2100
+        if ts < 0 or ts > 4102444800:  # 4102444800 = Jan 1, 2100
+            return None
+            
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (ValueError, TypeError, OSError):
+        return None
+
+
 def parse_chatgpt_export(data: dict) -> List[ImportedChat]:
     """Parse ChatGPT export format (conversations.json)"""
     chats = []
@@ -1479,44 +1798,55 @@ def parse_chatgpt_export(data: dict) -> List[ImportedChat]:
         # ChatGPT format has a mapping of message IDs to message objects
         mapping = conv.get("mapping", {})
         
-        # Find the root and traverse the tree
-        def extract_messages(node_id: str):
-            if not node_id or node_id not in mapping:
-                return
-            
-            node = mapping[node_id]
-            message = node.get("message")
-            
-            if message:
-                author_role = message.get("author", {}).get("role", "")
-                content_parts = message.get("content", {}).get("parts", [])
-                
-                if author_role in ["user", "assistant"] and content_parts:
-                    content = "\n".join(str(p) for p in content_parts if isinstance(p, str))
-                    if content.strip():
-                        create_time = message.get("create_time")
-                        msg_time = datetime.fromtimestamp(create_time, tz=timezone.utc) if create_time else None
-                        
-                        messages.append(ImportedMessage(
-                            role=author_role,
-                            content=content,
-                            created_at=msg_time
-                        ))
-            
-            # Follow children
-            for child_id in node.get("children", []):
-                extract_messages(child_id)
-        
+        # Use iterative approach instead of recursion to handle deep trees
         # Find root nodes (nodes with no parent)
+        root_id = None
         for node_id, node in mapping.items():
             if node.get("parent") is None:
-                extract_messages(node_id)
+                root_id = node_id
                 break
+        
+        if root_id:
+            # Iterative tree traversal using a stack
+            stack = [root_id]
+            visited = set()
+            
+            while stack:
+                node_id = stack.pop()
+                
+                if node_id in visited or node_id not in mapping:
+                    continue
+                visited.add(node_id)
+                
+                node = mapping[node_id]
+                message = node.get("message")
+                
+                if message:
+                    author_role = message.get("author", {}).get("role", "")
+                    content_parts = message.get("content", {}).get("parts", [])
+                    
+                    if author_role in ["user", "assistant"] and content_parts:
+                        content = "\n".join(str(p) for p in content_parts if isinstance(p, str))
+                        if content.strip():
+                            create_time = message.get("create_time")
+                            msg_time = _normalize_timestamp(create_time)
+                            
+                            messages.append(ImportedMessage(
+                                role=author_role,
+                                content=content,
+                                created_at=msg_time
+                            ))
+                
+                # Add children to stack (in reverse order to maintain order)
+                children = node.get("children", [])
+                stack.extend(reversed(children))
+        
+        # Sort messages by created_at to ensure correct order
+        messages.sort(key=lambda m: m.created_at or datetime.min.replace(tzinfo=timezone.utc))
         
         # Get conversation create time
         create_time = conv.get("create_time")
-        if create_time:
-            created_at = datetime.fromtimestamp(create_time, tz=timezone.utc)
+        created_at = _normalize_timestamp(create_time)
         
         if messages:
             chats.append(ImportedChat(
@@ -1652,36 +1982,104 @@ def parse_grok_export(data: dict) -> List[ImportedChat]:
 
 
 def parse_claude_export(data: dict) -> List[ImportedChat]:
-    """Parse Claude/Anthropic export format"""
+    """Parse Claude/Anthropic export format
+    
+    Claude export structure:
+    [
+      {
+        "uuid": "...",
+        "name": "Conversation Title",
+        "created_at": "2025-11-22T08:16:20.193491Z",
+        "updated_at": "2025-11-22T08:29:57.964146Z",
+        "chat_messages": [
+          {
+            "uuid": "...",
+            "text": "Quick access text",
+            "content": [
+              {"type": "text", "text": "..."},
+              {"type": "thinking", "thinking": "..."},
+              {"type": "tool_use", "name": "...", "input": {...}},
+              {"type": "tool_result", "name": "...", "output": "..."}
+            ],
+            "sender": "human" | "assistant",
+            "created_at": "2025-11-22T08:16:21.114548Z"
+          }
+        ]
+      }
+    ]
+    """
     chats = []
     
+    # Claude exports as a list of conversations
     conversations = data if isinstance(data, list) else [data]
     
     for conv in conversations:
-        title = conv.get("title", conv.get("name", "Imported from Claude"))
+        # Claude uses "name" for title
+        title = conv.get("name", conv.get("title", "Imported from Claude"))
         messages = []
         
-        msg_list = conv.get("messages", conv.get("chat_messages", []))
+        # Claude uses "chat_messages" array
+        msg_list = conv.get("chat_messages", conv.get("messages", []))
+        
+        # Get conversation created_at
+        conv_created = None
+        if conv.get("created_at"):
+            try:
+                conv_created = datetime.fromisoformat(conv["created_at"].replace("Z", "+00:00"))
+            except:
+                pass
         
         for msg in msg_list:
-            role = msg.get("role", msg.get("sender", "")).lower()
-            content = msg.get("content", msg.get("text", ""))
+            # Claude uses "sender" not "role"
+            sender = msg.get("sender", msg.get("role", "")).lower()
             
-            # Handle content that might be a list of content blocks
-            if isinstance(content, list):
-                content = "\n".join(
-                    c.get("text", str(c)) if isinstance(c, dict) else str(c) 
-                    for c in content
-                )
-            
-            if role in ["human", "user"]:
+            # Map sender to role
+            if sender in ["human", "user"]:
                 role = "user"
-            elif role in ["assistant", "claude"]:
+            elif sender in ["assistant", "claude"]:
                 role = "assistant"
             else:
                 continue
             
+            # Extract text content
+            # Claude provides a "text" field for convenience, or we can extract from content blocks
+            content = ""
+            
+            # First try the convenience "text" field
+            if msg.get("text"):
+                content = msg["text"]
+            else:
+                # Extract from content blocks
+                content_blocks = msg.get("content", [])
+                if isinstance(content_blocks, list):
+                    text_parts = []
+                    for block in content_blocks:
+                        if isinstance(block, dict):
+                            block_type = block.get("type", "")
+                            if block_type == "text":
+                                text_parts.append(block.get("text", ""))
+                            elif block_type == "thinking":
+                                # Optionally include thinking - skip for now as it's internal
+                                pass
+                            elif block_type == "tool_use":
+                                # Include tool usage info
+                                tool_name = block.get("name", "unknown")
+                                text_parts.append(f"[Used tool: {tool_name}]")
+                            elif block_type == "tool_result":
+                                # Include tool result summary
+                                tool_name = block.get("name", "unknown")
+                                output = block.get("output", block.get("content", ""))
+                                if isinstance(output, str) and len(output) > 500:
+                                    output = output[:500] + "..."
+                                text_parts.append(f"[Tool {tool_name} result: {output}]")
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                    content = "\n".join(text_parts)
+                elif isinstance(content_blocks, str):
+                    content = content_blocks
+            
             if content and content.strip():
+                # Parse timestamp
                 timestamp = msg.get("created_at", msg.get("timestamp"))
                 msg_time = None
                 if timestamp:
@@ -1700,7 +2098,8 @@ def parse_claude_export(data: dict) -> List[ImportedChat]:
         if messages:
             chats.append(ImportedChat(
                 title=title,
-                messages=messages
+                messages=messages,
+                created_at=conv_created
             ))
     
     return chats
@@ -1793,6 +2192,18 @@ def parse_generic_export(data: dict) -> List[ImportedChat]:
 def detect_and_parse_export(data: dict) -> tuple[List[ImportedChat], str]:
     """Detect export format and parse accordingly"""
     
+    # Check for Claude format FIRST (list with chat_messages and sender fields)
+    # Claude exports as an array of conversations with chat_messages
+    if isinstance(data, list) and data:
+        first_conv = data[0]
+        if isinstance(first_conv, dict):
+            # Claude has "chat_messages" with "sender" field
+            if "chat_messages" in first_conv:
+                return parse_claude_export(data), "Claude"
+            # Also check for name + uuid pattern (Claude specific)
+            if "name" in first_conv and "uuid" in first_conv and "chat_messages" in first_conv:
+                return parse_claude_export(data), "Claude"
+    
     # Check for ChatGPT format (has mapping with message tree structure)
     if isinstance(data, list) and data and "mapping" in data[0]:
         return parse_chatgpt_export(data), "ChatGPT"
@@ -1816,10 +2227,16 @@ def detect_and_parse_export(data: dict) -> tuple[List[ImportedChat], str]:
         if "grok" in data_str or "xai_user_id" in data_str or '"sender": "human"' in str(data)[:5000]:
             return parse_grok_export(data), "Grok"
     
-    # Check for Claude format
+    # Check for Claude format (fallback - dict with claude/anthropic keywords)
     if isinstance(data, dict):
         data_str = str(data).lower()[:1000]
         if "claude" in data_str or "anthropic" in data_str:
+            return parse_claude_export(data), "Claude"
+    
+    # Also check list format for Claude keywords
+    if isinstance(data, list) and data:
+        data_str = str(data[0]).lower()[:1000] if data else ""
+        if "chat_messages" in data_str or '"sender"' in data_str:
             return parse_claude_export(data), "Claude"
     
     # Fall back to generic parser
@@ -1892,20 +2309,46 @@ async def import_chats(
     total_imported = 0
     total_failed = 0
     
+    # Process in batches for better performance
+    BATCH_SIZE = 50
+    batch_count = 0
+    
     for parsed_chat in parsed_chats:
         try:
+            # Use original title - source is tracked in the source field
+            title = parsed_chat.title
+            
+            # Determine timestamps from messages
+            # created_at = FIRST message timestamp (when user started the chat)
+            # updated_at = LAST message timestamp (when user last interacted)
+            first_message_time = None
+            last_message_time = None
+            
+            if parsed_chat.messages:
+                for msg in parsed_chat.messages:
+                    if msg.created_at:
+                        if first_message_time is None or msg.created_at < first_message_time:
+                            first_message_time = msg.created_at
+                        if last_message_time is None or msg.created_at > last_message_time:
+                            last_message_time = msg.created_at
+            
+            # Use message timestamps, falling back to parsed chat times, then now
+            chat_created = first_message_time or parsed_chat.created_at or datetime.now(timezone.utc)
+            chat_updated = last_message_time or chat_created
+            
             # Create the chat
             chat_id = str(uuid.uuid4())
             chat = Chat(
                 id=chat_id,
                 owner_id=user.id,
-                title=parsed_chat.title[:200],  # Truncate long titles
+                title=title[:200],  # Truncate long titles
                 model=parsed_chat.model or settings.LLM_MODEL,
                 system_prompt=parsed_chat.system_prompt,
-                created_at=parsed_chat.created_at or datetime.now(timezone.utc),
+                source=source.lower(),  # Store source provider (chatgpt, grok, claude, native)
+                created_at=chat_created,
+                updated_at=chat_updated,
             )
             db.add(chat)
-            await db.flush()
             
             # Create messages
             parent_id = None
@@ -1924,8 +2367,6 @@ async def import_chats(
                 db.add(message)
                 parent_id = msg_id
             
-            await db.commit()
-            
             results.append(ImportResult(
                 success=True,
                 chat_id=chat_id,
@@ -1934,10 +2375,18 @@ async def import_chats(
                 source=source
             ))
             total_imported += 1
+            batch_count += 1
+            
+            # Commit in batches for better performance
+            if batch_count >= BATCH_SIZE:
+                await db.commit()
+                batch_count = 0
+                logger.info(f"[IMPORT] Progress: {total_imported} chats imported...")
             
         except Exception as e:
             logger.error(f"Failed to import chat '{parsed_chat.title}': {e}")
             await db.rollback()
+            batch_count = 0  # Reset batch counter after rollback
             results.append(ImportResult(
                 success=False,
                 title=parsed_chat.title,
@@ -1946,6 +2395,10 @@ async def import_chats(
                 error=str(e)
             ))
             total_failed += 1
+    
+    # Commit any remaining chats
+    if batch_count > 0:
+        await db.commit()
     
     logger.info(f"[IMPORT] User {user.id} imported {total_imported} chats from {source}, {total_failed} failed")
     

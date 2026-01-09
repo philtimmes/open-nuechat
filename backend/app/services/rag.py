@@ -460,14 +460,24 @@ class RAGService:
     _model_loaded = False
     _model_load_failed = False  # Track if model loading permanently failed
     _index_manager = None
+    _model_lock = None  # Threading lock for model access
+    
+    @classmethod
+    def _get_lock(cls):
+        """Get or create the model lock (lazy init to avoid import-time issues)"""
+        if cls._model_lock is None:
+            import threading
+            cls._model_lock = threading.Lock()
+        return cls._model_lock
     
     @classmethod
     def reset_model(cls):
         """Reset model state to allow retry of loading"""
         logger.info("[RAG] Resetting model state for retry...")
-        cls._model = None
-        cls._model_loaded = False
-        cls._model_load_failed = False
+        with cls._get_lock():
+            cls._model = None
+            cls._model_loaded = False
+            cls._model_load_failed = False
     
     @classmethod
     def get_model_status(cls) -> dict:
@@ -480,12 +490,21 @@ class RAGService:
     
     @classmethod
     def get_model(cls):
-        """Lazy load the embedding model with GPU support"""
-        # If model loading already failed, don't retry (avoid repeated slow failures)
+        """Lazy load the embedding model with GPU support (thread-safe)"""
+        # Quick check without lock (common case - already loaded)
         if cls._model_load_failed:
             return None
+        if cls._model_loaded and cls._model is not None:
+            return cls._model
         
-        if not cls._model_loaded:
+        # Acquire lock for model loading
+        with cls._get_lock():
+            # Double-check after acquiring lock
+            if cls._model_load_failed:
+                return None
+            if cls._model_loaded and cls._model is not None:
+                return cls._model
+            
             try:
                 import torch
                 import os
@@ -494,81 +513,60 @@ class RAGService:
                 # Must be set BEFORE importing sentence_transformers/transformers
                 os.environ["ACCELERATE_DISABLE_RICH"] = "1"
                 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
-                os.environ["ACCELERATE_USE_CPU"] = "1"
-                # Disable low_cpu_mem_usage which triggers meta tensors
+                # Disable low_cpu_mem_usage globally to prevent meta tensor issues
+                os.environ["TRANSFORMERS_LOW_CPU_MEM_USAGE"] = "0"
+                os.environ["ACCELERATE_TORCH_DEVICE"] = "cpu"
+                
+                # NC-0.8.0.7: Always use online mode - offline mode can cause issues with incomplete caches
                 os.environ["TRANSFORMERS_OFFLINE"] = "0"
+                os.environ["HF_HUB_OFFLINE"] = "0"
+                logger.info(f"HuggingFace online mode enabled")
                 
-                # Force reload transformers modules to pick up env vars
-                import importlib
-                import sys
-                for mod_name in list(sys.modules.keys()):
-                    if 'transformers' in mod_name or 'accelerate' in mod_name:
-                        try:
-                            del sys.modules[mod_name]
-                        except:
-                            pass
+                # Temporarily hide GPU to force CPU loading (avoids meta tensor issues)
+                original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+                os.environ["CUDA_VISIBLE_DEVICES"] = ""
                 
-                from sentence_transformers import SentenceTransformer
-                
-                # ROCm/HIP uses torch.cuda API - same interface, different backend
-                target_device = "cuda" if torch.cuda.is_available() else "cpu"
-                logger.info(f"Loading embedding model '{settings.EMBEDDING_MODEL}', target device: {target_device}")
-                
-                model = None
-                
-                # Try multiple loading strategies
-                loading_strategies = [
-                    # Strategy 1: Force no accelerate features
-                    lambda: SentenceTransformer(
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    
+                    logger.info(f"Loading embedding model '{settings.EMBEDDING_MODEL}' on CPU...")
+                    
+                    # NC-0.6.50: Fix meta tensor errors by disabling low_cpu_mem_usage
+                    model = SentenceTransformer(
                         settings.EMBEDDING_MODEL, 
                         device="cpu",
                         model_kwargs={"low_cpu_mem_usage": False},
-                    ),
-                    # Strategy 2: Basic load
-                    lambda: SentenceTransformer(
-                        settings.EMBEDDING_MODEL, 
-                        device="cpu",
-                    ),
-                    # Strategy 3: Trust remote code
-                    lambda: SentenceTransformer(
-                        settings.EMBEDDING_MODEL, 
-                        device="cpu",
-                        trust_remote_code=True,
-                    ),
-                    # Strategy 4: Direct from local cache if available
-                    lambda: SentenceTransformer(
-                        settings.EMBEDDING_MODEL,
-                        device="cpu",
-                        cache_folder="/root/.cache/huggingface/hub",
-                    ),
-                ]
+                    )
+                    
+                    # Verify model works
+                    logger.info("Testing model with sample embedding...")
+                    test_embed = model.encode("test", convert_to_numpy=True)
+                    if test_embed is not None and len(test_embed) > 0:
+                        logger.info("Model loaded successfully on CPU")
+                    else:
+                        raise ValueError("Model encode returned empty result")
+                        
+                finally:
+                    # Restore CUDA visibility
+                    if original_cuda_visible:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+                    else:
+                        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                 
-                for i, strategy in enumerate(loading_strategies):
+                # Now try to move to GPU if available
+                target_device = "cuda" if torch.cuda.is_available() else "cpu"
+                if target_device == "cuda" and model is not None:
                     try:
-                        logger.info(f"Trying loading strategy {i+1}/{len(loading_strategies)}...")
-                        model = strategy()
-                        logger.info(f"Strategy {i+1} succeeded!")
-                        break
+                        model = model.to("cuda")
+                        logger.info("Moved model to GPU")
                     except Exception as e:
-                        logger.warning(f"Strategy {i+1} failed: {e}")
-                        model = None
+                        logger.warning(f"Could not move model to GPU, using CPU: {e}")
                 
                 if model is None:
-                    logger.error("All loading strategies failed")
+                    logger.error("Model loading failed")
                     cls._model_load_failed = True
                     cls._model = None
                     return None
-                
-                logger.info(f"Model loaded, current device: {model.device}")
-                
-                # Move to GPU if available and model is on CPU
-                if target_device == "cuda" and str(model.device) == "cpu":
-                    logger.info("Moving embedding model to GPU...")
-                    try:
-                        model = model.to(target_device)
-                        logger.info(f"Model moved to GPU successfully")
-                    except Exception as e:
-                        logger.warning(f"Failed to move to GPU ({e}), keeping on CPU")
                 
                 cls._model = model
                 cls._model_loaded = True
@@ -597,6 +595,48 @@ class RAGService:
         self.chunk_overlap = settings.CHUNK_OVERLAP
         self.top_k = settings.TOP_K_RESULTS
     
+    def _is_binary_or_base64(self, text: str) -> bool:
+        """
+        Check if text appears to be binary data or base64-encoded content.
+        These should not be sent to the embedding model as they can cause crashes.
+        """
+        if not text or len(text) < 100:
+            return False
+        
+        # Check for base64 image data URLs
+        if 'data:image' in text or 'data:application' in text:
+            return True
+        
+        # Check for very long base64-like strings (high ratio of alphanumeric + /+=)
+        # Base64 uses A-Za-z0-9+/= characters
+        sample = text[:1000] if len(text) > 1000 else text
+        base64_chars = sum(1 for c in sample if c.isalnum() or c in '+/=')
+        
+        # If more than 90% of characters are base64-compatible and no spaces/newlines,
+        # it's likely binary/base64 data
+        if base64_chars / len(sample) > 0.9 and sample.count(' ') < 10 and sample.count('\n') < 5:
+            # Additional check: real text has more variety in character distribution
+            # Base64 tends to have very uniform distribution
+            if len(set(sample)) < 70:  # Base64 only uses ~65 unique chars
+                return True
+        
+        return False
+    
+    def _sanitize_text_for_embedding(self, text: str) -> str:
+        """
+        Remove or replace content that shouldn't be embedded (base64, binary, etc.)
+        """
+        import re
+        
+        # Remove base64 data URLs (images, files, etc.)
+        # Pattern: data:mime/type;base64,<base64_data>
+        text = re.sub(r'data:[^;]+;base64,[A-Za-z0-9+/=]+', '[IMAGE_DATA_REMOVED]', text)
+        
+        # Remove very long alphanumeric strings that look like base64 or hashes (> 200 chars)
+        text = re.sub(r'[A-Za-z0-9+/=]{200,}', '[BINARY_DATA_REMOVED]', text)
+        
+        return text
+    
     def embed_text(self, text: str) -> Optional[np.ndarray]:
         """Generate embedding for text using GPU"""
         model = self.get_model()
@@ -604,10 +644,22 @@ class RAGService:
             logger.warning("[EMBED] Model not loaded!")
             return None
         
-        embedding = model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
+        # Sanitize text to remove binary/base64 content that could crash the model
+        if self._is_binary_or_base64(text):
+            logger.warning(f"[EMBED] Skipping binary/base64 content (len={len(text)})")
+            return None
+        
+        # Also sanitize inline base64 within otherwise normal text
+        clean_text = self._sanitize_text_for_embedding(text)
+        
+        if not clean_text or len(clean_text.strip()) < 3:
+            logger.warning("[EMBED] Text too short after sanitization")
+            return None
+        
+        embedding = model.encode(clean_text, convert_to_numpy=True, normalize_embeddings=True)
         
         # Debug logging
-        logger.debug(f"[EMBED] text='{text[:50]}...', shape={embedding.shape}, norm={np.linalg.norm(embedding):.4f}, first5={embedding[:5].tolist()}")
+        logger.debug(f"[EMBED] text='{clean_text[:50]}...', shape={embedding.shape}, norm={np.linalg.norm(embedding):.4f}, first5={embedding[:5].tolist()}")
         
         return embedding
     
@@ -632,13 +684,48 @@ class RAGService:
         if model is None:
             return None
         
+        # Sanitize all texts - filter out binary/base64 content
+        sanitized_texts = []
+        valid_indices = []
+        
+        for i, text in enumerate(texts):
+            if self._is_binary_or_base64(text):
+                logger.warning(f"[EMBED_BATCH] Skipping binary/base64 content at index {i} (len={len(text)})")
+                continue
+            
+            clean_text = self._sanitize_text_for_embedding(text)
+            if clean_text and len(clean_text.strip()) >= 3:
+                sanitized_texts.append(clean_text)
+                valid_indices.append(i)
+            else:
+                logger.warning(f"[EMBED_BATCH] Text too short after sanitization at index {i}")
+        
+        if not sanitized_texts:
+            logger.warning("[EMBED_BATCH] No valid texts to embed after sanitization")
+            return None
+        
+        # Generate embeddings for sanitized texts
         embeddings = model.encode(
-            texts,
+            sanitized_texts,
             convert_to_numpy=True,
             normalize_embeddings=True,
             batch_size=batch_size,
-            show_progress_bar=len(texts) > 100
+            show_progress_bar=len(sanitized_texts) > 100
         )
+        
+        # If we filtered some texts, we need to return None for those positions
+        # to maintain alignment with the original texts list
+        if len(valid_indices) < len(texts):
+            import numpy as np
+            full_embeddings = np.zeros((len(texts), embeddings.shape[1]), dtype=np.float32)
+            for new_idx, orig_idx in enumerate(valid_indices):
+                full_embeddings[orig_idx] = embeddings[new_idx]
+            # Mark filtered positions with NaN so caller knows they're invalid
+            for i in range(len(texts)):
+                if i not in valid_indices:
+                    full_embeddings[i] = np.nan
+            return full_embeddings
+        
         return embeddings
     
     def chunk_text(self, text: str) -> List[Dict[str, Any]]:
@@ -678,8 +765,9 @@ class RAGService:
         db: AsyncSession,
         document: Document,
         text_content: str,
+        build_knowledge_graph: bool = True,
     ) -> int:
-        """Process a document: chunk, embed, and store"""
+        """Process a document: chunk, embed, store, and build knowledge graph edges"""
         
         # Delete existing chunks
         await db.execute(
@@ -701,6 +789,7 @@ class RAGService:
         )
         
         # Store chunks in database
+        new_chunks = []
         chunk_ids = []
         for i, chunk in enumerate(chunks):
             embedding_bytes = None
@@ -712,11 +801,12 @@ class RAGService:
                 content=chunk["content"],
                 chunk_index=chunk["index"],
                 embedding=embedding_bytes,
-                metadata={"word_count": len(chunk["content"].split())},
+                chunk_metadata={"word_count": len(chunk["content"].split())},
             )
             db.add(db_chunk)
             await db.flush()
             chunk_ids.append(str(db_chunk.id))
+            new_chunks.append(db_chunk)
         
         # Update document status
         document.is_processed = True
@@ -730,7 +820,67 @@ class RAGService:
                 db, document.knowledge_store_id
             )
         
+        # NC-0.8.0.2: Build knowledge graph edges for temporal validity
+        if build_knowledge_graph and document.knowledge_store_id:
+            try:
+                await self._build_knowledge_graph_edges(db, new_chunks, document.knowledge_store_id)
+            except Exception as e:
+                logger.warning(f"Knowledge graph edge creation failed (non-fatal): {e}")
+        
         return len(chunks)
+    
+    async def _build_knowledge_graph_edges(
+        self,
+        db: AsyncSession,
+        new_chunks: List[DocumentChunk],
+        knowledge_store_id: str,
+    ) -> None:
+        """
+        Build knowledge graph edges by comparing new chunks against existing ones.
+        
+        NC-0.8.0.2: Detects SUPERSEDES, UPDATES, CONTRADICTS relationships
+        """
+        from app.services.knowledge_graph import get_knowledge_graph_service
+        
+        kg_service = get_knowledge_graph_service()
+        
+        # Get existing chunks from same knowledge store (excluding the new ones)
+        new_chunk_ids = {str(c.id) for c in new_chunks}
+        
+        result = await db.execute(
+            select(DocumentChunk)
+            .join(Document, DocumentChunk.document_id == Document.id)
+            .where(Document.knowledge_store_id == knowledge_store_id)
+            .where(Document.is_processed == True)
+            .where(DocumentChunk.id.notin_(new_chunk_ids))
+            .limit(100)  # Limit for performance - could do batching for large KBs
+        )
+        existing_chunks = result.scalars().all()
+        
+        if not existing_chunks:
+            logger.debug(f"No existing chunks to compare against in KB {knowledge_store_id}")
+            return
+        
+        logger.info(f"[KNOWLEDGE_GRAPH] Analyzing {len(new_chunks)} new chunks against {len(existing_chunks)} existing")
+        
+        total_edges = 0
+        for new_chunk in new_chunks:
+            # Analyze this chunk against existing (with LLM if available, otherwise heuristics)
+            edges = await kg_service.analyze_new_chunk(
+                db, 
+                new_chunk, 
+                existing_chunks,
+                use_llm=False  # Start with heuristics for speed; can enable LLM later
+            )
+            total_edges += len(edges)
+            
+            # Also extract entities for future relationship detection
+            await kg_service.extract_entities(db, new_chunk, use_llm=False)
+        
+        if total_edges > 0:
+            logger.info(f"[KNOWLEDGE_GRAPH] Created {total_edges} edges for new chunks")
+        
+        await db.flush()
     
     async def delete_document(
         self,
@@ -1131,6 +1281,36 @@ class RAGService:
             # Fallback to direct search
             doc_ids = await self._get_store_document_ids(db, accessible_stores)
             return await self._direct_search(db, query_embedding, doc_ids, top_k)
+        
+        # NC-0.8.0.2: Apply knowledge graph temporal validity filtering
+        try:
+            from app.services.knowledge_graph import get_knowledge_graph_service
+            kg_service = get_knowledge_graph_service()
+            
+            # Classify query intent for temporal awareness
+            temporal_intent = kg_service.classify_temporal_intent(query)
+            
+            if debug_enabled:
+                _log_rag_debug(
+                    "Temporal intent classification",
+                    is_time_sensitive=temporal_intent["is_time_sensitive"],
+                    intent_type=temporal_intent["intent_type"],
+                    confidence=temporal_intent["confidence"]
+                )
+            
+            # Apply validity filtering
+            final_results = await kg_service.filter_by_validity(
+                db, final_results, query, temporal_intent
+            )
+            
+            if debug_enabled:
+                _log_rag_debug(
+                    "Knowledge graph filtering complete",
+                    results_after_filter=len(final_results),
+                    any_superseded=any(r.get("validity", {}).get("superseded_by") for r in final_results)
+                )
+        except Exception as e:
+            logger.warning(f"Knowledge graph filtering failed (continuing without): {e}")
         
         if debug_enabled:
             _log_rag_debug(
@@ -2016,14 +2196,23 @@ class RAGService:
         top_k: int = 5,
         bypass_access_check: bool = False,
         chat_id: Optional[str] = None,
+        max_context_tokens: Optional[int] = None,
+        enable_summarization: bool = True,
     ) -> str:
         """
         Get formatted context from knowledge stores for LLM prompt.
+        
+        NC-0.8.0.6: Smart RAG Compression
+        - Re-ranks results by subject relevance
+        - Summarizes chunks if summary is smaller than original
+        - Respects token budget
         
         Args:
             bypass_access_check: If True, skip ownership/permission checks.
                                 Used when accessing KB through a public GPT.
             chat_id: Optional chat ID for context-aware query enhancement.
+            max_context_tokens: Maximum tokens for RAG context (None = no limit)
+            enable_summarization: Whether to summarize long chunks
         """
         # Enhance query with conversation context (for follow-up questions)
         if chat_id:
@@ -2037,25 +2226,198 @@ class RAGService:
         if not results:
             return ""
         
+        debug_enabled = await _is_debug_rag_enabled(db)
+        
+        # NC-0.8.0.6: Re-rank by subject relevance if we have multiple results
+        if len(results) > 1:
+            results = await self._rerank_by_subject(query, results, debug_enabled)
+        
+        # NC-0.8.0.6: Smart compression - summarize if beneficial
         context_parts = []
+        total_tokens = 0
+        
         for i, result in enumerate(results, 1):
+            content = result['content']
+            doc_name = result['document_name']
+            similarity = result.get('similarity', 0)
+            
+            # Estimate tokens (rough: 4 chars per token)
+            content_tokens = len(content) // 4
+            
+            # Check token budget
+            if max_context_tokens and total_tokens + content_tokens > max_context_tokens:
+                if debug_enabled:
+                    _log_rag_debug(
+                        "Token budget reached, stopping context build",
+                        included=i-1,
+                        total=len(results),
+                        tokens_used=total_tokens
+                    )
+                break
+            
+            # NC-0.8.0.6: Summarize if chunk is large and summarization is enabled
+            final_content = content
+            if enable_summarization and content_tokens > 500:  # Only summarize chunks > ~2000 chars
+                summary = await self._summarize_chunk(content, query, debug_enabled)
+                if summary:
+                    summary_tokens = len(summary) // 4
+                    if summary_tokens < content_tokens * 0.7:  # Only use if 30%+ smaller
+                        final_content = f"[Summarized]\n{summary}"
+                        content_tokens = summary_tokens
+                        if debug_enabled:
+                            _log_rag_debug(
+                                f"Chunk {i} summarized",
+                                original_tokens=len(content)//4,
+                                summary_tokens=summary_tokens,
+                                savings=f"{(1 - summary_tokens/(len(content)//4))*100:.0f}%"
+                            )
+            
             context_parts.append(
-                f"[Source {i}: {result['document_name']}]\n{result['content']}"
+                f"[Source {i}: {doc_name} | Relevance: {similarity:.0%}]\n{final_content}"
             )
+            total_tokens += content_tokens
         
         context = "\n\n---\n\n".join(context_parts)
         
         # Log final context length if debug enabled
-        debug_enabled = await _is_debug_rag_enabled(db)
         if debug_enabled:
             _log_rag_debug(
                 "Context built for LLM prompt",
-                sources=len(results),
+                sources=len(context_parts),
                 context_length=len(context),
+                estimated_tokens=total_tokens,
                 context_preview=context[:200] + "..." if len(context) > 200 else context
             )
         
         return context
+    
+    async def _rerank_by_subject(
+        self,
+        query: str,
+        results: List[Dict[str, Any]],
+        debug_enabled: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        NC-0.8.0.6: Re-rank results by subject relevance.
+        
+        Uses keyword overlap scoring to boost results that match
+        the query subject more closely.
+        """
+        import re
+        
+        # Extract key terms from query (simple approach - nouns and important words)
+        query_lower = query.lower()
+        # Remove common words
+        stopwords = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'what', 'how', 'why', 
+                    'when', 'where', 'who', 'which', 'this', 'that', 'these', 'those',
+                    'i', 'you', 'he', 'she', 'it', 'we', 'they', 'my', 'your', 'his',
+                    'her', 'its', 'our', 'their', 'do', 'does', 'did', 'have', 'has',
+                    'had', 'can', 'could', 'will', 'would', 'should', 'may', 'might',
+                    'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'about',
+                    'into', 'through', 'during', 'before', 'after', 'above', 'below',
+                    'and', 'or', 'but', 'if', 'then', 'than', 'so', 'as', 'be', 'been'}
+        
+        query_words = set(re.findall(r'\b\w+\b', query_lower)) - stopwords
+        
+        if not query_words:
+            return results  # No meaningful words to match
+        
+        # Score each result by keyword overlap
+        for result in results:
+            content_lower = result['content'].lower()
+            content_words = set(re.findall(r'\b\w+\b', content_lower))
+            
+            # Calculate overlap
+            overlap = len(query_words & content_words)
+            overlap_ratio = overlap / len(query_words) if query_words else 0
+            
+            # Boost score based on overlap (max 20% boost)
+            original_score = result.get('similarity', 0.5)
+            boost = overlap_ratio * 0.2
+            result['_rerank_score'] = min(1.0, original_score + boost)
+            result['_keyword_overlap'] = overlap
+        
+        # Sort by rerank score
+        results.sort(key=lambda x: x.get('_rerank_score', 0), reverse=True)
+        
+        if debug_enabled:
+            _log_rag_debug(
+                "Re-ranked results by subject",
+                query_keywords=list(query_words)[:10],
+                top_overlaps=[r.get('_keyword_overlap', 0) for r in results[:3]]
+            )
+        
+        return results
+    
+    async def _summarize_chunk(
+        self,
+        content: str,
+        query: str,
+        debug_enabled: bool = False,
+    ) -> Optional[str]:
+        """
+        NC-0.8.0.6: Summarize a RAG chunk, focused on the query.
+        
+        Returns summary if successful, None if summarization fails.
+        """
+        from app.services.settings_service import SettingsService
+        
+        try:
+            # Get summarization model (use same as main LLM by default)
+            # This could be a lighter model for efficiency
+            import httpx
+            from app.core.config import settings
+            
+            # Check if summarization is enabled in settings
+            # summarize_enabled = await SettingsService.get_bool(db, "rag_summarization_enabled")
+            # if not summarize_enabled:
+            #     return None
+            
+            # Simple extractive summarization (no LLM call needed)
+            # Extract sentences most relevant to the query
+            sentences = re.split(r'(?<=[.!?])\s+', content)
+            
+            if len(sentences) <= 3:
+                return None  # Too short to summarize
+            
+            query_lower = query.lower()
+            query_words = set(re.findall(r'\b\w+\b', query_lower))
+            
+            # Score sentences by relevance to query
+            scored_sentences = []
+            for sent in sentences:
+                sent_lower = sent.lower()
+                sent_words = set(re.findall(r'\b\w+\b', sent_lower))
+                overlap = len(query_words & sent_words)
+                scored_sentences.append((overlap, sent))
+            
+            # Sort by relevance and take top sentences
+            scored_sentences.sort(key=lambda x: x[0], reverse=True)
+            
+            # Take top 30% of sentences, minimum 2, maximum 5
+            num_sentences = max(2, min(5, len(sentences) // 3))
+            top_sentences = [s[1] for s in scored_sentences[:num_sentences]]
+            
+            # Reorder by original position for coherence
+            original_order = {sent: i for i, sent in enumerate(sentences)}
+            top_sentences.sort(key=lambda s: original_order.get(s, 999))
+            
+            summary = ' '.join(top_sentences)
+            
+            if debug_enabled:
+                _log_rag_debug(
+                    "Extractive summarization",
+                    original_sentences=len(sentences),
+                    summary_sentences=len(top_sentences),
+                    compression_ratio=f"{len(summary)/len(content)*100:.0f}%"
+                )
+            
+            return summary
+            
+        except Exception as e:
+            if debug_enabled:
+                _log_rag_debug(f"Summarization failed: {e}")
+            return None
     
     async def rebuild_all_indexes(self, db: AsyncSession) -> Dict[str, int]:
         """Rebuild all knowledge store FAISS indexes"""

@@ -60,6 +60,9 @@ striprtf>=0.0.26    # RTF documents
 # File locking for persistent queues
 filelock>=3.12.0
 
+# YouTube subtitle extraction (optional, has built-in fallback)
+youtube-transcript-api>=0.6.0
+
 # TTS (Text-to-Speech) - RPC client to Kokoro microservice
 # (uses httpx from Authentication section)
 

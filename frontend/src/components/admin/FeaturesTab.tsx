@@ -65,6 +65,19 @@ export default function FeaturesTab({ flags, setFlags, onSave, isSaving }: Props
               <div className="text-xs text-[var(--color-text-secondary)]">Apply content filters to messages</div>
             </div>
           </label>
+          
+          <label className="flex items-center gap-3 cursor-pointer p-3 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)]">
+            <input
+              type="checkbox"
+              checked={flags.enable_mermaid_rendering}
+              onChange={(e) => setFlags({ ...flags, enable_mermaid_rendering: e.target.checked })}
+              className="w-5 h-5 rounded border-[var(--color-border)]"
+            />
+            <div>
+              <div className="text-sm font-medium text-[var(--color-text)]">Enable Mermaid Rendering</div>
+              <div className="text-xs text-[var(--color-text-secondary)]">Render Mermaid diagrams as interactive graphics (disable to show raw code)</div>
+            </div>
+          </label>
         </div>
       </div>
       

@@ -50,6 +50,7 @@ class TokenUsage(Base):
     
     __table_args__ = (
         Index("idx_usage_user_month", "user_id", "year", "month"),
+        Index("idx_usage_user_created", "user_id", "created_at"),
     )
     
     @property

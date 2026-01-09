@@ -3,6 +3,7 @@ Assistant Mode Model
 
 Defines presets for tool activation and LLM behavior.
 Modes control which tools are active and advertised to the LLM.
+Modes also serve as categories for Custom GPTs in the marketplace.
 """
 
 from sqlalchemy import Column, String, Boolean, DateTime, Text, Integer, JSON, ForeignKey
@@ -12,6 +13,17 @@ import uuid
 
 from .base import Base
 
+# Emoji mapping for modes (derived from name, not stored in DB)
+MODE_EMOJIS = {
+    "General": "🤖",
+    "Creative Writing": "✍️",
+    "Coding": "💻",
+    "Deep Research": "🔬",
+    "Legal": "⚖️",
+    "Data Analysis": "📊",
+    "Image Generation": "🎨",
+}
+
 
 class AssistantMode(Base):
     """
@@ -20,6 +32,9 @@ class AssistantMode(Base):
     Modes define which tools are active and advertised, allowing
     quick switching between different assistant behaviors like
     "Creative Writing", "Coding", "Deep Research", etc.
+    
+    Modes also serve as categories for Custom GPTs - when a user
+    creates a GPT and selects a "category", they're selecting a mode.
     """
     __tablename__ = "assistant_modes"
     
@@ -28,7 +43,7 @@ class AssistantMode(Base):
     # Basic info
     name = Column(String(100), nullable=False, unique=True)
     description = Column(Text, nullable=True)
-    icon = Column(String(500), nullable=True)  # Path to SVG
+    icon = Column(String(500), nullable=True)  # Path to SVG or icon URL
     
     # Tool configuration
     # active_tools: Tools the user can use (shown in toolbar)
@@ -56,6 +71,11 @@ class AssistantMode(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                        onupdate=lambda: datetime.now(timezone.utc), nullable=False)
     
+    @property
+    def emoji(self) -> str:
+        """Get emoji for this mode (derived from name)."""
+        return MODE_EMOJIS.get(self.name, "🤖")
+    
     def to_dict(self) -> dict:
         """Convert to dictionary for API/cache."""
         return {
@@ -63,6 +83,7 @@ class AssistantMode(Base):
             "name": self.name,
             "description": self.description,
             "icon": self.icon,
+            "emoji": self.emoji,
             "active_tools": self.active_tools or [],
             "advertised_tools": self.advertised_tools or [],
             "filter_chain_id": self.filter_chain_id,
@@ -80,33 +101,50 @@ DEFAULT_ASSISTANT_MODES = [
     {
         "name": "General",
         "description": "Balanced tool availability for everyday tasks",
-        "icon": None,
-        "active_tools": ["web_search", "artifacts"],
+        "active_tools": ["web_search", "artifacts", "kb_search"],
         "advertised_tools": [],
         "sort_order": 0,
     },
     {
         "name": "Creative Writing",
         "description": "Focused writing without tool distractions",
-        "icon": None,
         "active_tools": [],
         "advertised_tools": [],
         "sort_order": 1,
     },
     {
         "name": "Coding",
-        "description": "Full artifact and code tools for development",
-        "icon": None,
-        "active_tools": ["artifacts", "file_ops", "code_exec"],
-        "advertised_tools": ["artifacts", "file_ops"],
+        "description": "Web search, chat history, and full development tools",
+        "active_tools": ["web_search", "user_chats_kb", "artifacts", "file_ops", "code_exec"],
+        "advertised_tools": ["web_search", "artifacts", "file_ops"],
         "sort_order": 2,
     },
     {
         "name": "Deep Research",
-        "description": "Web search and knowledge base tools for research",
-        "icon": None,
-        "active_tools": ["web_search", "kb_search", "citations"],
-        "advertised_tools": ["web_search", "kb_search"],
+        "description": "Comprehensive research with web, knowledge bases, and citations",
+        "active_tools": ["web_search", "kb_search", "local_rag", "user_chats_kb", "citations", "artifacts"],
+        "advertised_tools": ["web_search", "kb_search", "citations"],
         "sort_order": 3,
+    },
+    {
+        "name": "Legal",
+        "description": "Legal research with all knowledge bases, no web search",
+        "active_tools": ["kb_search", "local_rag", "user_chats_kb", "file_ops", "artifacts"],
+        "advertised_tools": ["kb_search", "file_ops"],
+        "sort_order": 4,
+    },
+    {
+        "name": "Data Analysis",
+        "description": "Code execution and file tools for data processing",
+        "active_tools": ["code_exec", "file_ops", "artifacts", "local_rag"],
+        "advertised_tools": ["code_exec", "file_ops"],
+        "sort_order": 5,
+    },
+    {
+        "name": "Image Generation",
+        "description": "Focused on creating and discussing images",
+        "active_tools": ["image_gen", "artifacts"],
+        "advertised_tools": ["image_gen"],
+        "sort_order": 6,
     },
 ]

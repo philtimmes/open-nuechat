@@ -5,12 +5,15 @@ Provides built-in tools that Claude can use
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime
 import json
+import logging
 import math
 import re
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.rag import RAGService
 from app.models.models import User
+
+logger = logging.getLogger(__name__)
 
 
 class ToolRegistry:
@@ -161,15 +164,45 @@ class ToolRegistry:
             handler=self._text_analyzer_handler,
         )
         
+        # NC-0.8.0.7: Image generation tool
+        self.register(
+            name="generate_image",
+            description="Generate an image based on a text prompt. Use this when the user asks you to create, draw, generate, or make an image, picture, illustration, or artwork.",
+            parameters={
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed description of the image to generate. Be specific about style, colors, composition, and subject matter.",
+                    "required": True,
+                },
+                "width": {
+                    "type": "integer",
+                    "description": "Width of the image in pixels. Default: 1024. Common sizes: 512, 768, 1024, 1536",
+                    "required": False,
+                },
+                "height": {
+                    "type": "integer",
+                    "description": "Height of the image in pixels. Default: 1024. Common sizes: 512, 768, 1024, 1536",
+                    "required": False,
+                }
+            },
+            handler=self._image_gen_handler,
+        )
+        
         # Web page fetcher
         self.register(
             name="fetch_webpage",
-            description="Fetch and read the content of a web page. Use this to read articles, documentation, or any web content when given a URL.",
+            description="Fetch and read the content of web pages. Accepts a single URL or an array of URLs. For video URLs (YouTube, Rumble), returns embeddable video players.",
             parameters={
                 "url": {
                     "type": "string",
-                    "description": "The URL of the web page to fetch",
-                    "required": True,
+                    "description": "A single URL to fetch (use this OR urls, not both)",
+                    "required": False,
+                },
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "An array of URLs to fetch (use this OR url, not both)",
+                    "required": False,
                 },
                 "extract_main_content": {
                     "type": "boolean",
@@ -178,6 +211,26 @@ class ToolRegistry:
                 }
             },
             handler=self._webpage_fetch_handler,
+        )
+        
+        # Multi-URL fetch with video embed support (alias for fetch_webpage with urls)
+        self.register(
+            name="fetch_urls",
+            description="Fetch multiple URLs at once. For video URLs (YouTube, Rumble), returns embeddable video players. For regular pages, extracts text content.",
+            parameters={
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of URLs to fetch",
+                    "required": True,
+                },
+                "extract_main_content": {
+                    "type": "boolean",
+                    "description": "For non-video URLs, extract just main content (true) or all text (false). Default: true",
+                    "required": False,
+                }
+            },
+            handler=self._fetch_urls_handler,
         )
         
         # File viewing tools for uploaded files
@@ -255,6 +308,30 @@ class ToolRegistry:
                 }
             },
             handler=FileViewingTools.view_signature,
+        )
+        
+        # Request file content by offset (NC-0.8.0.6)
+        self.register(
+            name="request_file",
+            description="Retrieve content from an uploaded file starting at a specific character offset. Use this when you see truncation notices like '[Use <request_file path=\"...\" offset=\"...\"/>]'.",
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": "Path/filename of the file to retrieve",
+                    "required": True,
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Character offset to start reading from. Default: 0",
+                    "required": False,
+                },
+                "length": {
+                    "type": "integer",
+                    "description": "Number of characters to retrieve. Default: 20000",
+                    "required": False,
+                }
+            },
+            handler=FileViewingTools.request_file,
         )
         
         # Task Queue tools - Agentic task management
@@ -367,6 +444,38 @@ class ToolRegistry:
             description="Resume task queue execution after pausing.",
             parameters={},
             handler=self._resume_task_queue_handler,
+        )
+        
+        # Agent Memory tools - for accessing archived conversation history
+        self.register(
+            name="agent_search",
+            description="Search through archived conversation history stored in Agent Memory files. Use this when you need to recall information from earlier in a long conversation that may have been archived.",
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "Search query - keywords or phrases to find in archived conversation history",
+                    "required": True,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default: 3)",
+                    "required": False,
+                }
+            },
+            handler=self._agent_search_handler,
+        )
+        
+        self.register(
+            name="agent_read",
+            description="Read the contents of a specific Agent Memory file. Use this after agent_search to get the full context from a specific archived conversation segment.",
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "The agent memory filename to read (e.g., '{Agent0001}.md')",
+                    "required": True,
+                }
+            },
+            handler=self._agent_read_handler,
         )
     
     async def _calculator_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
@@ -689,24 +798,234 @@ class ToolRegistry:
         
         return max(1, count)
     
+    async def _image_gen_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """NC-0.8.0.7: Generate an image using the image generation service.
+        
+        This handler queues an image generation task. The image will be generated
+        asynchronously and sent to the frontend via WebSocket when complete.
+        The generated image will appear in the chat.
+        """
+        prompt = args.get("prompt", "")
+        
+        if not prompt:
+            return {"error": "Prompt is required for image generation"}
+        
+        # Get context info
+        chat_id = context.get("chat_id") if context else None
+        user_id = context.get("user_id") if context else None
+        message_id = context.get("message_id") if context else None
+        db = context.get("db") if context else None
+        
+        if not chat_id or not user_id:
+            return {"error": "Missing required context (chat_id, user_id)"}
+        
+        try:
+            from app.services.image_queue import get_image_queue, ensure_queue_started, TaskStatus
+            from app.services.websocket import ws_manager
+            from app.db.database import async_session_maker
+            from app.services.settings_service import SettingsService
+            
+            # NC-0.8.0.7: Get default dimensions from admin settings
+            default_width = 1024
+            default_height = 1024
+            
+            if db:
+                try:
+                    default_width = await SettingsService.get_int(db, "image_gen_default_width") or 1024
+                    default_height = await SettingsService.get_int(db, "image_gen_default_height") or 1024
+                except Exception as e:
+                    logger.warning(f"[IMAGE_TOOL] Could not fetch default dimensions: {e}")
+            
+            # Use provided dimensions or fall back to admin defaults
+            width = args.get("width") or default_width
+            height = args.get("height") or default_height
+            
+            queue = get_image_queue()
+            
+            # Check queue capacity
+            if queue.is_full:
+                return {"error": "Image generation queue is full. Please try again in a moment."}
+            
+            # Create callback to notify frontend when complete
+            # Uses same message types as the auto-detect flow for frontend compatibility
+            async def notify_completion():
+                task = queue.get_task(task_id)
+                if not task:
+                    return
+                
+                try:
+                    from sqlalchemy import text
+                    
+                    if task.status == TaskStatus.COMPLETED:
+                        image_data = {
+                            "url": task.image_url,
+                            "width": task.width,
+                            "height": task.height,
+                            "seed": task.seed,
+                            "prompt": task.prompt,
+                            "job_id": task.job_id,
+                        }
+                        
+                        # NC-0.8.0.7: Save image data to message metadata for persistence
+                        try:
+                            async with async_session_maker() as notify_db:
+                                # First check if message still exists
+                                result = await notify_db.execute(
+                                    text("SELECT id FROM messages WHERE id = :id"),
+                                    {"id": message_id}
+                                )
+                                if result.fetchone():
+                                    # Build metadata JSON
+                                    new_metadata = json.dumps({
+                                        "image_generation": {
+                                            "status": "completed",
+                                            "prompt": task.prompt,
+                                            "width": task.width,
+                                            "height": task.height,
+                                            "seed": task.seed,
+                                            "generation_time": task.generation_time,
+                                            "job_id": task.job_id,
+                                        },
+                                        "generated_image": image_data,
+                                    })
+                                    
+                                    # Update message with image metadata
+                                    await notify_db.execute(
+                                        text("UPDATE messages SET message_metadata = :metadata WHERE id = :id"),
+                                        {"metadata": new_metadata, "id": message_id}
+                                    )
+                                    
+                                    # Update chat timestamp
+                                    from datetime import datetime, timezone as tz
+                                    await notify_db.execute(
+                                        text("UPDATE chats SET updated_at = :now WHERE id = :id"),
+                                        {"now": datetime.now(tz.utc), "id": chat_id}
+                                    )
+                                    await notify_db.commit()
+                                    logger.info(f"[IMAGE_TOOL] Saved image metadata for message {message_id}")
+                        except Exception as db_err:
+                            logger.error(f"[IMAGE_TOOL] Failed to save metadata: {db_err}")
+                        
+                        # Send to user via WebSocket - same message type as auto-detect flow
+                        await ws_manager.send_to_user(user_id, {
+                            "type": "image_generated",
+                            "payload": {
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "image": image_data,
+                            },
+                        })
+                        logger.info(f"[IMAGE_TOOL] Sent image_generated for task {task_id}")
+                    else:
+                        # Notify frontend of failure
+                        await ws_manager.send_to_user(user_id, {
+                            "type": "image_generation_failed",
+                            "payload": {
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "error": task.error,
+                            },
+                        })
+                        logger.info(f"[IMAGE_TOOL] Sent image_generation_failed for task {task_id}")
+                
+                except Exception as e:
+                    logger.error(f"Error in tool image notify_completion: {e}")
+            
+            # Ensure queue is started
+            await ensure_queue_started()
+            
+            # Add to queue with callback
+            task_id = await queue.add_task(
+                prompt=prompt,
+                width=width,
+                height=height,
+                chat_id=chat_id,
+                user_id=user_id,
+                message_id=message_id,
+                notify_callback=notify_completion,
+            )
+            
+            logger.info(f"[IMAGE_TOOL] Queued image generation task {task_id} for message {message_id}")
+            
+            return {
+                "status": "queued",
+                "task_id": task_id,
+                "message": f"Image generation started. The image will appear in the chat when ready.",
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "queue_position": queue.get_pending_count(),
+            }
+        except Exception as e:
+            logger.error(f"[IMAGE_TOOL] Failed to queue: {e}")
+            return {"error": f"Failed to queue image generation: {str(e)}"}
+    
     async def _webpage_fetch_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
-        """Fetch and extract content from a web page"""
+        """Fetch and extract content from web pages. Supports single URL or array of URLs."""
+        import httpx
+        import asyncio
+        from urllib.parse import urlparse
+        
+        # Handle both single url and urls array
+        url = args.get("url", "")
+        urls = args.get("urls", [])
+        extract_main = args.get("extract_main_content", True)
+        
+        # Build list of URLs to fetch
+        url_list = []
+        if url:
+            url_list.append(url)
+        if urls:
+            if isinstance(urls, str):
+                url_list.append(urls)
+            else:
+                url_list.extend(urls)
+        
+        if not url_list:
+            return {"error": "URL or URLs required"}
+        
+        # If single URL, return single result (backward compatible)
+        if len(url_list) == 1:
+            return await self._fetch_single_url(url_list[0], extract_main)
+        
+        # Multiple URLs - fetch concurrently
+        async def fetch_one(u):
+            return await self._fetch_single_url(u, extract_main)
+        
+        tasks = [fetch_one(u) for u in url_list[:10]]  # Limit to 10
+        results = await asyncio.gather(*tasks)
+        
+        return {
+            "results": results,
+            "fetched_count": len(results),
+            "video_count": sum(1 for r in results if r.get("type") == "video"),
+            "webpage_count": sum(1 for r in results if r.get("type") == "webpage"),
+            "error_count": sum(1 for r in results if "error" in r),
+        }
+    
+    async def _fetch_single_url(self, url: str, extract_main: bool = True) -> Dict[str, Any]:
+        """Fetch a single URL with video detection and subtitle extraction."""
         import httpx
         from urllib.parse import urlparse
         
-        url = args.get("url", "")
-        extract_main = args.get("extract_main_content", True)
-        
         if not url:
             return {"error": "URL is required"}
+        
+        # Check if it's a video URL first
+        platform, video_id = self._extract_video_id(url)
+        if platform and video_id:
+            # Use the subtitle-enabled version for videos
+            embed = await self._create_video_embed_with_subtitles(platform, video_id, url)
+            if embed:
+                return embed
         
         # Validate URL
         try:
             parsed = urlparse(url)
             if parsed.scheme not in ("http", "https"):
-                return {"error": "Invalid URL scheme. Must be http or https."}
+                return {"url": url, "error": "Invalid URL scheme. Must be http or https."}
         except Exception:
-            return {"error": "Invalid URL format"}
+            return {"url": url, "error": "Invalid URL format"}
         
         try:
             async with httpx.AsyncClient(
@@ -725,18 +1044,21 @@ class ToolRegistry:
                 # Handle non-HTML content
                 if "application/json" in content_type:
                     return {
+                        "type": "json",
                         "url": str(response.url),
                         "content_type": "json",
-                        "content": response.text[:50000],  # Limit size
+                        "content": response.text[:50000],
                     }
                 elif "text/plain" in content_type:
                     return {
+                        "type": "text",
                         "url": str(response.url),
                         "content_type": "text",
                         "content": response.text[:50000],
                     }
                 elif "text/html" not in content_type and "application/xhtml" not in content_type:
                     return {
+                        "type": "unknown",
                         "url": str(response.url),
                         "content_type": content_type,
                         "error": "Content type not supported for text extraction",
@@ -748,19 +1070,20 @@ class ToolRegistry:
                 text_content = self._extract_text_from_html(html, extract_main)
                 
                 return {
+                    "type": "webpage",
                     "url": str(response.url),
                     "title": self._extract_title(html),
                     "content_type": "html",
-                    "content": text_content[:50000],  # Limit to ~50k chars
+                    "content": text_content[:50000],
                     "content_length": len(text_content),
                 }
                 
         except httpx.TimeoutException:
-            return {"error": "Request timed out"}
+            return {"url": url, "error": "Request timed out"}
         except httpx.HTTPStatusError as e:
-            return {"error": f"HTTP error {e.response.status_code}"}
+            return {"url": url, "error": f"HTTP error {e.response.status_code}"}
         except Exception as e:
-            return {"error": f"Failed to fetch page: {str(e)}"}
+            return {"url": url, "error": f"Failed to fetch page: {str(e)}"}
     
     def _extract_title(self, html: str) -> str:
         """Extract page title from HTML"""
@@ -827,6 +1150,369 @@ class ToolRegistry:
             text = html_module.unescape(text)
             return text
     
+    def _extract_video_id(self, url: str) -> tuple:
+        """
+        Extract video ID and platform from a video URL.
+        Returns (platform, video_id) or (None, None) if not a recognized video URL.
+        """
+        import re
+        from urllib.parse import urlparse, parse_qs
+        
+        parsed = urlparse(url)
+        
+        # YouTube patterns
+        if 'youtube.com' in parsed.netloc or 'youtu.be' in parsed.netloc:
+            # youtube.com/watch?v=VIDEO_ID
+            if 'youtube.com' in parsed.netloc:
+                qs = parse_qs(parsed.query)
+                if 'v' in qs:
+                    return ('youtube', qs['v'][0])
+                # youtube.com/embed/VIDEO_ID
+                match = re.match(r'/embed/([a-zA-Z0-9_-]+)', parsed.path)
+                if match:
+                    return ('youtube', match.group(1))
+                # youtube.com/shorts/VIDEO_ID
+                match = re.match(r'/shorts/([a-zA-Z0-9_-]+)', parsed.path)
+                if match:
+                    return ('youtube', match.group(1))
+            # youtu.be/VIDEO_ID
+            elif 'youtu.be' in parsed.netloc:
+                video_id = parsed.path.lstrip('/')
+                if video_id:
+                    return ('youtube', video_id.split('?')[0])
+        
+        # Rumble patterns
+        elif 'rumble.com' in parsed.netloc:
+            # rumble.com/v{VIDEO_ID}-title.html or rumble.com/embed/v{VIDEO_ID}
+            match = re.match(r'/v([a-zA-Z0-9]+)', parsed.path)
+            if match:
+                return ('rumble', match.group(1))
+            match = re.match(r'/embed/v([a-zA-Z0-9]+)', parsed.path)
+            if match:
+                return ('rumble', match.group(1))
+        
+        return (None, None)
+    
+    async def _fetch_youtube_subtitles(self, video_id: str, lang: str = 'en') -> dict:
+        """Fetch YouTube video subtitles/captions."""
+        import httpx
+        import re
+        import json
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Try youtube-transcript-api first (most reliable)
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
+            
+            logger.info(f"[YOUTUBE] Trying youtube-transcript-api for {video_id}")
+            
+            try:
+                # Try to get transcript in preferred language
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                
+                # Try manual transcript first, then auto-generated
+                transcript = None
+                try:
+                    transcript = transcript_list.find_manually_created_transcript([lang, 'en'])
+                    logger.info(f"[YOUTUBE] Found manual transcript")
+                except NoTranscriptFound:
+                    try:
+                        transcript = transcript_list.find_generated_transcript([lang, 'en'])
+                        logger.info(f"[YOUTUBE] Found auto-generated transcript")
+                    except NoTranscriptFound:
+                        # Try to get any available transcript
+                        try:
+                            for t in transcript_list:
+                                transcript = t
+                                logger.info(f"[YOUTUBE] Found transcript in {t.language_code}")
+                                break
+                        except:
+                            pass
+                
+                if transcript:
+                    transcript_data = transcript.fetch()
+                    text = " ".join([entry['text'] for entry in transcript_data])
+                    return {
+                        "success": True,
+                        "language": transcript.language_code,
+                        "is_auto_generated": transcript.is_generated,
+                        "transcript": text,
+                        "line_count": len(transcript_data),
+                    }
+                else:
+                    logger.info(f"[YOUTUBE] No transcript found via API")
+                    
+            except TranscriptsDisabled:
+                logger.info(f"[YOUTUBE] Transcripts disabled for {video_id}")
+                return {"error": "Transcripts are disabled for this video"}
+            except VideoUnavailable:
+                logger.info(f"[YOUTUBE] Video unavailable: {video_id}")
+                return {"error": "Video is unavailable"}
+            except NoTranscriptFound:
+                logger.info(f"[YOUTUBE] No transcript found for {video_id}")
+            except Exception as e:
+                logger.warning(f"[YOUTUBE] API error for {video_id}: {e}")
+                
+        except ImportError:
+            logger.info("[YOUTUBE] youtube-transcript-api not installed, using manual method")
+        
+        # Fallback: Manual extraction from YouTube page
+        logger.info(f"[YOUTUBE] Trying manual extraction for {video_id}")
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    f"https://www.youtube.com/watch?v={video_id}",
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    }
+                )
+                html = response.text
+                logger.info(f"[YOUTUBE] Fetched page for {video_id}, length={len(html)}")
+                
+                # Check if captions exist at all
+                if '"captions"' not in html:
+                    logger.info(f"[YOUTUBE] No captions section in page for {video_id}")
+                    return {"error": "No captions found for this video"}
+                
+                # Try to extract the baseUrl for captions directly
+                # Pattern: "baseUrl":"https://www.youtube.com/api/timedtext?..."
+                baseurl_pattern = re.search(r'"baseUrl"\s*:\s*"(https://www\.youtube\.com/api/timedtext[^"]+)"', html)
+                if baseurl_pattern:
+                    subtitle_url = baseurl_pattern.group(1).replace('\\u0026', '&')
+                    logger.info(f"[YOUTUBE] Found baseUrl for subtitles")
+                    
+                    try:
+                        sub_response = await client.get(subtitle_url)
+                        subtitle_content = sub_response.text
+                        
+                        # Parse XML/JSON response
+                        if subtitle_content.strip().startswith('<'):
+                            # XML format
+                            text_pattern = re.compile(r'<text[^>]*>([^<]*)</text>')
+                            matches = text_pattern.findall(subtitle_content)
+                            if matches:
+                                import html as html_module
+                                transcript_lines = [html_module.unescape(t).strip() for t in matches if t.strip()]
+                                transcript = " ".join(transcript_lines)
+                                logger.info(f"[YOUTUBE] Extracted {len(transcript_lines)} lines from XML")
+                                return {
+                                    "success": True,
+                                    "language": "en",
+                                    "is_auto_generated": True,
+                                    "transcript": transcript,
+                                    "line_count": len(transcript_lines),
+                                }
+                        else:
+                            # Try JSON format
+                            try:
+                                data = json.loads(subtitle_content)
+                                events = data.get("events", [])
+                                lines = []
+                                for event in events:
+                                    segs = event.get("segs", [])
+                                    for seg in segs:
+                                        text = seg.get("utf8", "").strip()
+                                        if text and text != "\n":
+                                            lines.append(text)
+                                if lines:
+                                    transcript = " ".join(lines)
+                                    logger.info(f"[YOUTUBE] Extracted {len(lines)} segments from JSON")
+                                    return {
+                                        "success": True,
+                                        "language": "en",
+                                        "is_auto_generated": True,
+                                        "transcript": transcript,
+                                        "line_count": len(lines),
+                                    }
+                            except json.JSONDecodeError:
+                                pass
+                    except Exception as e:
+                        logger.warning(f"[YOUTUBE] Error fetching subtitle URL: {e}")
+                
+                # Pattern 2: Try to find captionTracks and extract baseUrl
+                caption_tracks_match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])', html, re.DOTALL)
+                if caption_tracks_match:
+                    try:
+                        # Clean up the JSON - it might have nested objects
+                        tracks_str = caption_tracks_match.group(1)
+                        # Find just the array
+                        bracket_count = 0
+                        end_idx = 0
+                        for i, c in enumerate(tracks_str):
+                            if c == '[':
+                                bracket_count += 1
+                            elif c == ']':
+                                bracket_count -= 1
+                                if bracket_count == 0:
+                                    end_idx = i + 1
+                                    break
+                        tracks_str = tracks_str[:end_idx]
+                        tracks = json.loads(tracks_str)
+                        logger.info(f"[YOUTUBE] Found {len(tracks)} caption tracks")
+                        
+                        for track in tracks:
+                            base_url = track.get("baseUrl", "")
+                            if base_url:
+                                base_url = base_url.replace('\\u0026', '&')
+                                sub_response = await client.get(base_url)
+                                # ... process response
+                                subtitle_content = sub_response.text
+                                if '<text' in subtitle_content:
+                                    text_pattern = re.compile(r'<text[^>]*>([^<]*)</text>')
+                                    matches = text_pattern.findall(subtitle_content)
+                                    if matches:
+                                        import html as html_module
+                                        transcript_lines = [html_module.unescape(t).strip() for t in matches if t.strip()]
+                                        transcript = " ".join(transcript_lines)
+                                        return {
+                                            "success": True,
+                                            "language": track.get("languageCode", "en"),
+                                            "is_auto_generated": "asr" in track.get("vssId", "").lower(),
+                                            "transcript": transcript,
+                                            "line_count": len(transcript_lines),
+                                        }
+                    except Exception as e:
+                        logger.warning(f"[YOUTUBE] Error parsing caption tracks: {e}")
+                
+                logger.info(f"[YOUTUBE] Could not extract subtitles for {video_id}")
+                return {"error": "No captions found for this video"}
+                
+        except httpx.TimeoutException:
+            return {"error": "Timeout fetching video page"}
+        except Exception as e:
+            logger.warning(f"[YOUTUBE] Error in manual extraction: {e}")
+            return {"error": f"Failed to fetch subtitles: {str(e)}"}
+    
+    async def _create_video_embed_with_subtitles(self, platform: str, video_id: str, url: str) -> dict:
+        """Create an embeddable video response with subtitles and title if available."""
+        import httpx
+        import re
+        
+        # Get basic embed info
+        embed = self._create_video_embed(platform, video_id, url)
+        if not embed:
+            return None
+        
+        # For YouTube, try to fetch title and subtitles
+        if platform == 'youtube':
+            # Fetch video page to get title
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(
+                        f"https://www.youtube.com/watch?v={video_id}",
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                            "Accept-Language": "en-US,en;q=0.9",
+                        }
+                    )
+                    html = response.text
+                    
+                    # Extract title
+                    title_match = re.search(r'<title>([^<]+)</title>', html)
+                    if title_match:
+                        title = title_match.group(1)
+                        # Clean up " - YouTube" suffix
+                        title = re.sub(r'\s*-\s*YouTube$', '', title)
+                        embed["title"] = title
+                    
+                    # Extract description if available
+                    desc_match = re.search(r'"shortDescription":"([^"]{0,500})', html)
+                    if desc_match:
+                        desc = desc_match.group(1)
+                        # Unescape JSON
+                        desc = desc.replace('\\n', ' ').replace('\\"', '"')
+                        embed["description"] = desc[:500]
+                    
+                    # Extract channel name
+                    channel_match = re.search(r'"ownerChannelName":"([^"]+)"', html)
+                    if channel_match:
+                        embed["channel"] = channel_match.group(1)
+                        
+            except Exception as e:
+                pass  # Title extraction is optional
+            
+            # Try to fetch subtitles
+            subtitles = await self._fetch_youtube_subtitles(video_id)
+            if subtitles.get("success"):
+                embed["subtitles"] = {
+                    "language": subtitles.get("language"),
+                    "is_auto_generated": subtitles.get("is_auto_generated"),
+                    "transcript": subtitles.get("transcript"),
+                    "line_count": subtitles.get("line_count"),
+                }
+                # Add transcript as content for context
+                embed["content"] = subtitles.get("transcript", "")[:30000]  # Limit size
+            else:
+                embed["subtitles_error"] = subtitles.get("error")
+                # Even without subtitles, provide what we know
+                if embed.get("title"):
+                    embed["content"] = f"Video Title: {embed['title']}"
+                    if embed.get("channel"):
+                        embed["content"] += f"\nChannel: {embed['channel']}"
+                    if embed.get("description"):
+                        embed["content"] += f"\nDescription: {embed['description']}"
+        
+        return embed
+    
+    def _create_video_embed(self, platform: str, video_id: str, url: str) -> dict:
+        """Create an embeddable video response."""
+        if platform == 'youtube':
+            embed_url = f"https://www.youtube.com/embed/{video_id}"
+            embed_html = f'''<iframe width="560" height="315" src="{embed_url}" frameborder="0" allowfullscreen></iframe>'''
+            return {
+                "type": "video",
+                "platform": "youtube",
+                "video_id": video_id,
+                "url": url,
+                "embed_url": embed_url,
+                "embed_html": embed_html,
+                "markdown": f"[![YouTube Video](https://img.youtube.com/vi/{video_id}/0.jpg)]({url})",
+            }
+        elif platform == 'rumble':
+            embed_url = f"https://rumble.com/embed/v{video_id}/"
+            embed_html = f'''<iframe width="560" height="315" src="{embed_url}" frameborder="0" allowfullscreen></iframe>'''
+            return {
+                "type": "video",
+                "platform": "rumble",
+                "video_id": video_id,
+                "url": url,
+                "embed_url": embed_url,
+                "embed_html": embed_html,
+            }
+        return None
+    
+    async def _fetch_urls_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Fetch multiple URLs, with special handling for video platforms."""
+        import asyncio
+        
+        urls = args.get("urls", [])
+        extract_main = args.get("extract_main_content", True)
+        
+        if not urls:
+            return {"error": "No URLs provided"}
+        
+        if isinstance(urls, str):
+            urls = [urls]
+        
+        # Fetch all URLs concurrently (with limit)
+        async def fetch_one(u):
+            return await self._fetch_single_url(u, extract_main)
+        
+        tasks = [fetch_one(url) for url in urls[:10]]  # Limit to 10 URLs
+        results = await asyncio.gather(*tasks)
+        
+        return {
+            "results": results,
+            "fetched_count": len(results),
+            "video_count": sum(1 for r in results if r.get("type") == "video"),
+            "webpage_count": sum(1 for r in results if r.get("type") == "webpage"),
+            "error_count": sum(1 for r in results if "error" in r),
+        }
+
     async def _add_task_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Add a single task to the queue"""
         import logging
@@ -1143,6 +1829,102 @@ class ToolRegistry:
         except Exception as e:
             logger.error(f"[TASK_QUEUE] Error resuming queue: {e}")
             return {"error": f"Failed to resume queue: {str(e)}"}
+    
+    async def _agent_search_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Search through archived conversation history in Agent Memory files."""
+        query = args.get("query", "")
+        max_results = args.get("max_results", 3)
+        
+        if not query:
+            return {"error": "Query is required"}
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Database context required for agent memory search"}
+        
+        db = context["db"]
+        chat_id = context["chat_id"]
+        
+        try:
+            from app.services.agent_memory import AgentMemoryService
+            
+            agent_memory = AgentMemoryService()
+            results = await agent_memory.search_agent_files(
+                db=db,
+                chat_id=chat_id,
+                query=query,
+                max_results=max_results,
+            )
+            
+            if not results:
+                return {
+                    "found": False,
+                    "message": "No relevant archived conversation history found for this query."
+                }
+            
+            return {
+                "found": True,
+                "results_count": len(results),
+                "results": results,
+                "tip": "Use agent_read to get full content from a specific file."
+            }
+            
+        except Exception as e:
+            return {"error": f"Agent memory search failed: {str(e)}"}
+    
+    async def _agent_read_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Read the contents of a specific Agent Memory file."""
+        filename = args.get("filename", "")
+        
+        if not filename:
+            return {"error": "Filename is required"}
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Database context required for agent memory read"}
+        
+        db = context["db"]
+        chat_id = context["chat_id"]
+        
+        try:
+            from app.services.agent_memory import AgentMemoryService, AGENT_FILE_PREFIX
+            from sqlalchemy import select
+            from app.models.models import UploadedFile
+            
+            # Normalize filename
+            if not filename.startswith(AGENT_FILE_PREFIX):
+                filename = f"{AGENT_FILE_PREFIX}{filename}"
+            if not filename.endswith(".md"):
+                filename = f"{filename}.md"
+            
+            # Query for the file
+            result = await db.execute(
+                select(UploadedFile)
+                .where(UploadedFile.chat_id == chat_id)
+                .where(UploadedFile.filepath == filename)
+            )
+            agent_file = result.scalar_one_or_none()
+            
+            if not agent_file:
+                # List available agent files
+                all_result = await db.execute(
+                    select(UploadedFile.filepath)
+                    .where(UploadedFile.chat_id == chat_id)
+                    .where(UploadedFile.filepath.like(f"{AGENT_FILE_PREFIX}%"))
+                )
+                available = [r[0] for r in all_result.fetchall()]
+                
+                return {
+                    "error": f"Agent memory file '{filename}' not found",
+                    "available_files": available if available else "No agent memory files exist for this chat"
+                }
+            
+            return {
+                "filename": filename,
+                "content": agent_file.content,
+                "size": agent_file.size,
+            }
+            
+        except Exception as e:
+            return {"error": f"Agent memory read failed: {str(e)}"}
 
 
 # Session-based file store for uploaded files
@@ -1453,6 +2235,83 @@ class FileViewingTools:
             "error": f"Signature '{signature_name}' not found in {filename}",
             "tip": "Try using search_in_file to find the exact location"
         }
+    
+    @staticmethod
+    async def request_file(arguments: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Retrieve file content starting at a specific offset.
+        NC-0.8.0.6: Handles truncated file requests from LLM.
+        """
+        path = arguments.get("path")
+        offset = arguments.get("offset", 0)
+        length = arguments.get("length", 20000)  # Default 20KB chunk
+        
+        if not path:
+            return {"error": "path is required"}
+        
+        chat_id = context.get("chat_id") if context else None
+        db = context.get("db") if context else None
+        if not chat_id:
+            return {"error": "No chat context available"}
+        
+        # Try to get file content
+        content = None
+        if db:
+            content = await get_session_file_with_db_fallback(chat_id, path, db)
+        else:
+            content = get_session_file(chat_id, path)
+        
+        if not content:
+            # List available files
+            if db:
+                all_files = await get_session_files_with_db_fallback(chat_id, db)
+            else:
+                all_files = get_session_files(chat_id)
+            available = list(all_files.keys())
+            return {
+                "error": f"File '{path}' not found",
+                "available_files": available if available else "No files uploaded"
+            }
+        
+        total_size = len(content)
+        
+        # Validate offset
+        if offset >= total_size:
+            return {
+                "error": f"Offset {offset} exceeds file size {total_size}",
+                "total_size": total_size
+            }
+        
+        # Extract chunk
+        end_offset = min(offset + length, total_size)
+        chunk = content[offset:end_offset]
+        
+        # Try to break at line boundary if not at end
+        if end_offset < total_size:
+            last_newline = chunk.rfind('\n')
+            if last_newline > length // 2:
+                chunk = chunk[:last_newline + 1]
+                end_offset = offset + len(chunk)
+        
+        result = {
+            "path": path,
+            "offset": offset,
+            "end_offset": end_offset,
+            "total_size": total_size,
+            "content": chunk,
+        }
+        
+        # Add continuation hint if more content available
+        if end_offset < total_size:
+            remaining = total_size - end_offset
+            result["more_available"] = True
+            result["remaining_chars"] = remaining
+            result["next_request"] = f'<request_file path="{path}" offset="{end_offset}"/>'
+        else:
+            result["more_available"] = False
+            result["message"] = "End of file reached"
+        
+        return result
 
 
 # Global tool registry instance

@@ -6,6 +6,7 @@ Lists available models including:
 - Custom GPTs/Assistants the user has access to
 """
 import logging
+import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -22,6 +23,29 @@ from app.services.settings_service import SettingsService
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def assistant_name_to_model_id(name: str) -> str:
+    """
+    Convert assistant name to a clean model ID.
+    
+    - Replace spaces with underscores
+    - Remove any characters that aren't alphanumeric, dash, or underscore
+    - Lowercase for consistency
+    
+    Example: "My Cool Assistant!" -> "my_cool_assistant"
+    """
+    # Replace spaces with underscores
+    clean = name.replace(" ", "_")
+    # Remove any non-alphanumeric characters except - and _
+    clean = re.sub(r'[^a-zA-Z0-9_-]', '', clean)
+    # Lowercase
+    clean = clean.lower()
+    # Remove consecutive underscores/dashes
+    clean = re.sub(r'[-_]+', '_', clean)
+    # Strip leading/trailing underscores
+    clean = clean.strip('_-')
+    return clean
 
 
 # === Schemas (OpenAI-compatible) ===
@@ -60,9 +84,12 @@ async def list_models(
     Returns base models from the LLM backend plus any Custom GPTs
     the user has created or subscribed to.
     
-    Model IDs:
-    - Base models: Use the model name directly (e.g., "llama3.2", "gpt-4")
-    - Custom GPTs: Prefixed with "gpt:" (e.g., "gpt:my-assistant-id")
+    Model IDs for Custom GPTs use cleaned assistant names:
+    - Spaces replaced with underscores
+    - Non-alphanumeric characters (except - and _) removed
+    - Lowercased
+    
+    Example: "My Research Assistant!" -> "my_research_assistant"
     """
     user, api_key = auth
     models: List[ModelObject] = []
@@ -90,8 +117,9 @@ async def list_models(
     user_assistants = result.scalars().all()
     
     for assistant in user_assistants:
+        model_id = assistant_name_to_model_id(assistant.name)
         models.append(ModelObject(
-            id=f"gpt:{assistant.id}",
+            id=model_id,
             created=int(assistant.created_at.timestamp()) if assistant.created_at else int(datetime.now(timezone.utc).timestamp()),
             owned_by=user.email or user.id,
             description=assistant.description,
@@ -103,7 +131,9 @@ async def list_models(
     try:
         # Parse subscribed IDs from user preferences
         import json
-        prefs = json.loads(user.preferences or "{}")
+        prefs = user.preferences or {}
+        if isinstance(prefs, str):
+            prefs = json.loads(prefs)
         subscribed_ids = prefs.get("subscribed_assistants", [])
         
         if subscribed_ids:
@@ -116,10 +146,11 @@ async def list_models(
             subscribed = result.scalars().all()
             
             for assistant in subscribed:
+                model_id = assistant_name_to_model_id(assistant.name)
                 # Avoid duplicates
-                if f"gpt:{assistant.id}" not in [m.id for m in models]:
+                if model_id not in [m.id for m in models]:
                     models.append(ModelObject(
-                        id=f"gpt:{assistant.id}",
+                        id=model_id,
                         created=int(assistant.created_at.timestamp()) if assistant.created_at else int(datetime.now(timezone.utc).timestamp()),
                         owned_by="marketplace",
                         description=assistant.description,
@@ -131,17 +162,26 @@ async def list_models(
     
     # 4. Check API key restrictions
     if api_key.allowed_assistants:
-        # Filter to only allowed assistants
+        # Filter to only allowed assistants - check by ID
         allowed_ids = set(api_key.allowed_assistants)
+        # We need to re-query to check IDs since we're now using names
+        result = await db.execute(
+            select(CustomAssistant).where(
+                CustomAssistant.id.in_(allowed_ids)
+            )
+        )
+        allowed_assistants = result.scalars().all()
+        allowed_names = {assistant_name_to_model_id(a.name) for a in allowed_assistants}
+        
         models = [
             m for m in models 
-            if not m.is_custom_gpt or m.id.replace("gpt:", "") in allowed_ids
+            if not m.is_custom_gpt or m.id in allowed_names
         ]
     
     return ModelsListResponse(data=models)
 
 
-@router.get("/models/{model_id}", response_model=ModelObject)
+@router.get("/models/{model_id:path}", response_model=ModelObject)
 async def get_model(
     model_id: str,
     auth: tuple[User, APIKey] = Depends(require_scope("models")),
@@ -149,16 +189,17 @@ async def get_model(
 ):
     """
     Get details of a specific model.
+    
+    Model ID can be:
+    - A base model name (e.g., "llama3.2", "gpt-4")
+    - A cleaned assistant name (e.g., "my_research_assistant")
+    - Legacy format with gpt: prefix still supported
     """
     user, api_key = auth
     
-    # Check if it's a custom GPT
+    # Check if it's a legacy gpt: format (still supported for backward compatibility)
     if model_id.startswith("gpt:"):
         assistant_id = model_id[4:]  # Remove "gpt:" prefix
-        
-        # Check API key restrictions
-        if api_key.allowed_assistants and assistant_id not in api_key.allowed_assistants:
-            raise HTTPException(status_code=403, detail="Access to this model is not allowed")
         
         result = await db.execute(
             select(CustomAssistant).where(
@@ -166,36 +207,59 @@ async def get_model(
             )
         )
         assistant = result.scalar_one_or_none()
+    else:
+        # Try to find by cleaned name
+        # We need to check all assistants the user has access to
+        result = await db.execute(
+            select(CustomAssistant).where(
+                or_(
+                    CustomAssistant.owner_id == user.id,
+                    CustomAssistant.is_public == True,
+                )
+            )
+        )
+        all_assistants = result.scalars().all()
         
-        if not assistant:
-            raise HTTPException(status_code=404, detail="Model not found")
-        
-        # Check access
-        is_owner = assistant.owner_id == user.id
-        is_public = assistant.is_public
-        
-        # Check subscription
-        import json
-        prefs = json.loads(user.preferences or "{}")
-        subscribed_ids = prefs.get("subscribed_assistants", [])
-        is_subscribed = assistant.id in subscribed_ids
-        
-        if not (is_owner or is_public or is_subscribed):
-            raise HTTPException(status_code=403, detail="Access denied to this model")
-        
+        # Find assistant matching the model_id
+        assistant = None
+        for a in all_assistants:
+            if assistant_name_to_model_id(a.name) == model_id:
+                assistant = a
+                break
+    
+    if not assistant:
+        # Not a custom GPT, assume base model
         return ModelObject(
             id=model_id,
-            created=int(assistant.created_at.timestamp()) if assistant.created_at else int(datetime.now(timezone.utc).timestamp()),
-            owned_by=user.email if is_owner else "marketplace",
-            description=assistant.description,
-            is_custom_gpt=True,
-            root=assistant.model,
+            created=int(datetime.now(timezone.utc).timestamp()),
+            owned_by="system",
+            description=f"Base model: {model_id}",
         )
     
-    # Base model - just return basic info
+    # Check API key restrictions
+    if api_key.allowed_assistants and assistant.id not in api_key.allowed_assistants:
+        raise HTTPException(status_code=403, detail="Access to this model is not allowed")
+    
+    # Check access
+    is_owner = assistant.owner_id == user.id
+    is_public = assistant.is_public
+    
+    # Check subscription
+    import json
+    prefs = user.preferences or {}
+    if isinstance(prefs, str):
+        prefs = json.loads(prefs)
+    subscribed_ids = prefs.get("subscribed_assistants", [])
+    is_subscribed = assistant.id in subscribed_ids
+    
+    if not (is_owner or is_public or is_subscribed):
+        raise HTTPException(status_code=403, detail="Access denied to this model")
+    
     return ModelObject(
-        id=model_id,
-        created=int(datetime.now(timezone.utc).timestamp()),
-        owned_by="system",
-        description=f"Base model: {model_id}",
+        id=assistant_name_to_model_id(assistant.name),
+        created=int(assistant.created_at.timestamp()) if assistant.created_at else int(datetime.now(timezone.utc).timestamp()),
+        owned_by=user.email if is_owner else "marketplace",
+        description=assistant.description,
+        is_custom_gpt=True,
+        root=assistant.model,
     )

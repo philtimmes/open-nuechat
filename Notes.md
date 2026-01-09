@@ -10,7 +10,379 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.8.0.0
+**Current Version:** NC-0.8.0.7
+
+---
+
+## Recent Changes (NC-0.8.0.7)
+
+### Active Tools Filtering Fix
+
+**Problem:** Tool buttons in ActiveToolsBar had no effect - all tools were always sent to LLM.
+
+**Root Cause:** WebSocket handler used `enable_tools` (boolean) from message payload but never read `chat.active_tools` (list of categories).
+
+**Solution:** Added tool category mapping and filtering in `websocket.py`:
+
+```python
+# Category → Backend Tools mapping
+TOOL_CATEGORY_MAP = {
+    "web_search": ["fetch_webpage", "fetch_urls"],
+    "code_exec": ["execute_python"],
+    "file_ops": ["view_file_lines", "search_in_file", "list_uploaded_files", "view_signature", "request_file"],
+    "kb_search": ["search_documents"],
+    # user_chats_kb is UI-only toggle; agent tools always available
+}
+
+# Always available when tools enabled (includes Agent Memory)
+UTILITY_TOOLS = [
+    "calculator", "get_current_time", "format_json", "analyze_text",
+    "agent_search", "agent_read",  # Agent Memory - always available
+]
+```
+
+**Backend reads `chat.active_tools` before expunging and filters tools accordingly.**
+
+### API Model Names
+
+`/v1/models` endpoint now exposes assistants by cleaned name instead of UUID:
+- Spaces → underscores
+- Non-alphanumeric (except `-` and `_`) removed  
+- Lowercased
+
+Example: "My Research Assistant!" → `my_research_assistant`
+
+Legacy `gpt:uuid` format still supported for backward compatibility.
+
+### Performance Indexes (NC-0.8.0.6)
+
+Added database indexes for query optimization:
+- `idx_document_owner` - documents by owner
+- `idx_document_store` - documents by knowledge store
+- `idx_document_processed` - processing queue
+- `idx_usage_user_created` - billing history
+- `idx_message_id_chat` - message lookups
+
+### Pre-emptive RAG Toggle
+
+New admin setting: **Admin Panel → Features → Enable Pre-emptive RAG**
+
+When **enabled** (default):
+- Global KB search runs (always)
+- Chat History KB search runs
+- Assistant KB search runs
+- If any non-Global KB finds results, filter chains with `skip_if_rag_hit=True` are skipped
+
+When **disabled**:
+- Global KB search runs (always)
+- Chat History KB and Assistant KB searches are skipped
+- Filter chains (including web search) run unconditionally
+- LLM can still use `search_documents` tool on-demand
+
+**Setting Key:** `enable_preemptive_rag` (boolean, default: true)
+
+---
+
+## Recent Changes (NC-0.8.0.6)
+
+### Frontend File Operation Tools
+
+LLM can now view and modify files in the Artifacts panel using XML-style tool tags.
+
+**Tools:**
+- `<request_file path="..." offset="..."/>` - Get file content (chunked, 20KB/request)
+- `<find_line path="..." contains="..."/>` - Find line number containing text
+- `<find path="..." search="..."/>` - Search for text in specific file
+- `<find search="..."/>` - Search all artifacts
+- `<search_replace path="...">===== SEARCH\n...\n===== Replace\n...</search_replace>` - Replace text
+
+**Processing Flow:**
+1. LLM outputs tool tag during streaming
+2. Frontend detects complete tag via regex
+3. Frontend sends `stop_generation` to backend
+4. Frontend executes tool against artifacts in Zustand store
+5. Frontend sends result via WebSocket (`save_user_message: false`)
+6. Backend continues LLM with tool result injected
+
+**Key Files:**
+- `WebSocketContext.tsx` - Tool detection patterns, execution, result delivery
+- `MessageBubble.tsx` - `preprocessContent()` strips tool tags from display
+
+**Artifact Matching:** `findArtifactByPath()` matches by exact path, suffix, basename, or partial match (case-insensitive).
+
+### File Chunking (request_file)
+
+Large files are served in 20KB chunks to avoid context overflow.
+
+**Frontend (`WebSocketContext.tsx`):**
+```typescript
+const FILE_CHUNK_SIZE = 20000;
+
+// extractFileRequests returns {path, offset} pairs
+// Streaming handler chunks content and sends continuation hint
+```
+
+**Backend (`registry.py`):**
+```python
+# request_file tool handler
+# Returns: content, offset, end_offset, total_size, more_available, next_request
+```
+
+### File Truncation (Attachments)
+
+Files >20KB are truncated when building messages for LLM.
+
+**Backend (`llm.py` - `_build_user_content`):**
+- Files >20KB truncated with `[... TRUNCATED at X of Y chars ...]`
+- Includes hint: `[Use <request_file path="..." offset="X"/> to retrieve more]`
+
+**Frontend (`WebSocketContext.tsx`):**
+- Attachment processor creates manifest for large files
+- Stores full content as artifact, sends placeholder to LLM
+
+### Tool Tag Display Hiding
+
+Tool tags hidden from user but kept in message history.
+
+**`MessageBubble.tsx` - `preprocessContent()`:**
+```typescript
+// Strips from display:
+.replace(/<request_file\s+[^>]*\/?>/gi, '')
+.replace(/<find_line\s+[^>]*\/?>/gi, '')
+.replace(/<find\s+[^>]*\/?>/gi, '')
+.replace(/<search_replace\s+[^>]*>[\s\S]*?<\/search_replace>/gi, '')
+```
+
+### Smart RAG Compression
+
+RAG context is now optimized before injection into the LLM prompt.
+
+**1. Subject Re-Ranking**
+Results are re-ranked by keyword overlap with the query subject, not just vector similarity.
+
+```python
+# Keywords extracted from query (stopwords removed)
+# Each result scored by overlap ratio
+boost = overlap_ratio * 0.2  # Max 20% boost
+result['_rerank_score'] = min(1.0, original_score + boost)
+```
+
+**2. Extractive Summarization**
+Large chunks (>500 tokens / ~2000 chars) are auto-summarized using extractive summarization:
+- Sentences scored by relevance to query
+- Top 30% of sentences kept (min 2, max 5)
+- Re-ordered by original position for coherence
+- Only used if summary is 30%+ smaller than original
+
+**3. Token Budget**
+New `max_context_tokens` parameter stops adding context when budget reached.
+
+**New Methods in RAGService:**
+```python
+async def _rerank_by_subject(query, results, debug_enabled) -> List[Dict]
+async def _summarize_chunk(content, query, debug_enabled) -> Optional[str]
+```
+
+**Updated Method Signature:**
+```python
+async def get_knowledge_store_context(
+    db, user, query, knowledge_store_ids,
+    top_k=5,
+    bypass_access_check=False,
+    chat_id=None,
+    max_context_tokens=None,      # NEW: Token budget
+    enable_summarization=True,    # NEW: Auto-summarize large chunks
+) -> str
+```
+
+### Category Filter Fix
+
+**Problem:** Marketplace category filter didn't work.
+
+**Root Cause:** 
+1. `AssistantPublicInfo` schema was missing `category` field - endpoints weren't returning category data
+2. Misunderstanding of NC-0.8.0.4 architecture - Modes ARE Categories (unified)
+
+**Fix:**
+1. `/assistants/categories` queries `AssistantMode` table (Modes = Categories)
+2. Returns `value` as slugified mode name: `m.name.lower().replace(' ', '_')`
+3. Added `category` field to `AssistantPublicInfo` schema
+4. Updated `/explore`, `/discover`, `/subscribed` endpoints to include `category=assistant.category`
+
+Categories are managed in Admin Panel → Assistant Modes tab.
+
+---
+
+## Recent Changes (NC-0.8.0.5)
+
+### Per-Chat Token Limits
+Users can now set max input and output tokens per chat via the model selector dropdown.
+
+**New Columns:**
+- `chats.max_input_tokens` (INTEGER, nullable) - Limit on input context
+- `chats.max_output_tokens` (INTEGER, nullable) - Limit on completion length
+
+**Frontend UI:**
+- Token Limits section added to model selector dropdown in ChatPage.tsx
+- Max Input and Max Output number inputs
+- Values saved immediately on change via `handleTokenLimitUpdate()`
+
+**Backend:**
+- Added to `ChatCreate`, `ChatUpdate`, `ChatResponse` schemas
+- `update_chat` endpoint handles token limit updates
+- `LLMService.stream_message()` uses chat-level limits:
+  - `effective_max_output_tokens` = `chat.max_output_tokens` or service default
+  - `effective_max_input_tokens` = `chat.max_input_tokens` or None (no limit)
+
+### Agent Memory Tools
+Two new tools for accessing archived conversation history:
+
+```python
+agent_search(query, max_results=3)  # Search archived history
+agent_read(filename)                 # Read specific agent file
+```
+
+**Agent Memory Files:**
+- Stored as `{AgentNNNN}.md` files in UploadedFile table
+- Hidden from UI artifacts panel
+- Created when conversation exceeds `max_input_tokens`
+- Contains summary header + full conversation archive
+
+### Error Sanitization
+Raw API errors no longer reach the browser.
+
+**New method:** `LLMService._sanitize_error_for_user(error_msg)`
+
+**Mappings:**
+| Raw Error | User Message |
+|-----------|--------------|
+| `max_tokens...context length` | "The conversation is too long. Try starting a new chat or reduce the Max Output Tokens setting." |
+| `rate limit` | "Rate limit reached. Please wait a moment and try again." |
+| `authentication` | "API authentication error. Please check your settings or contact support." |
+| `model not found` | "The selected model is not available. Please choose a different model." |
+| `content filter` | "The request was blocked by content filters. Please rephrase your message." |
+| `timeout` | "The request timed out. Please try again." |
+| `500/502/503` | "The AI service is temporarily unavailable. Please try again in a moment." |
+
+### Max Output Token Validation
+Before calling API, `max_output_tokens` is capped to remaining context space:
+```python
+max_possible_output = model_context_limit - current_input_tokens - 1000
+if effective_max_output_tokens > max_possible_output:
+    effective_max_output_tokens = max(1000, max_possible_output)
+```
+
+### Input Token Overflow Handling
+When `max_input_tokens` is exceeded, overflow messages are archived to Agent Memory:
+```python
+# Archive oldest messages (keeping system + recent 10)
+await agent_memory.compress_messages(...)
+messages = [messages[0]] + messages[-(keep_recent):]
+```
+
+---
+
+## Recent Changes (NC-0.8.0.3)
+
+### Sidebar Real-Time Updates
+Sidebar now automatically reloads when chats are created, deleted, or updated.
+
+**Implementation:**
+- Added `sidebarReloadTrigger` counter to chat store
+- `triggerSidebarReload()` called after `createChat`, `deleteChat`, `addMessage`
+- Sidebar useEffect watches trigger and calls `fetchChats()` without clearing existing chats
+
+**Key Fix:** Sidebar reload does NOT pass `sortBy` parameter, so `sortChanged` is false and existing chats array is preserved while counts refresh.
+
+### Timestamp Preservation (User's Temporal Relation)
+**Philosophy:** `updated_at` represents when the USER last interacted with the chat, not when the database row was modified.
+
+**Changes:**
+1. **Removed `onupdate=func.now()`** from `Chat.updated_at` in `app/models/chat.py`
+2. **Explicit timestamp updates** only in websocket.py when user sends a message:
+   ```python
+   chat.updated_at = datetime.now(timezone.utc)
+   ```
+3. **Import preserves original timestamps:**
+   - `created_at` = FIRST message timestamp (when user started the chat)
+   - `updated_at` = LAST message timestamp (when user last interacted)
+
+### Migration System Fix
+**Problem:** All migrations were running on EVERY server startup, causing mass timestamp updates via backfill UPDATE statements.
+
+**Root Cause:** Migration loop at line 405-413 in `main.py` iterated through all versions without checking if already applied.
+
+**Fix:** Added version check before running migrations:
+```python
+if version_tuple <= current:
+    logger.debug(f"Skipping migrations for {version} (already at {current_version})")
+    continue
+```
+
+### Chat Click Fix
+**Problem:** Clicking a chat removed it from sidebar until reload.
+
+**Root Cause:** ChatPage useEffect fetched fresh chat data from backend and replaced it in the chats array, but the fresh data lacked `_assignedPeriod` tag.
+
+**Fix:** Preserve `_assignedPeriod` when updating chat:
+```typescript
+updatedChats[chatIndex] = { ...chat, _assignedPeriod: existingChat._assignedPeriod };
+```
+
+---
+
+## Recent Changes (NC-0.8.0.1.2)
+
+### Chat Source Field
+Added `source` column to `chats` table for tracking where chats were imported from.
+
+**Values:** `native`, `chatgpt`, `grok`, `claude`
+
+**Migration (NC-0.8.0.1.2):**
+1. Add `source VARCHAR(50) DEFAULT 'native'` column
+2. Backfill from title prefixes (`ChatGPT: ` → `chatgpt`, etc.)
+3. Clean title prefixes after backfill
+
+**Changes:**
+- `app/models/chat.py`: Added `source` column
+- `app/api/routes/chats.py`: Import sets `source` field, sidebar filtering uses `source` instead of title parsing
+- `app/api/routes/user_settings.py`: Export includes `source` field
+- `frontend/src/components/Sidebar.tsx`: Groups by `chat.source` instead of title prefix matching
+
+### Generated Images in Artifacts Panel
+Images generated via `nuechat_image_generation` now appear in the Artifacts panel.
+
+**Naming:** `image001.png`, `image002.jpg`, etc. (numbered, extension from URL or default png)
+
+**Changes:**
+- `frontend/src/types/index.ts`: Added `'image'` to Artifact type, added `imageData` field
+- `frontend/src/pages/ChatPage.tsx`: `artifacts` useMemo includes `generatedImages` as artifacts
+- `frontend/src/components/ArtifactsPanel.tsx`: 
+  - `getPreviewContent()`: Renders image with dimensions/seed info
+  - `getLanguageLabel()`: Returns 'Image'
+  - `TypeIcon`: Uses image icon
+  - `getFileExtension()`: Detects extension from URL
+  - `downloadArtifact()`: Handles image download (URL fetch or base64)
+
+### Image Context for LLM
+When building chat history, the backend injects generated image metadata so the LLM knows what was previously created.
+
+**Location:** `app/services/llm.py` `_build_messages()`
+
+**Context injected for assistant messages with completed image generation:**
+```
+[PREVIOUSLY GENERATED IMAGE - NOT BY THIS LLM RESPONSE]
+The user requested an image and one was generated with these details:
+- Prompt: "..."
+- Dimensions: WxH
+- Seed: N
+The image exists and the user can see it. Do NOT attempt to generate a new image unless explicitly asked.
+[END IMAGE CONTEXT]
+```
+
+### User Data Export Fixes (NC-0.8.0.1)
+- Fixed `chat.model_id` → `chat.model`
+- Fixed `user.display_name` → `user.username`
 
 ---
 
@@ -1110,6 +1482,14 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.8.0.7 | 2026-01-09 | Active Tools Filtering fix - WebSocket now reads chat.active_tools and filters tools by category. **Streaming Tool Calls** - Fixed tools not being passed to LLM in streaming mode, added tool execution and conversation continuation. **Pre-emptive RAG Toggle** - Admin setting to disable automatic Chat History KB and Assistant KB searches (Global KB always runs). When disabled, filter chains run unconditionally. API model names use cleaned assistant names instead of UUIDs. Performance indexes added. |
+| NC-0.8.0.6 | 2026-01-08 | Smart RAG Compression - subject re-ranking (keyword overlap boost), extractive summarization for large chunks, token budget support |
+| NC-0.8.0.5 | 2026-01-08 | Per-chat token limits (max_input_tokens, max_output_tokens), Agent Memory tools (agent_search, agent_read), error sanitization, max output token validation |
+| NC-0.8.0.4 | 2026-01-08 | Mode/Category unification - Categories pull from AssistantModes, emojis derived from name, slug mapping for backward compatibility |
+| NC-0.8.0.3 | 2026-01-08 | Sidebar real-time updates (sidebarReloadTrigger), timestamp preservation (removed onupdate trigger), migration system fix, chat click fix (_assignedPeriod preservation), import preserves original timestamps |
+| NC-0.8.0.1.2 | 2026-01-07 | Chat source field for import tracking, sidebar filtering by source instead of title prefix |
+| NC-0.8.0.1.1 | 2026-01-07 | Generated images in Artifacts panel (imageNNN.ext), LLM image context injection |
+| NC-0.8.0.1 | 2026-01-07 | User data export fixes (model_id, display_name attributes) |
 | NC-0.8.0.0 | 2026-01-05 | **Dynamic Tools & Assistant Modes** - Composable RAG via filter chains, user_hint/user_action nodes, export_tool for LLM triggers, Active Tools Bar, Assistant Modes presets |
 | NC-0.7.17 | 2026-01-05 | Agentic Task Queue - FIFO queue for multi-step workflows, LLM-managed task flow |
 | NC-0.7.16 | 2026-01-05 | Hybrid RAG search - combines semantic + identifier matching for legal/code references |
@@ -1205,11 +1585,19 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.8.0.0**
+Current: **NC-0.8.0.7**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 
 Key tables added/modified:
+- NC-0.8.0.7: No schema changes (tool filtering is code-only, model name cleanup is code-only). Added indexes: `idx_document_owner`, `idx_document_store`, `idx_document_processed`, `idx_usage_user_created`, `idx_message_id_chat`
+- NC-0.8.0.6: No schema changes (Smart RAG Compression is code-only)
+- NC-0.8.0.5: `chats.max_input_tokens` and `chats.max_output_tokens` INTEGER columns for per-chat token limits
+- NC-0.8.0.4: No schema changes (mode/category unification is code-only, emoji derived from name)
+- NC-0.8.0.3: No schema changes (behavior changes only: removed `onupdate` from Chat.updated_at, explicit timestamp updates on user message, import uses first/last message timestamps)
+- NC-0.8.0.1.2: `chats.source` VARCHAR(50) column for import tracking (native, chatgpt, grok, claude)
+- NC-0.8.0.1.1: No schema changes (frontend-only: images in artifacts panel)
+- NC-0.8.0.1: No schema changes (export endpoint bug fixes)
 - NC-0.8.0.0: `assistant_modes` table, `mode_id` and `active_tools` columns on `chats`, `mode_id` on `custom_assistants`
 - NC-0.7.17: `chats.chat_metadata` JSON column (task queue storage)
 - NC-0.7.16: No schema changes (hybrid RAG search is code-only)

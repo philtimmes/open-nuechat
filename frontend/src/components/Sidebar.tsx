@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Link, useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore } from '../stores/authStore';
@@ -23,8 +23,11 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   const [editTitle, setEditTitle] = useState('');
   const [isImporting, setIsImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ success: number; failed: number } | null>(null);
+  const [showSortDropdown, setShowSortDropdown] = useState(false);
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['Today', 'Local', 'All Chats']));
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const sortDropdownRef = useRef<HTMLDivElement>(null);
   
   const { user } = useAuthStore();
   const {
@@ -32,34 +35,65 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     isLoadingChats,
     hasMoreChats,
     chatSearchQuery,
+    chatSortBy,
+    chatGroupCounts,
+    groupHasMore,
+    groupLoading,
+    sidebarReloadTrigger,
     createChat,
     deleteChat,
     updateChatTitle,
     setCurrentChat,
     fetchChats,
+    fetchGroupChats,
+    setChatSortBy,
+    deleteGroupChats,
   } = useChatStore();
   
   const { getDisplayName } = useModelsStore();
   const chatListRef = useRef<HTMLDivElement>(null);
   
-  // Debounced search - triggers backend search
+  // Reload sidebar when trigger changes (chat created, deleted, or updated)
   useEffect(() => {
-    // Clear any existing timeout
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current);
-    }
-    
-    // Debounce search by 300ms
-    searchTimeoutRef.current = setTimeout(() => {
-      fetchChats(false, searchQuery);
-    }, 300);
-    
-    return () => {
-      if (searchTimeoutRef.current) {
-        clearTimeout(searchTimeoutRef.current);
-      }
+    if (sidebarReloadTrigger === 0) return; // Skip initial render
+    const loadChats = async () => {
+      // DON'T pass sortBy - we just want to refresh counts without clearing chats
+      // The chats array already has the new/updated chat from createChat/deleteChat
+      await fetchChats(false, searchQuery);
     };
-  }, [searchQuery, fetchChats]);
+    loadChats();
+  }, [sidebarReloadTrigger]);
+  
+  // Load chats when sort changes
+  // For grouped views: fetch counts, then fetch each group
+  // For alphabetical: fetchChats returns the chats directly
+  useEffect(() => {
+    const loadChats = async () => {
+      // Pass sortBy explicitly so fetchChats knows to clear chats for grouped views
+      await fetchChats(false, searchQuery, chatSortBy);
+    };
+    loadChats();
+  }, [chatSortBy]);
+  
+  // When group counts arrive, fetch chats for each group (grouped views only)
+  useEffect(() => {
+    if (!chatGroupCounts) return;
+    if (chatSortBy === 'alphabetical') return; // alphabetical doesn't use groups
+    
+    const groups = Object.keys(chatGroupCounts).filter(g => chatGroupCounts[g] > 0);
+    if (groups.length === 0) return;
+    
+    // Expand first group
+    setExpandedSections(new Set([groups[0]]));
+    
+    // Fetch each group's chats
+    const dateField = chatSortBy === 'created' ? 'created_at' : 'updated_at';
+    const groupType = chatSortBy === 'source' ? 'source' : 'period';
+    
+    groups.forEach(group => {
+      fetchGroupChats(groupType, group, false, groupType === 'period' ? dateField : undefined);
+    });
+  }, [chatGroupCounts, chatSortBy]);
   
   // Handle infinite scroll
   const handleScroll = useCallback(() => {
@@ -117,6 +151,16 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     const file = e.target.files?.[0];
     if (!file) return;
     
+    // Warn if file is very large
+    const fileSizeMB = file.size / (1024 * 1024);
+    if (fileSizeMB > 100) {
+      const proceed = confirm(`This file is ${fileSizeMB.toFixed(0)}MB. Large imports may take several minutes. Continue?`);
+      if (!proceed) {
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+    }
+    
     setIsImporting(true);
     setImportResult(null);
     
@@ -134,14 +178,21 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
         } catch {}
       }
       
+      // Use AbortController with 10 minute timeout for large imports
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000); // 10 minutes
+      
       // Use native fetch to avoid axios default Content-Type header issues
       const response = await fetch('/api/chats/import', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`
         },
-        body: formData
+        body: formData,
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -163,7 +214,17 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
       setTimeout(() => setImportResult(null), 5000);
     } catch (err: any) {
       console.error('Import failed:', err);
-      alert(err.message || 'Failed to import chats');
+      let errorMessage = 'Failed to import chats';
+      
+      if (err.name === 'AbortError') {
+        errorMessage = 'Import timed out. The file may be too large or the server is busy. Try again or import a smaller file.';
+      } else if (err.message === 'Failed to fetch') {
+        errorMessage = 'Connection lost during import. The server may still be processing - check your chat list in a few minutes.';
+      } else if (err.message) {
+        errorMessage = err.message;
+      }
+      
+      alert(errorMessage);
     } finally {
       setIsImporting(false);
       // Reset file input
@@ -203,26 +264,84 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     setEditTitle('');
   };
   
-  const formatDate = (dateStr: string) => {
-    // Use the centralized formatter, but group by day for sidebar
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-    
-    if (days === 0) return 'Today';
-    if (days === 1) return 'Yesterday';
-    if (days < 7) return formatRelativeTime(dateStr);
-    return date.toLocaleDateString();
+  // Close sort dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (sortDropdownRef.current && !sortDropdownRef.current.contains(e.target as Node)) {
+        setShowSortDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+  
+  // Get source from chat's source field
+  const getSource = (chat: { source?: string }): string => {
+    switch (chat.source) {
+      case 'chatgpt': return 'ChatGPT';
+      case 'grok': return 'Grok';
+      case 'claude': return 'Claude';
+      default: return 'Native';
+    }
   };
   
-  // Group chats by date
-  const groupedChats = safeChats.reduce((groups, chat) => {
-    const date = formatDate(chat.updated_at);
-    if (!groups[date]) groups[date] = [];
-    groups[date].push(chat);
-    return groups;
-  }, {} as Record<string, Chat[]>);
+  // Sort and group chats - NO FRONTEND FILTERING
+  // Each accordion fetches its own data from backend via fetchGroupChats
+  // groupedChats just organizes what's already been fetched
+  const { groupedChats, groupOrder } = useMemo(() => {
+    const groups: Record<string, Chat[]> = {};
+    let order: string[] = [];
+    
+    if (chatSortBy === 'alphabetical') {
+      groups['All Chats'] = [...safeChats].sort((a, b) => a.title.localeCompare(b.title));
+      order = ['All Chats'];
+    } else if (chatSortBy === 'source') {
+      order = ['Native', 'ChatGPT', 'Grok', 'Claude'];
+      // Initialize empty arrays - data comes from fetchGroupChats
+      order.forEach(g => { groups[g] = []; });
+      // Place loaded chats by their source
+      safeChats.forEach(chat => {
+        const source = getSource(chat);
+        if (groups[source]) groups[source].push(chat);
+      });
+      // Sort within each group
+      order.forEach(g => {
+        groups[g].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+      });
+    } else {
+      // Date-based (modified or created)
+      order = ['Today', 'Last 7 Days', 'Last 30 Days', 'Older'];
+      // Initialize empty arrays - data comes from fetchGroupChats
+      order.forEach(g => { groups[g] = []; });
+      // Place loaded chats by their period (using _assignedPeriod tag from fetchGroupChats)
+      safeChats.forEach(chat => {
+        const period = (chat as Chat & { _assignedPeriod?: string })._assignedPeriod;
+        if (period && groups[period]) {
+          groups[period].push(chat);
+        }
+      });
+      // Sort within each group by the appropriate date field
+      const dateField = chatSortBy === 'created' ? 'created_at' : 'updated_at';
+      order.forEach(g => {
+        groups[g].sort((a, b) => new Date(b[dateField]).getTime() - new Date(a[dateField]).getTime());
+      });
+    }
+    
+    // Filter to only groups with chats OR with backend counts
+    const activeOrder = order.filter(g => 
+      (groups[g] && groups[g].length > 0) || 
+      (chatGroupCounts && chatGroupCounts[g] > 0)
+    );
+    
+    return { groupedChats: groups, groupOrder: activeOrder };
+  }, [safeChats, chatSortBy, chatGroupCounts]);
+  
+  const sortOptions = [
+    { value: 'modified' as const, label: 'Date Modified' },
+    { value: 'created' as const, label: 'Date Created' },
+    { value: 'alphabetical' as const, label: 'Alphabetical' },
+    { value: 'source' as const, label: 'Source' },
+  ];
 
   const isActive = (path: string) => location.pathname === path;
   
@@ -320,10 +439,45 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
         </div>
+        
+        {/* Sort dropdown */}
+        <div className="mt-2 relative" ref={sortDropdownRef}>
+          <button
+            onClick={() => setShowSortDropdown(!showSortDropdown)}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-sm hover:bg-[var(--color-surface)] transition-colors"
+          >
+            <span className="text-[var(--color-text-secondary)]">
+              {sortOptions.find(o => o.value === chatSortBy)?.label}
+            </span>
+            <svg className={`w-4 h-4 text-[var(--color-text-secondary)] transition-transform ${showSortDropdown ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {showSortDropdown && (
+            <div className="absolute z-10 w-full mt-1 py-1 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg shadow-lg">
+              {sortOptions.map(option => (
+                <button
+                  key={option.value}
+                  onClick={() => {
+                    setChatSortBy(option.value);
+                    setShowSortDropdown(false);
+                  }}
+                  className={`w-full px-3 py-2 text-left text-sm transition-colors ${
+                    chatSortBy === option.value
+                      ? 'bg-[var(--color-button)]/50 text-[var(--color-text)]'
+                      : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background)] hover:text-[var(--color-text)]'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
       
       {/* Chat list */}
-      <div ref={chatListRef} className="flex-1 overflow-y-auto py-2">
+      <div ref={chatListRef} className="flex-1 overflow-y-auto py-2 min-h-0">
         {isLoadingChats && chats.length === 0 ? (
           <div className="flex items-center justify-center py-8">
             <svg className="animate-spin h-6 w-6 text-[var(--color-text-secondary)]" viewBox="0 0 24 24">
@@ -343,14 +497,98 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
             )}
           </div>
         ) : (
-          Object.entries(groupedChats).map(([date, dateChats]) => (
-            <div key={date} className="mb-4">
-              <div className="px-4 py-1">
-                <span className="text-sm md:text-xs font-medium text-[var(--color-text-secondary)]">
-                  {date}
-                </span>
+          groupOrder.map((group) => {
+            const groupType = chatSortBy === 'source' ? 'source' : 'period';
+            const groupKey = `${groupType}:${group}`;
+            const totalInGroup = chatGroupCounts?.[group] ?? groupedChats[group]?.length ?? 0;
+            const loadedInGroup = groupedChats[group]?.length ?? 0;
+            const hasMoreInGroup = groupHasMore[groupKey] !== false && loadedInGroup < totalInGroup;
+            const isLoadingGroup = groupLoading[groupKey];
+            
+            return (
+            <div key={group} className="mb-2">
+              <div className="group/header w-full px-4 py-2 flex items-center justify-between hover:bg-zinc-700/20 rounded-lg transition-colors">
+                <button
+                  onClick={() => {
+                    const wasExpanded = expandedSections.has(group);
+                    
+                    setExpandedSections(prev => {
+                      const next = new Set(prev);
+                      if (next.has(group)) {
+                        next.delete(group);
+                      } else {
+                        next.add(group);
+                      }
+                      return next;
+                    });
+                    
+                    // When expanding, fetch from backend if we haven't loaded this group yet
+                    if (!wasExpanded && loadedInGroup === 0 && !isLoadingGroup) {
+                      const dateField = chatSortBy === 'created' ? 'created_at' : 'updated_at';
+                      fetchGroupChats(groupType, group, false, groupType === 'period' ? dateField : undefined);
+                    }
+                  }}
+                  className="flex items-center gap-2 flex-1"
+                >
+                  <svg 
+                    className={`w-3 h-3 text-[var(--color-text-secondary)] transition-transform ${expandedSections.has(group) ? 'rotate-90' : ''}`} 
+                    fill="none" 
+                    viewBox="0 0 24 24" 
+                    stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                  <span className="text-sm md:text-xs font-medium text-[var(--color-text-secondary)]">
+                    {group}
+                  </span>
+                  <span className="text-xs text-[var(--color-text-secondary)]/60">
+                    {totalInGroup}
+                  </span>
+                </button>
+                {/* Delete group button */}
+                {totalInGroup > 0 && (
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (confirm(`Delete all ${totalInGroup} chats in "${group}"?`)) {
+                        try {
+                          await deleteGroupChats(groupType, group);
+                        } catch {
+                          alert('Failed to delete chats');
+                        }
+                      }
+                    }}
+                    className="p-1 rounded hover:bg-red-500/10 text-[var(--color-text-secondary)]/40 hover:text-[var(--color-error)] opacity-0 group-hover/header:opacity-100 transition-opacity"
+                    title={`Delete all ${group} chats`}
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                )}
               </div>
-              {dateChats.map((chat) => (
+              {expandedSections.has(group) && (
+                <div 
+                  className="max-h-[400px] overflow-y-auto"
+                  onScroll={(e) => {
+                    const container = e.currentTarget;
+                    const { scrollTop, scrollHeight, clientHeight } = container;
+                    // Load more when scrolled near bottom
+                    if (scrollHeight - scrollTop - clientHeight < 100) {
+                      if (chatSortBy === 'alphabetical') {
+                        // Alphabetical uses fetchChats with pagination
+                        if (hasMoreChats && !isLoadingChats) {
+                          fetchChats(true, chatSearchQuery);
+                        }
+                      } else if (hasMoreInGroup && !isLoadingGroup) {
+                        // Source/period use fetchGroupChats
+                        const dateField = chatSortBy === 'created' ? 'created_at' : 'updated_at';
+                        fetchGroupChats(groupType, group, true, groupType === 'period' ? dateField : undefined);
+                      }
+                    }
+                  }}
+                >
+                  {(groupedChats[group] || []).map((chat) => (
                 <div
                   key={chat.id}
                   onClick={() => handleSelectChat(chat)}
@@ -414,9 +652,46 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
                     </span>
                   </div>
                 </div>
-              ))}
+                  ))}
+                  {/* Load more indicator for this group */}
+                  {(isLoadingGroup || (chatSortBy === 'alphabetical' && isLoadingChats && chats.length > 0)) && (
+                    <div className="flex items-center justify-center py-2">
+                      <svg className="animate-spin h-4 w-4 text-[var(--color-text-secondary)]" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                    </div>
+                  )}
+                  {/* Load more button for this group */}
+                  {chatSortBy === 'alphabetical' ? (
+                    // Alphabetical uses fetchChats
+                    hasMoreChats && !isLoadingChats && (
+                      <button
+                        onClick={() => fetchChats(true, chatSearchQuery)}
+                        className="w-full py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-zinc-700/20 rounded"
+                      >
+                        Load more
+                      </button>
+                    )
+                  ) : (
+                    // Source/period use fetchGroupChats
+                    hasMoreInGroup && !isLoadingGroup && (
+                      <button
+                        onClick={() => {
+                          const dateField = chatSortBy === 'created' ? 'created_at' : 'updated_at';
+                          fetchGroupChats(groupType, group, true, groupType === 'period' ? dateField : undefined);
+                        }}
+                        className="w-full py-2 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-zinc-700/20 rounded"
+                      >
+                        Load more ({totalInGroup - loadedInGroup} remaining)
+                      </button>
+                    )
+                  )}
+                </div>
+              )}
             </div>
-          ))
+          );
+          })
         )}
         
         {/* Loading more indicator */}

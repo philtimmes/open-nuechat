@@ -3,6 +3,7 @@ WebSocket endpoint for real-time features
 """
 import asyncio
 import uuid
+import re
 from datetime import datetime, timezone, timezone
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +11,7 @@ from sqlalchemy import select, update, text
 from sqlalchemy.orm import selectinload
 import json
 import logging
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from app.db.database import async_session_maker
 from app.services.auth import AuthService
@@ -37,6 +38,95 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter(tags=["WebSocket"])
+
+
+# YouTube URL patterns for detection
+YOUTUBE_URL_PATTERNS = [
+    r'https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]+)',
+    r'https?://youtu\.be/([a-zA-Z0-9_-]+)',
+    r'https?://(?:www\.)?youtube\.com/embed/([a-zA-Z0-9_-]+)',
+    r'https?://(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]+)',
+]
+
+
+def extract_youtube_urls(text: str) -> List[Tuple[str, str]]:
+    """Extract YouTube URLs and their video IDs from text.
+    
+    Returns list of tuples: (full_url, video_id)
+    """
+    results = []
+    seen_ids = set()
+    
+    for pattern in YOUTUBE_URL_PATTERNS:
+        for match in re.finditer(pattern, text):
+            video_id = match.group(1)
+            if video_id not in seen_ids:
+                seen_ids.add(video_id)
+                results.append((match.group(0), video_id))
+    
+    return results
+
+
+async def fetch_youtube_context(video_ids: List[str]) -> str:
+    """Fetch YouTube video subtitles and metadata for context.
+    
+    Returns formatted context string with video transcripts or metadata.
+    """
+    if not video_ids:
+        return ""
+    
+    context_parts = []
+    
+    for video_id in video_ids[:3]:  # Limit to 3 videos max
+        try:
+            # Use the tool registry's full video info extraction (includes title + subtitles)
+            video_info = await tool_registry._create_video_embed_with_subtitles(
+                'youtube', video_id, f"https://www.youtube.com/watch?v={video_id}"
+            )
+            
+            if video_info:
+                title = video_info.get("title", "Unknown")
+                channel = video_info.get("channel", "")
+                description = video_info.get("description", "")
+                
+                # Build header with available metadata
+                header_parts = [f"[YouTube Video: {video_id}]", f"Title: {title}"]
+                if channel:
+                    header_parts.append(f"Channel: {channel}")
+                if description:
+                    header_parts.append(f"Description: {description}")
+                header = "\n".join(header_parts)
+                
+                # Check for subtitles
+                if video_info.get("subtitles"):
+                    transcript = video_info["subtitles"].get("transcript", "")
+                    lang = video_info["subtitles"].get("language", "en")
+                    is_auto = video_info["subtitles"].get("is_auto_generated", False)
+                    auto_note = " (auto-generated)" if is_auto else ""
+                    
+                    # Truncate very long transcripts
+                    if len(transcript) > 15000:
+                        transcript = transcript[:15000] + "... [truncated]"
+                    
+                    context_parts.append(f"{header}\nSubtitles ({lang}{auto_note}):\n{transcript}\n")
+                    logger.info(f"[YOUTUBE] Fetched subtitles for {video_id}: {len(transcript)} chars")
+                else:
+                    # No subtitles, but we have metadata
+                    error = video_info.get("subtitles_error", "No subtitles available")
+                    context_parts.append(f"{header}\nNote: {error}\n")
+                    logger.info(f"[YOUTUBE] No subtitles for {video_id}, but got metadata: title='{title}'")
+            else:
+                context_parts.append(f"[YouTube Video: {video_id}]\nFailed to fetch video info.\n")
+                logger.warning(f"[YOUTUBE] Failed to get video info for {video_id}")
+                
+        except Exception as e:
+            logger.warning(f"[YOUTUBE] Error fetching video info for {video_id}: {e}")
+            context_parts.append(f"[YouTube Video: {video_id}]\nError: {str(e)}\n")
+    
+    if context_parts:
+        return "\n---\n".join(context_parts)
+    
+    return ""
 
 
 @router.websocket("/ws")
@@ -200,6 +290,9 @@ async def websocket_endpoint(
             elif msg_type == "client_message":
                 await handle_client_message(connection, user_id, payload)
             
+            elif msg_type == "mermaid_error":
+                await handle_mermaid_error(connection, streaming_handler, user_id, payload)
+            
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
                 await ws_manager.send_to_connection(connection, {
@@ -243,6 +336,29 @@ async def handle_chat_message(
     attachments = payload.get("attachments", [])
     parent_id = payload.get("parent_id")  # For conversation branching
     client_message_id = payload.get("message_id")  # Client-generated UUID for the user message
+    
+    # NC-0.8.0.7: Tool category to backend tool name mapping
+    # Frontend uses categories (web_search, file_ops, etc.)
+    # Backend has individual tools (fetch_webpage, view_file_lines, etc.)
+    TOOL_CATEGORY_MAP = {
+        "web_search": ["fetch_webpage", "fetch_urls"],
+        "code_exec": ["execute_python"],
+        "file_ops": ["view_file_lines", "search_in_file", "list_uploaded_files", "view_signature", "request_file"],
+        "kb_search": ["search_documents"],
+        "image_gen": ["generate_image"],  # NC-0.8.0.7: Image generation tool
+        # These categories affect RAG/behavior, not tool calls:
+        # "artifacts" - frontend-only
+        # "local_rag" - auto RAG injection
+        # "user_chats_kb" - chat history RAG (agent tools always available)
+        # "citations" - LLM prompt hint
+    }
+    
+    # Utility tools always available when tools enabled
+    # Includes agent memory tools for searching archived conversation history
+    UTILITY_TOOLS = [
+        "calculator", "get_current_time", "format_json", "analyze_text",
+        "agent_search", "agent_read",  # Agent Memory - always available
+    ]
     
     # Log attachment info
     if attachments:
@@ -300,8 +416,17 @@ async def handle_chat_message(
             })
             return
         
+        # NC-0.8.0.7: Check if image request filter is disabled (let LLM use tool instead)
+        from app.services.settings_service import SettingsService
+        disable_image_filter = await SettingsService.get_bool(db, "disable_image_request_filter", default=False)
+        
         # Check if this is an image generation request (with LLM confirmation)
-        is_image_request, image_prompt = await detect_image_request_async(content, db)
+        # Skip this check if the filter is disabled - let the LLM use image gen tool
+        is_image_request = False
+        image_prompt = ""
+        if not disable_image_filter:
+            is_image_request, image_prompt = await detect_image_request_async(content, db)
+        
         if is_image_request:
             logger.debug(f"Image generation request detected: {content[:100]}...")
             
@@ -342,6 +467,9 @@ async def handle_chat_message(
             user_message = Message(**img_msg_kwargs)
             db.add(user_message)
             await db.flush()
+            
+            # Update chat's updated_at - this is the user's temporal relation to the chat
+            chat.updated_at = datetime.now(timezone.utc)
             
             await ws_manager.send_to_connection(connection, {
                 "type": "message_saved",
@@ -543,6 +671,35 @@ async def handle_chat_message(
                 parent_id = None
                 assistant_parent_id = None
         
+        # ==== PROCESS LARGE FILE ATTACHMENTS (BEFORE saving message) ====
+        # Store large files as artifacts with truncated placeholders
+        attachment_manifest = None
+        if attachments and save_user_message:
+            try:
+                from app.services.attachment_processor import process_large_attachments
+                from app.services.settings_service import SettingsService
+                
+                model_context = int(await SettingsService.get(db, "model_context_size") or "128000")
+                
+                # Process attachments - large files get stored as artifacts
+                # The returned 'attachments' will have content truncated for large files
+                attachments, attachment_manifest, was_processed = await process_large_attachments(
+                    db=db,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    attachments=attachments,
+                    model_context_size=model_context,
+                )
+                
+                if was_processed:
+                    logger.info(f"[ATTACH_PROC_EARLY] Processed large attachments before save")
+                    await db.commit()  # Commit the stored files
+                    
+            except Exception as e:
+                logger.error(f"[ATTACH_PROC_EARLY] Failed: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
         # Create user message only if save_user_message is True
         logger.info(f"[SAVE_USER_MSG_CHECK] save_user_message={save_user_message}, chat_id={chat_id}, content_len={len(content)}")
         if save_user_message:
@@ -563,6 +720,9 @@ async def handle_chat_message(
             db.add(user_message)
             await db.flush()
             logger.info(f"[USER_MSG_SAVED] id={user_message.id}, parent_id={parent_id}, content_len={len(content) if content else 0}, content_preview='{content[:50] if content else 'NONE'}...'")
+            
+            # Update chat's updated_at - this is the user's temporal relation to the chat
+            chat.updated_at = datetime.now(timezone.utc)
             
             # IMPORTANT: Commit user message immediately to ensure it's not lost
             # if filter chain processing fails or times out
@@ -599,14 +759,19 @@ async def handle_chat_message(
         # ==== RAG SEARCHES ====
         # Track if any RAG source had results (for filter chain skip logic)
         rag_had_results = False
+        global_kb_had_results = False  # NC-0.8.0.7: Track Global KB separately
         import time
+        
+        # NC-0.8.0.7: Check if pre-emptive RAG is enabled (default: True for backward compatibility)
+        from app.services.settings_service import SettingsService
+        preemptive_rag_enabled = await SettingsService.get_bool(db, "enable_preemptive_rag", default=True)
         
         # Skip RAG only for actual tool result continuations (system-generated responses)
         # NOT for regenerations - those are real user queries that need knowledge context
         # Tool results are identified by their content prefix, not by save_user_message flag
         is_tool_result = content.startswith("[SYSTEM TOOL RESULT") or content.startswith("[SYSTEM NOTIFICATION")
         
-        # 1. Global Knowledge Base search (automatic, independent of user RAG settings)
+        # 1. Global Knowledge Base search (ALWAYS runs, independent of preemptive_rag setting)
         # Skip for tool results to avoid unnecessary searches and potential GPU issues
         if is_tool_result:
             logger.debug("[GLOBAL_RAG_DEBUG] Skipping RAG search for tool result continuation")
@@ -627,7 +792,8 @@ async def handle_chat_message(
                     logger.info(f"[GLOBAL_RAG_DEBUG] Search completed in {global_kb_search_time:.3f}s - Found {len(global_results)} results from stores: {global_store_names}")
                 
                     if global_results:
-                        rag_had_results = True
+                        global_kb_had_results = True  # NC-0.8.0.7: Track separately
+                        # NOTE: Don't set rag_had_results here - Global KB shouldn't block filter chains
                         # Format global context
                         global_context_parts = []
                         for i, result in enumerate(global_results):
@@ -671,8 +837,9 @@ When answering questions related to the above topics, you MUST use this authorit
             except Exception as e:
                 logger.warning(f"[GLOBAL_RAG_DEBUG] Failed to search global stores: {e}")
         
-        # 2. User's Chat History Knowledge Base search (also skip for tool results)
-        if not is_tool_result:
+        # 2. User's Chat History Knowledge Base search (skip for tool results OR if preemptive RAG disabled)
+        # NC-0.8.0.7: Only run if preemptive_rag_enabled
+        if not is_tool_result and preemptive_rag_enabled:
             try:
                 chat_kb_enabled = getattr(user, 'all_chats_knowledge_enabled', False)
                 chat_kb_store = getattr(user, 'chat_knowledge_store_id', None)
@@ -711,9 +878,12 @@ The following is relevant information from your previous conversations:
                         logger.info(f"[CHAT_KB_DEBUG] Found chat history context in {chat_kb_time:.3f}s")
             except Exception as e:
                 logger.warning(f"[CHAT_KB_DEBUG] Failed to search chat history KB: {e}")
+        elif not preemptive_rag_enabled and not is_tool_result:
+            logger.debug("[CHAT_KB_DEBUG] Skipping chat history KB (preemptive RAG disabled)")
         
-        # 3. Assistant KB and User RAG search (also skip for tool results)
-        if not is_tool_result:
+        # 3. Assistant KB and User RAG search (skip for tool results OR if preemptive RAG disabled)
+        # NC-0.8.0.7: Only run if preemptive_rag_enabled
+        if not is_tool_result and preemptive_rag_enabled:
             assistant_result = await db.execute(
                 select(AssistantConversation)
                 .where(AssistantConversation.chat_id == chat_id)
@@ -780,12 +950,59 @@ The following is relevant information from your previous conversations:
                             rag_prompt = await get_system_setting(db, "rag_context_prompt")
                             rag_addendum = f"{rag_prompt}\n\n{context}"
                         system_prompt = f"{system_prompt}\n\n{rag_addendum}"
+        elif not preemptive_rag_enabled and not is_tool_result:
+            logger.debug("[RAG_DEBUG] Skipping assistant/user RAG (preemptive RAG disabled)")
         
-        logger.info(f"[RAG_SUMMARY] rag_had_results={rag_had_results}, is_tool_result={is_tool_result}")
+        logger.info(f"[RAG_SUMMARY] rag_had_results={rag_had_results}, global_kb_had_results={global_kb_had_results}, is_tool_result={is_tool_result}, preemptive_rag={preemptive_rag_enabled}")
+        
+        # ==== YOUTUBE URL PROCESSING ====
+        # Detect YouTube URLs in user message AND recent conversation history
+        youtube_context = ""
+        
+        # Check current message
+        youtube_urls = extract_youtube_urls(content)
+        
+        # Also check recent messages in conversation history for YouTube URLs
+        # This handles "what is this video about?" follow-up questions
+        if not youtube_urls:
+            try:
+                # Fetch recent messages from this chat
+                recent_msgs_result = await db.execute(
+                    select(Message.content)
+                    .where(Message.chat_id == chat_id)
+                    .order_by(Message.created_at.desc())
+                    .limit(10)
+                )
+                recent_msgs = recent_msgs_result.scalars().all()
+                
+                for msg_content in recent_msgs:
+                    if msg_content:
+                        found_urls = extract_youtube_urls(msg_content)
+                        if found_urls:
+                            youtube_urls = found_urls
+                            logger.info(f"[YOUTUBE] Found {len(found_urls)} YouTube URLs in conversation history")
+                            break
+            except Exception as e:
+                logger.warning(f"[YOUTUBE] Error checking history for URLs: {e}")
+        
+        if youtube_urls:
+            logger.info(f"[YOUTUBE] Processing {len(youtube_urls)} YouTube URLs")
+            video_ids = [vid for _, vid in youtube_urls]
+            youtube_context = await fetch_youtube_context(video_ids)
+            if youtube_context:
+                logger.info(f"[YOUTUBE] Added {len(youtube_context)} chars of context from video subtitles")
+                # Add YouTube context to system prompt
+                youtube_addendum = (
+                    "\n\n[VIDEO CONTEXT]\n"
+                    "The user has shared YouTube video(s). Here are the transcripts/subtitles for reference:\n\n"
+                    f"{youtube_context}"
+                )
+                system_prompt = f"{system_prompt}{youtube_addendum}"
         
         # ==== FILTER CHAIN EXECUTION ====
         # Run enabled filter chains on the user message before LLM processing
-        # Chains with skip_if_rag_hit=True will be skipped if RAG found results
+        # NC-0.8.0.7: When preemptive RAG is disabled, skip_if_rag_hit logic doesn't apply
+        # (rag_had_results will only be True from Global KB, and we want chains to run anyway)
         from app.filters.manager import get_chain_manager
         from app.filters.executor import ChainExecutor
         
@@ -799,7 +1016,8 @@ The following is relevant information from your previous conversations:
         logger.info(f"[CONTENT_TRACE] Before filter chains: content='{content[:50]}...' len={len(content)}")
         
         if enabled_chains:
-            # Filter out chains that should be skipped due to RAG hit
+            # NC-0.8.0.7: skip_if_rag_hit only applies when Chat History or Assistant KB found results
+            # Global KB results never trigger skip - filter chains should always have a chance to run
             if rag_had_results:
                 chains_to_run = [c for c in enabled_chains if not c.get("skip_if_rag_hit", True)]
                 skipped_count = len(enabled_chains) - len(chains_to_run)
@@ -1055,34 +1273,11 @@ The following is relevant information from your previous conversations:
             except Exception as e:
                 logger.warning(f"Failed to inject code summary: {e}")
         
-        # ==== PROCESS LARGE FILE ATTACHMENTS ====
-        # If attachments are too large for context, store as searchable artifacts
-        if attachments:
-            try:
-                from app.services.attachment_processor import process_large_attachments
-                from app.services.settings_service import SettingsService
-                
-                # Get model context size
-                model_context = int(await SettingsService.get(db, "model_context_size") or "128000")
-                
-                # Process attachments - large files get stored as artifacts
-                attachments, attachment_manifest, was_processed = await process_large_attachments(
-                    db=db,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    attachments=attachments,
-                    model_context_size=model_context,
-                )
-                
-                if was_processed and attachment_manifest:
-                    system_prompt = f"{system_prompt}\n\n{attachment_manifest}"
-                    logger.info(f"[ATTACH_PROC] Processed large attachments, added manifest ({len(attachment_manifest)} chars)")
-                    await db.commit()  # Commit the stored files
-                    
-            except Exception as e:
-                logger.error(f"[ATTACH_PROC] Failed to process attachments: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
+        # ==== INJECT ATTACHMENT MANIFEST ====
+        # Manifest was generated earlier (before message save) if files were processed
+        if attachment_manifest:
+            system_prompt = f"{system_prompt}\n\n{attachment_manifest}"
+            logger.info(f"[ATTACH_PROC] Added manifest to system prompt ({len(attachment_manifest)} chars)")
         
         # ==== VISION ROUTING ====
         # If attachments contain images and primary model isn't multimodal,
@@ -1114,12 +1309,34 @@ The following is relevant information from your previous conversations:
         # We don't want to persist this change, just use it for the LLM request
         chat.system_prompt = system_prompt
         
+        # NC-0.8.0.7: Get chat's active tool categories before expunging
+        active_tool_categories = chat.active_tools or []
+        
         # Expunge chat from session so SQLAlchemy doesn't track/flush our temporary change
         # We'll use direct SQL for any actual updates later
         db.expunge(chat)
         
-        # Get built-in tools
-        tools = tool_registry.get_tool_definitions() if enable_tools else []
+        # NC-0.8.0.7: Filter tools based on chat's active_tools setting
+        tools = []
+        if enable_tools:
+            # Get all built-in tools
+            all_tools = tool_registry.get_tool_definitions()
+            
+            # Build list of allowed tool names based on active categories
+            allowed_tool_names = set(UTILITY_TOOLS)  # Always include utility tools
+            
+            for category in active_tool_categories:
+                if category in TOOL_CATEGORY_MAP:
+                    allowed_tool_names.update(TOOL_CATEGORY_MAP[category])
+            
+            # Filter tools to only those in allowed list
+            # If no categories specified, allow all tools (backward compatibility)
+            if active_tool_categories:
+                tools = [t for t in all_tools if t["name"] in allowed_tool_names]
+                logger.debug(f"Active tool categories: {active_tool_categories}, allowed tools: {[t['name'] for t in tools]}")
+            else:
+                tools = all_tools
+                logger.debug(f"No tool categories set, allowing all {len(tools)} tools")
         
         # Load MCP/OpenAPI tools from database
         mcp_tool_map = {}  # Maps tool name to (tool_db_record, operation_name)
@@ -1157,11 +1374,17 @@ The following is relevant information from your previous conversations:
                     message_id=streaming_handler._current_message_id,
                 )
             else:
-                # Built-in tool
+                # Built-in tool - NC-0.8.0.7: Include user_id and message_id in context
                 result = await tool_registry.execute(
                     tool_name,
                     arguments,
-                    {"db": db, "user": user, "chat_id": chat_id},
+                    {
+                        "db": db, 
+                        "user": user, 
+                        "user_id": user.id,
+                        "chat_id": chat_id,
+                        "message_id": streaming_handler._current_message_id,
+                    },
                 )
             
             logger.debug(f"Tool executed, result length: {len(str(result))}")
@@ -1417,17 +1640,38 @@ async def generate_chat_title(first_message: str, db: AsyncSession) -> str:
     from app.api.routes.admin import get_system_setting
     from app.services.llm import LLMService
     
+    # Extract meaningful text from first_message if it looks like JSON/search results
+    content_for_title = first_message
+    if first_message.startswith('{') or first_message.startswith('['):
+        # It's JSON - try to extract the original query or meaningful text
+        try:
+            import json
+            data = json.loads(first_message)
+            if isinstance(data, dict):
+                # Look for query or original message
+                content_for_title = data.get('query', data.get('message', data.get('content', '')))
+                if not content_for_title and 'results' in data:
+                    # Try to get title from first result
+                    results = data.get('results', [])
+                    if results and isinstance(results[0], dict):
+                        content_for_title = results[0].get('title', '')
+        except:
+            pass
+    
+    # If we still don't have good content, use a generic fallback
+    if not content_for_title or content_for_title.startswith('{'):
+        return "New Chat"
+    
     try:
         # Get title prompt from admin settings
         title_prompt = await get_system_setting(db, "title_generation_prompt")
         
-        # Create a FRESH LLM instance for title generation
-        # Don't reuse the chat's LLM which may have custom assistant config
-        title_llm = LLMService()
+        # Create LLM instance from database settings
+        title_llm = await LLMService.from_database(db)
         
         # Use simple_completion with the clean instance
         title = await title_llm.simple_completion(
-            prompt=first_message[:500],
+            prompt=content_for_title[:500],
             system_prompt=title_prompt,
             max_tokens=30,
         )
@@ -1437,12 +1681,12 @@ async def generate_chat_title(first_message: str, db: AsyncSession) -> str:
         title = title[:60]
         
         if len(title) < 3:
-            return first_message[:50] + ("..." if len(first_message) > 50 else "")
+            return content_for_title[:50] + ("..." if len(content_for_title) > 50 else "")
             
         return title
     except Exception as e:
         logger.warning(f"Title generation failed: {e}")
-        return first_message[:50] + ("..." if len(first_message) > 50 else "")
+        return content_for_title[:50] + ("..." if len(content_for_title) > 50 else "")
 
 
 async def handle_client_message(
@@ -1513,3 +1757,51 @@ async def handle_client_message(
             "type": "message_sent",
             "payload": {"message_id": msg.id},
         })
+
+
+async def handle_mermaid_error(
+    connection,
+    streaming_handler: StreamingHandler,
+    user_id: str,
+    payload: dict,
+):
+    """Handle mermaid rendering error - send error back to LLM for auto-fix"""
+    
+    chat_id = payload.get("chat_id")
+    message_id = payload.get("message_id")
+    error = payload.get("error", "Unknown mermaid error")
+    code = payload.get("code", "")
+    
+    if not chat_id or not code:
+        logger.warning(f"Mermaid error missing required fields: chat_id={chat_id}, code_len={len(code)}")
+        return
+    
+    logger.info(f"[MERMAID_ERROR] chat={chat_id}, error={error[:100]}")
+    
+    # Create a system message to inform the LLM about the error
+    error_content = f"""[MERMAID SYNTAX ERROR]
+The mermaid diagram you generated failed to render with the following error:
+
+Error: {error}
+
+Problematic code:
+```mermaid
+{code}
+```
+
+Please fix the mermaid syntax error and regenerate the diagram."""
+    
+    # Send this as a follow-up message to the LLM
+    await handle_chat_message(
+        connection,
+        streaming_handler,
+        user_id,
+        {
+            "chat_id": chat_id,
+            "content": error_content,
+            "parent_id": message_id,  # Chain to the problematic message
+            "enable_tools": False,  # Don't need tools for fixing mermaid
+            "enable_rag": False,
+        },
+        save_user_message=True,  # Save the error report as a user message
+    )

@@ -21,12 +21,16 @@ import type { Message, StreamChunk, WSMessage, ZipFileResponse, Artifact } from 
 // - <request_file path=file.cpp/>  (no quotes)
 // - <request_file path=file.cpp>   (no self-close)
 // - <request_file=path="file.cpp"/> (equals variant)
+// - <request_file path="file.cpp" offset="1234"/>  (with offset)
 const FILE_REQUEST_PATTERNS = [
-  /<request_file\s+path=["']([^"']+)["']\s*\/?>/gi,      // path="..." or path='...'
-  /<request_file\s+path=([^\s>\/]+)\s*\/?>/gi,           // path=value (no quotes)
-  /<request_file=path=["']([^"']+)["']\s*\/?>/gi,        // =path="..." variant
-  /<request_file=path=([^\s>\/]+)\s*\/?>/gi,             // =path=value variant
+  /<request_file\s+path=["']([^"']+)["'](?:\s+offset=["']?(\d+)["']?)?\s*\/?>/gi,      // path="..." offset="..."
+  /<request_file\s+path=([^\s>\/]+)(?:\s+offset=["']?(\d+)["']?)?\s*\/?>/gi,           // path=value offset=value
+  /<request_file=path=["']([^"']+)["'](?:\s+offset=["']?(\d+)["']?)?\s*\/?>/gi,        // =path="..." variant
+  /<request_file=path=([^\s>\/]+)(?:\s+offset=["']?(\d+)["']?)?\s*\/?>/gi,             // =path=value variant
 ];
+
+// NC-0.8.0.6: Maximum chunk size for file content (20KB)
+const FILE_CHUNK_SIZE = 20000;
 
 // Regex patterns for search/replace operations
 // Format 1: <replace_line path="file" find="search" replace="replacement">
@@ -66,7 +70,7 @@ const SEARCH_REPLACE_REGEX = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s
 const STREAM_FIND_LINE_PATTERN = /<find_line\s+path=["']([^"']+)["']\s+contains=["']([^"']+)["']\s*\/?>/i;
 const STREAM_FIND_PATTERN_WITH_PATH = /<find\s+path=["']([^"']+)["']\s+search=["']([^"']+)["']\s*\/?>/i;
 const STREAM_FIND_PATTERN_NO_PATH = /<find\s+search=["']([^"']+)["']\s*\/?>/i;
-const STREAM_REQUEST_FILE_PATTERN = /<request_file\s+path=["']([^"']+)["']\s*\/?>/i;
+const STREAM_REQUEST_FILE_PATTERN = /<request_file\s+path=["']([^"']+)["'](?:\s+offset=["']?(\d+)["']?)?\s*\/?>/i;
 
 // Multi-line tool tag - match on closing </search_replace>
 const STREAM_SEARCH_REPLACE_PATTERN = /<search_replace\s+path=["']?([^"'>\s]+)["']?\s*>\s*\n?=====\s*SEARCH\s*\n([\s\S]*?)\n=====\s*[Rr]eplace\s*\n([\s\S]*?)<\/search_replace>/i;
@@ -118,8 +122,14 @@ interface SearchReplaceOp {
 }
 
 // Extract all file request paths from content
-function extractFileRequests(content: string): string[] {
-  const paths: string[] = [];
+// NC-0.8.0.6: File request with optional offset
+interface FileRequest {
+  path: string;
+  offset: number;
+}
+
+function extractFileRequests(content: string): FileRequest[] {
+  const requests: FileRequest[] = [];
   const seen = new Set<string>();
   
   for (const regex of FILE_REQUEST_PATTERNS) {
@@ -127,14 +137,16 @@ function extractFileRequests(content: string): string[] {
     regex.lastIndex = 0; // Reset before each use
     while ((match = regex.exec(content)) !== null) {
       const path = match[1].trim();
-      if (path && !seen.has(path)) {
-        seen.add(path);
-        paths.push(path);
+      const offset = match[2] ? parseInt(match[2], 10) : 0;
+      const key = `${path}:${offset}`;
+      if (path && !seen.has(key)) {
+        seen.add(key);
+        requests.push({ path, offset });
       }
     }
   }
   
-  return paths;
+  return requests;
 }
 
 // Extract all replace operations from content
@@ -515,13 +527,18 @@ function executeSearchReplaceOperations(
     const artifact = findArtifactByPath(artifacts, op.path);
     
     if (!artifact) {
-      results.push(`[SEARCH_REPLACE_ERROR: File not found: ${op.path}]`);
+      // List available files in error message
+      const availableFiles = artifacts.map(a => a.filename || a.title).filter(Boolean);
+      const fileList = availableFiles.length > 0 
+        ? `\nAvailable files: ${availableFiles.join(', ')}`
+        : '\nNo files currently available in artifacts.';
+      results.push(`[SEARCH_REPLACE_ERROR: File not found: ${op.path}]${fileList}`);
       continue;
     }
     
     const artName = artifact.filename || artifact.title || op.path;
     const searchText = op.search.trim();
-    const replaceText = op.replace.trimEnd(); // Preserve leading whitespace in replacement
+    const replaceText = op.replace.trimEnd();
     
     // Try exact match first
     if (artifact.content.includes(searchText)) {
@@ -549,7 +566,6 @@ function executeSearchReplaceOperations(
       }
       
       if (matches) {
-        // Found it - replace preserving surrounding content
         const before = contentLines.slice(0, i);
         const after = contentLines.slice(i + searchLines.length);
         const replaceLines = replaceText.split('\n');
@@ -562,7 +578,6 @@ function executeSearchReplaceOperations(
     }
     
     if (!found) {
-      // Provide helpful error with context
       const searchPreview = searchText.length > 100 ? searchText.substring(0, 100) + '...' : searchText;
       results.push(`[SEARCH_REPLACE_ERROR: Search text not found in ${artName}. Search was:\n${searchPreview}]`);
     }
@@ -660,6 +675,7 @@ interface WebSocketContextValue {
   sendClientMessage: (chatId: string, content: string) => void;
   regenerateMessage: (chatId: string, content: string, parentId: string) => void;
   stopGeneration: (chatId: string) => void;
+  reportMermaidError: (chatId: string, error: string, code: string, messageId: string) => void;
 }
 
 const WebSocketContext = createContext<WebSocketContextValue | null>(null);
@@ -734,8 +750,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   
   // Handle file requests detected in LLM responses - fetch files and auto-continue
   // Checks artifacts first (files LLM created), then falls back to uploaded zip files
-  const handleFileRequests = useCallback(async (chatId: string, paths: string[], parentMessageId: string) => {
-    console.log(`[handleFileRequests] Fetching ${paths.length} files for chat ${chatId}, parent=${parentMessageId}`);
+  // NC-0.8.0.6: Now supports offset for chunked file retrieval
+  const handleFileRequests = useCallback(async (chatId: string, requests: FileRequest[], parentMessageId: string) => {
+    console.log(`[handleFileRequests] Fetching ${requests.length} files for chat ${chatId}, parent=${parentMessageId}`);
     
     // Log current state before making changes
     const { artifacts: currentArtifacts, messages: currentMessages } = useChatStore.getState();
@@ -762,13 +779,50 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       });
     };
     
-    for (const path of paths) {
+    // Helper to chunk content from offset
+    const chunkContent = (content: string, offset: number, path: string): string => {
+      const totalSize = content.length;
+      
+      if (offset >= totalSize) {
+        return `[ERROR: Offset ${offset} exceeds file size ${totalSize}]`;
+      }
+      
+      // Extract chunk
+      let endOffset = Math.min(offset + FILE_CHUNK_SIZE, totalSize);
+      let chunk = content.slice(offset, endOffset);
+      
+      // Try to break at line boundary if not at end
+      if (endOffset < totalSize) {
+        const lastNewline = chunk.lastIndexOf('\n');
+        if (lastNewline > FILE_CHUNK_SIZE / 2) {
+          chunk = chunk.slice(0, lastNewline + 1);
+          endOffset = offset + chunk.length;
+        }
+      }
+      
+      // Build result with metadata
+      let result = `=== FILE: ${path} (offset ${offset}, showing ${chunk.length} of ${totalSize} chars) ===\n${chunk}`;
+      
+      // Add continuation hint if more content available
+      if (endOffset < totalSize) {
+        const remaining = totalSize - endOffset;
+        result += `\n\n[... ${remaining.toLocaleString()} more chars available ...]\n`;
+        result += `[Use <request_file path="${path}" offset="${endOffset}"/> to continue]`;
+      } else {
+        result += `\n[END OF FILE]`;
+      }
+      
+      result += `\n=== END FILE ===`;
+      return result;
+    };
+    
+    for (const { path, offset } of requests) {
       // First check if this file exists in artifacts (files LLM already created)
       const artifact = findArtifact(path);
       
       if (artifact) {
-        console.log(`[handleFileRequests] Found in artifacts: ${path} -> ${artifact.filename || artifact.title}`);
-        const formatted = `=== FILE: ${artifact.filename || artifact.title} ===\n${artifact.content}\n=== END FILE ===`;
+        console.log(`[handleFileRequests] Found in artifacts: ${path} -> ${artifact.filename || artifact.title}, offset=${offset}`);
+        const formatted = chunkContent(artifact.content || '', offset, artifact.filename || artifact.title || path);
         fileContents.push(formatted);
         fetchedPaths.push(path);
         continue;
@@ -776,10 +830,12 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       
       // Not in artifacts, try to fetch from uploaded zip
       try {
-        const response = await chatApi.getZipFile(chatId, path);
+        // NC-0.8.0.6: Pass offset to backend for efficient chunked retrieval
+        const response = await chatApi.getZipFile(chatId, path, offset);
         const fileData = response.data as ZipFileResponse;
         
-        console.log(`[handleFileRequests] Fetched from zip: ${path} (${fileData.content.length} chars)`);
+        console.log(`[handleFileRequests] Fetched from zip: ${path} (${fileData.content.length} chars), offset=${offset}, more=${fileData.more_available}`);
+        // Backend now returns pre-chunked content with continuation hints
         fileContents.push(fileData.formatted);
         fetchedPaths.push(path);
         
@@ -1719,30 +1775,54 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           processedToolTagsRef.current.add(tagKey);
           console.log('[TOOL_INTERRUPT] Detected request_file tag, executing immediately');
           
-          wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
+          // NC-0.8.0.6: Don't stop generation, just pause buffer while we fetch
+          // wsRef.current!.send(JSON.stringify({ type: 'stop_generation', payload: { chat_id: currentChat.id } }));
           streamingBufferRef.current?.pause();
           
           const requestPath = requestFileMatch[1];
+          const requestOffset = requestFileMatch[2] ? parseInt(requestFileMatch[2], 10) : 0;
           const allArtifacts = getAllArtifacts();
           
-          // Extensive debugging
-          console.log(`[REQUEST_FILE] ==========================================`);
-          console.log(`[REQUEST_FILE] Looking for: "${requestPath}"`);
+          console.log(`[REQUEST_FILE] Looking for: "${requestPath}" at offset ${requestOffset}`);
           console.log(`[REQUEST_FILE] Total artifacts: ${allArtifacts.length}`);
-          const { artifacts: debugArts, uploadedArtifacts: debugUploaded } = useChatStore.getState();
-          console.log(`[REQUEST_FILE] Store state: artifacts=${debugArts.length}, uploadedArtifacts=${debugUploaded.length}`);
-          allArtifacts.forEach((a, i) => {
-            console.log(`[REQUEST_FILE] [${i}] filename="${a.filename}" title="${a.title}" source="${a.source || 'unknown'}"`);
-          });
-          console.log(`[REQUEST_FILE] ==========================================`);
           
           // Use shared helper for consistent path matching
           const artifact = findArtifactByPath(allArtifacts, requestPath);
           
           if (artifact) {
             console.log(`[REQUEST_FILE] ✓ Found: ${artifact.filename || artifact.title}`);
-            const content = `=== FILE: ${artifact.filename || artifact.title} ===\n${artifact.content}\n=== END FILE ===`;
-            sendToolResult('request_file', content);
+            const fullContent = artifact.content || '';
+            const totalSize = fullContent.length;
+            
+            // NC-0.8.0.6: Apply chunking with offset
+            if (requestOffset >= totalSize) {
+              sendToolResult('request_file', `[ERROR: Offset ${requestOffset} exceeds file size ${totalSize}]`);
+            } else {
+              let endOffset = Math.min(requestOffset + FILE_CHUNK_SIZE, totalSize);
+              let chunk = fullContent.slice(requestOffset, endOffset);
+              
+              // Try to break at line boundary
+              if (endOffset < totalSize) {
+                const lastNewline = chunk.lastIndexOf('\n');
+                if (lastNewline > FILE_CHUNK_SIZE / 2) {
+                  chunk = chunk.slice(0, lastNewline + 1);
+                  endOffset = requestOffset + chunk.length;
+                }
+              }
+              
+              let content = `=== FILE: ${artifact.filename || artifact.title} (offset ${requestOffset}, showing ${chunk.length} of ${totalSize} chars) ===\n${chunk}`;
+              
+              if (endOffset < totalSize) {
+                const remaining = totalSize - endOffset;
+                content += `\n\n[... ${remaining.toLocaleString()} more chars available ...]\n`;
+                content += `[Use <request_file path="${requestPath}" offset="${endOffset}"/> to continue]`;
+              } else {
+                content += `\n[END OF FILE]`;
+              }
+              content += `\n=== END FILE ===`;
+              
+              sendToolResult('request_file', content);
+            }
           } else {
             // List available files to help LLM
             const availableFiles = allArtifacts.map(a => a.filename || a.title).filter(Boolean);
@@ -1774,19 +1854,27 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             replace: searchReplaceMatch[3],
           }];
           
-          const allArtifacts = getAllArtifacts();
-          const { updateArtifact } = useChatStore.getState();
-          const { updatedArtifacts, results, modifiedFiles } = executeSearchReplaceOperations(allArtifacts, ops);
-          
-          // Update modified artifacts in store
-          for (const art of updatedArtifacts) {
-            const key = art.filename || art.title || '';
-            if (key && modifiedFiles.includes(key)) {
-              updateArtifact(key, art);
+          try {
+            const allArtifacts = getAllArtifacts();
+            const { updateArtifact } = useChatStore.getState();
+            const { updatedArtifacts, results, modifiedFiles } = executeSearchReplaceOperations(allArtifacts, ops);
+            
+            console.log('[TOOL_INTERRUPT] search_replace results:', results);
+            console.log('[TOOL_INTERRUPT] search_replace modifiedFiles:', modifiedFiles);
+            
+            // Update modified artifacts in store
+            for (const art of updatedArtifacts) {
+              const key = art.filename || art.title || '';
+              if (key && modifiedFiles.includes(key)) {
+                updateArtifact(key, art);
+              }
             }
+            
+            sendToolResult('search_replace', results.join('\n\n'));
+          } catch (err) {
+            console.error('[TOOL_INTERRUPT] search_replace error:', err);
+            sendToolResult('search_replace', `[SEARCH_REPLACE_ERROR: ${err}]`);
           }
-          
-          sendToolResult('search_replace', results.join('\n\n'));
           return;
         }
       }
@@ -1993,6 +2081,22 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   
+  // Report mermaid rendering errors back to the LLM for auto-fix
+  const reportMermaidError = useCallback((chatId: string, error: string, code: string, messageId: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log('Reporting mermaid error for auto-fix:', error);
+      wsRef.current.send(JSON.stringify({
+        type: 'mermaid_error',
+        payload: {
+          chat_id: chatId,
+          message_id: messageId,
+          error,
+          code,
+        },
+      }));
+    }
+  }, []);
+  
   const stopGeneration = useCallback((chatId: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       console.log('Stopping generation for chat:', chatId);
@@ -2083,6 +2187,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         sendClientMessage,
         regenerateMessage,
         stopGeneration,
+        reportMermaidError,
       }}
     >
       {children}

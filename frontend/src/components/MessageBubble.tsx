@@ -1,4 +1,4 @@
-import React, { useState, memo, useRef } from 'react';
+import React, { useState, memo, useRef, useEffect, useCallback } from 'react';
 import type { Message, Artifact, GeneratedImage, UserHint } from '../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -6,6 +6,274 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import GeneratedImageCard from './GeneratedImageCard';
 import TextSelectionBubble from './TextSelectionBubble';
+import mermaid from 'mermaid';
+import { useBrandingStore } from '../stores/brandingStore';
+
+// Initialize mermaid
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'dark',
+  securityLevel: 'loose',
+});
+
+// Video embed helper functions
+interface VideoInfo {
+  platform: 'youtube' | 'rumble';
+  videoId: string;
+  url: string;
+}
+
+function extractVideoInfo(url: string): VideoInfo | null {
+  // YouTube patterns
+  const youtubePatterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]+)/,
+  ];
+  
+  for (const pattern of youtubePatterns) {
+    const match = url.match(pattern);
+    if (match) {
+      return { platform: 'youtube', videoId: match[1], url };
+    }
+  }
+  
+  // Rumble patterns
+  const rumblePattern = /rumble\.com\/(?:embed\/)?v([a-zA-Z0-9]+)/;
+  const rumbleMatch = url.match(rumblePattern);
+  if (rumbleMatch) {
+    return { platform: 'rumble', videoId: rumbleMatch[1], url };
+  }
+  
+  return null;
+}
+
+// Video Embed Component
+const VideoEmbed = memo(({ url, className }: { url: string; className?: string }) => {
+  const videoInfo = extractVideoInfo(url);
+  
+  if (!videoInfo) {
+    // Not a video URL, render as regular link
+    return (
+      <a href={url} target="_blank" rel="noopener noreferrer" className="text-[var(--color-primary)] hover:underline">
+        {url}
+      </a>
+    );
+  }
+  
+  const { platform, videoId } = videoInfo;
+  
+  if (platform === 'youtube') {
+    return (
+      <div className={`video-embed my-4 ${className || ''}`}>
+        <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
+          <iframe
+            className="absolute top-0 left-0 w-full h-full rounded-lg"
+            src={`https://www.youtube.com/embed/${videoId}`}
+            title="YouTube video"
+            frameBorder="0"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+          />
+        </div>
+      </div>
+    );
+  }
+  
+  if (platform === 'rumble') {
+    return (
+      <div className={`video-embed my-4 ${className || ''}`}>
+        <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
+          <iframe
+            className="absolute top-0 left-0 w-full h-full rounded-lg"
+            src={`https://rumble.com/embed/v${videoId}/`}
+            title="Rumble video"
+            frameBorder="0"
+            allowFullScreen
+          />
+        </div>
+      </div>
+    );
+  }
+  
+  return null;
+});
+
+// Mermaid diagram renderer component
+const MermaidDiagram = memo(({ code, id, onError }: { code: string; id: string; onError?: (error: string, code: string) => void }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [svg, setSvg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
+  const [copied, setCopied] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const errorReportedRef = useRef(false);
+
+  useEffect(() => {
+    const renderDiagram = async () => {
+      try {
+        const { svg } = await mermaid.render(`mermaid-${id}`, code);
+        setSvg(svg);
+        setError(null);
+        errorReportedRef.current = false;
+      } catch (err) {
+        console.error('Mermaid render error:', err);
+        const errorMsg = err instanceof Error ? err.message : 'Failed to render diagram';
+        setError(errorMsg);
+        setSvg(null);
+        
+        // Report error to parent (only once per error)
+        if (onError && !errorReportedRef.current) {
+          errorReportedRef.current = true;
+          onError(errorMsg, code);
+        }
+      }
+    };
+    renderDiagram();
+  }, [code, id, onError]);
+
+  const copyCode = useCallback(() => {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [code]);
+
+  const exportPng = useCallback(async () => {
+    if (!svg) return;
+    setIsExporting(true);
+    
+    try {
+      // Create a temporary container to get SVG dimensions
+      const tempDiv = document.createElement('div');
+      tempDiv.innerHTML = svg;
+      const svgElement = tempDiv.querySelector('svg');
+      if (!svgElement) throw new Error('No SVG found');
+
+      // Get dimensions
+      const bbox = svgElement.getBBox();
+      const width = Math.ceil(bbox.width + 40);
+      const height = Math.ceil(bbox.height + 40);
+
+      // Create canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = width * 2;
+      canvas.height = height * 2;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Cannot get canvas context');
+
+      // Draw SVG to canvas
+      const img = new Image();
+      const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+
+      img.onload = () => {
+        ctx.scale(2, 2);
+        ctx.drawImage(img, 0, 0);
+        
+        canvas.toBlob((blob) => {
+          if (blob) {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'diagram.png';
+            a.click();
+          }
+          URL.revokeObjectURL(url);
+          setIsExporting(false);
+        }, 'image/png');
+      };
+      
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        setIsExporting(false);
+      };
+      
+      img.src = url;
+    } catch (err) {
+      console.error('PNG export error:', err);
+      setIsExporting(false);
+    }
+  }, [svg]);
+
+  return (
+    <div className="my-3 rounded-lg overflow-hidden border border-zinc-700">
+      {/* Header with tabs */}
+      <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800 border-b border-zinc-700">
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setViewMode('preview')}
+            className={`px-2 py-0.5 text-xs rounded transition-colors ${
+              viewMode === 'preview'
+                ? 'bg-zinc-600 text-white'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            Preview
+          </button>
+          <button
+            onClick={() => setViewMode('code')}
+            className={`px-2 py-0.5 text-xs rounded transition-colors ${
+              viewMode === 'code'
+                ? 'bg-zinc-600 text-white'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            Code
+          </button>
+        </div>
+        <div className="flex items-center gap-1">
+          {viewMode === 'preview' && svg && (
+            <button
+              onClick={exportPng}
+              disabled={isExporting}
+              className="px-2 py-0.5 text-xs rounded bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600 transition-colors disabled:opacity-50"
+            >
+              {isExporting ? 'Exporting...' : 'Export PNG'}
+            </button>
+          )}
+          <button
+            onClick={copyCode}
+            className="px-2 py-0.5 text-xs rounded bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600 transition-colors"
+          >
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        </div>
+      </div>
+      
+      {/* Content */}
+      {viewMode === 'preview' ? (
+        <div 
+          ref={containerRef}
+          className="p-4 bg-zinc-900 overflow-auto"
+        >
+          {error ? (
+            <div className="text-red-400 text-sm">
+              <p className="font-medium">Failed to render diagram:</p>
+              <p className="text-xs mt-1 opacity-75">{error}</p>
+            </div>
+          ) : svg ? (
+            <div 
+              className="flex justify-center [&_svg]:max-w-full"
+              dangerouslySetInnerHTML={{ __html: svg }}
+            />
+          ) : (
+            <div className="text-zinc-500 text-sm">Rendering...</div>
+          )}
+        </div>
+      ) : (
+        <SyntaxHighlighter
+          style={oneDark}
+          language="mermaid"
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            fontSize: '0.8125rem',
+          }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      )}
+    </div>
+  );
+});
 
 // Tool citation data
 interface ToolCitation {
@@ -15,6 +283,104 @@ interface ToolCitation {
   result_summary?: string;
   result_url?: string;
   success: boolean;
+}
+
+/**
+ * Unwrap double-nested code fences of the SAME file type.
+ * 
+ * Problem: LLM sometimes outputs:
+ * ```mermaid
+ * ```mermaid
+ * graph TD
+ *   A --> B
+ * ```
+ * ```
+ * 
+ * Solution: Detect when outer and inner fences have the same language,
+ * and render only the inner content.
+ */
+function unwrapDoubleNestedSameType(content: string): string {
+  const lines = content.split('\n');
+  const result: string[] = [];
+  
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // Match opening fence with language
+    const openMatch = line.match(/^(`{3,})(\w+)(?:::.*)?$/);
+    
+    if (openMatch) {
+      const [, outerBackticks, outerLang] = openMatch;
+      const outerLen = outerBackticks.length;
+      
+      // Check if the very next line is another opening fence with the SAME language
+      if (i + 1 < lines.length) {
+        const nextLine = lines[i + 1];
+        const innerMatch = nextLine.match(/^(`{3,})(\w+)(?:::.*)?$/);
+        
+        if (innerMatch) {
+          const [, innerBackticks, innerLang] = innerMatch;
+          
+          // Only unwrap if same language (case-insensitive)
+          if (outerLang.toLowerCase() === innerLang.toLowerCase()) {
+            // Find the inner closing fence
+            let innerCloseIdx = -1;
+            let outerCloseIdx = -1;
+            let depth = 1;
+            
+            for (let j = i + 2; j < lines.length; j++) {
+              const l = lines[j];
+              // Check for another opening fence
+              if (l.match(/^`{3,}\w+/)) {
+                depth++;
+              }
+              // Check for closing fence
+              else if (l.match(/^`{3,}\s*$/)) {
+                depth--;
+                if (depth === 0 && innerCloseIdx === -1) {
+                  innerCloseIdx = j;
+                } else if (depth === -1) {
+                  outerCloseIdx = j;
+                  break;
+                }
+              }
+            }
+            
+            // If we found both closing fences, skip the outer wrapper
+            if (innerCloseIdx !== -1) {
+              // Push the inner opening fence (use original line to preserve any ::filename)
+              result.push(nextLine);
+              
+              // Push content between inner open and inner close
+              for (let j = i + 2; j < innerCloseIdx; j++) {
+                result.push(lines[j]);
+              }
+              
+              // Push inner closing fence
+              result.push(lines[innerCloseIdx]);
+              
+              // Skip past outer closing fence if found, otherwise just past inner
+              if (outerCloseIdx !== -1) {
+                i = outerCloseIdx + 1;
+              } else {
+                i = innerCloseIdx + 1;
+              }
+              continue;
+            }
+          }
+        }
+      }
+      
+      // No double-nesting or different languages - keep as is
+      result.push(line);
+      i++;
+    } else {
+      result.push(line);
+      i++;
+    }
+  }
+  
+  return result.join('\n');
 }
 
 /**
@@ -101,8 +467,30 @@ function fixNestedCodeFences(content: string): string {
 //   <Menu.cpp>code</Menu.cpp> → ```cpp::Menu.cpp\ncode\n```
 //   <artifact=file.py>code</artifact> → ```python::file.py\ncode\n```
 function preprocessContent(content: string): string {
-  // First fix nested code fences
-  let processed = fixNestedCodeFences(content);
+  // NC-0.8.0.6: Strip tool invocation tags from display (keep in history)
+  // These are internal tool calls that shouldn't be shown to users
+  let processed = content
+    // NC-0.8.0.7: Remove image context blocks (keep in history for LLM, hide from user)
+    .replace(/\[IMAGE CONTEXT - USER-GENERATED, NOT BY LLM\][\s\S]*?\[END IMAGE CONTEXT\]\s*/g, '')
+    // Remove <request_file path="..." offset="..."/> tags
+    .replace(/<request_file\s+[^>]*\/?>/gi, '')
+    // Remove <find_line path="..." contains="..."/> tags
+    .replace(/<find_line\s+[^>]*\/?>/gi, '')
+    // Remove <find search="..."/> and <find path="..." search="..."/> tags  
+    .replace(/<find\s+[^>]*\/?>/gi, '')
+    // Remove <search_replace>...</search_replace> blocks
+    .replace(/<search_replace\s+[^>]*>[\s\S]*?<\/search_replace>/gi, '')
+    // Remove <replace_line.../> and <replace_block>...</replace_block>
+    .replace(/<replace_line\s+[^>]*\/?>/gi, '')
+    .replace(/<replace_block\s+[^>]*>[\s\S]*?<\/replace_block>/gi, '')
+    // Clean up any leftover empty lines from removed tags
+    .replace(/\n{3,}/g, '\n\n');
+  
+  // First unwrap double-nested same-type code fences (e.g., ```mermaid inside ```mermaid)
+  processed = unwrapDoubleNestedSameType(processed);
+  
+  // Then fix remaining nested code fences
+  processed = fixNestedCodeFences(processed);
   
   // Convert XML-style filename tags to markdown code fences
   // Pattern 4a: Direct filename as tag: <Menu.cpp>...</Menu.cpp>
@@ -144,6 +532,13 @@ function preprocessContent(content: string): string {
       return `\n\`\`\`${language}::${cleanPath}`;
     }
     return match;
+  });
+  
+  // Convert bare video URLs on their own line to markdown links
+  // This ensures they get processed by the custom 'a' component
+  const videoUrlPattern = /^(https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/|rumble\.com\/(?:embed\/)?v)[^\s]+)$/gm;
+  processed = processed.replace(videoUrlPattern, (match, url) => {
+    return `[${url}](${url})`;
   });
   
   return processed;
@@ -219,6 +614,8 @@ interface MessageProps {
   versionInfo?: VersionInfo;
   // NC-0.8.0.0: Text selection hint handler
   onHintSelect?: (hint: UserHint, selectedText: string) => void;
+  // Mermaid error callback for auto-fix
+  onMermaidError?: (error: string, code: string, messageId: string) => void;
 }
 
 // Memoized message comparison - only re-render if content actually changed
@@ -282,12 +679,16 @@ function MessageBubbleInner({
   assistantName,
   versionInfo,
   onHintSelect,
+  onMermaidError,
 }: MessageProps) {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  
+  // Get mermaid rendering setting from branding store
+  const mermaidEnabled = useBrandingStore((state) => state.config?.features?.mermaid_rendering ?? true);
   
   // Ref for text selection bubble
   const contentRef = useRef<HTMLDivElement>(null);
@@ -590,6 +991,28 @@ function MessageBubbleInner({
                     }
                     
                     if (!inline && match) {
+                      const language = match[1];
+                      
+                      // Handler for mermaid errors
+                      const handleMermaidError = (error: string, mermaidCode: string) => {
+                        if (onMermaidError) {
+                          onMermaidError(error, mermaidCode, message.id);
+                        }
+                      };
+                      
+                      // Special handling for mermaid diagrams (if enabled)
+                      if (mermaidEnabled && (language === 'mermaid' || language === 'mmd')) {
+                        const diagramId = `${message.id}-${Math.random().toString(36).substr(2, 9)}`;
+                        return <MermaidDiagram code={code} id={diagramId} onError={handleMermaidError} />;
+                      }
+                      
+                      // Detect mermaid syntax even without explicit language tag (if enabled)
+                      const mermaidKeywords = /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4Context)\b/m;
+                      if (mermaidEnabled && mermaidKeywords.test(code.trim())) {
+                        const diagramId = `${message.id}-${Math.random().toString(36).substr(2, 9)}`;
+                        return <MermaidDiagram code={code} id={diagramId} onError={handleMermaidError} />;
+                      }
+                      
                       return (
                         <div className="relative group/code my-3">
                           {/* Filename header */}
@@ -617,7 +1040,7 @@ function MessageBubbleInner({
                           )}
                           <SyntaxHighlighter
                             style={oneDark}
-                            language={match[1]}
+                            language={language}
                             PreTag="div"
                             customStyle={{
                               margin: 0,
@@ -696,6 +1119,15 @@ function MessageBubbleInner({
                     return <ol className="list-decimal list-outside ml-4 mb-2 space-y-0.5">{children}</ol>;
                   },
                   a({ href, children }) {
+                    // Check if this is a video URL that should be embedded
+                    if (href) {
+                      const videoInfo = extractVideoInfo(href);
+                      if (videoInfo) {
+                        // Render video embed instead of link
+                        return <VideoEmbed url={href} />;
+                      }
+                    }
+                    // Regular link
                     return (
                       <a
                         href={href}

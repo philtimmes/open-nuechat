@@ -1,13 +1,14 @@
 import { useState, useRef, useCallback, useEffect, type RefObject } from 'react';
 import type { Artifact } from '../types';
 import { processFilesToArtifacts, readFileAsBase64 } from '../lib/fileProcessor';
+import { containsYouTubeUrl, extractAllVideoIds, fetchYouTubeVideoInfo, formatVideoContext } from '../lib/youtube';
 
 interface ProcessedAttachment {
-  type: 'image' | 'file';
+  type: 'image' | 'file' | 'youtube';
   filename: string;
   mime_type: string;
   data?: string;  // base64 for images
-  content?: string;  // text content for files
+  content?: string;  // text content for files, or YouTube context
 }
 
 interface ChatInputProps {
@@ -44,15 +45,53 @@ export default function ChatInput({
   const [processedAttachments, setProcessedAttachments] = useState<ProcessedAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
+  const [isFetchingYouTube, setIsFetchingYouTube] = useState(false);
   const internalRef = useRef<HTMLTextAreaElement>(null);
   const textareaRef = inputRef || internalRef;
   const fileInputRef = useRef<HTMLInputElement>(null);
   
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!message.trim() && processedAttachments.length === 0) return;
-    if (disabled) return;
+    if (disabled || isFetchingYouTube) return;
     
-    onSend(message.trim(), processedAttachments.length > 0 ? processedAttachments : undefined);
+    let finalAttachments = [...processedAttachments];
+    const finalMessage = message.trim();
+    
+    // Check for YouTube URLs in the message
+    if (containsYouTubeUrl(finalMessage)) {
+      const videoIds = extractAllVideoIds(finalMessage);
+      if (videoIds.length > 0) {
+        setIsFetchingYouTube(true);
+        console.log(`[ChatInput] Found ${videoIds.length} YouTube video(s), fetching info...`);
+        
+        try {
+          // Fetch info for each video (limit to 3)
+          const videoInfos = await Promise.all(
+            videoIds.slice(0, 3).map(id => fetchYouTubeVideoInfo(id))
+          );
+          
+          // Add video context as attachments
+          for (const info of videoInfos) {
+            if (info.transcript || info.title) {
+              const context = formatVideoContext(info);
+              finalAttachments.push({
+                type: 'youtube',
+                filename: `youtube-${info.videoId}.txt`,
+                mime_type: 'text/plain',
+                content: context,
+              });
+              console.log(`[ChatInput] Added YouTube context for ${info.videoId}: ${context.length} chars`);
+            }
+          }
+        } catch (error) {
+          console.warn('[ChatInput] Failed to fetch YouTube info:', error);
+        } finally {
+          setIsFetchingYouTube(false);
+        }
+      }
+    }
+    
+    onSend(finalMessage, finalAttachments.length > 0 ? finalAttachments : undefined);
     setMessage('');
     setAttachments([]);
     setProcessedAttachments([]);
@@ -63,10 +102,10 @@ export default function ChatInput({
     }
   };
   
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = async (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSubmit();
+      await handleSubmit();
     }
   };
   
@@ -352,10 +391,11 @@ export default function ChatInput({
         ) : (
           <button
             onClick={handleSubmit}
-            disabled={disabled || isProcessingFiles || (!message.trim() && attachments.length === 0)}
+            disabled={disabled || isProcessingFiles || isFetchingYouTube || (!message.trim() && attachments.length === 0)}
             className="p-3 md:p-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+            title={isFetchingYouTube ? "Fetching YouTube video info..." : "Send message"}
           >
-            {isProcessingFiles ? (
+            {isProcessingFiles || isFetchingYouTube ? (
               <svg className="w-6 h-6 md:w-5 md:h-5 animate-spin" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>

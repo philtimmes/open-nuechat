@@ -110,6 +110,37 @@ EXT_TO_LANG = {
     '.pm': 'perl',
 }
 
+
+def detect_language(filename: str) -> Optional[str]:
+    """
+    Detect programming language from filename extension.
+    
+    Args:
+        filename: The filename to detect language for
+        
+    Returns:
+        Language name string or None if not detected
+    """
+    if not filename:
+        return None
+    ext = os.path.splitext(filename)[1].lower()
+    return EXT_TO_LANG.get(ext)
+
+
+def extract_signatures(content: str, language: str) -> List['CodeSignature']:
+    """
+    Extract code signatures (functions, classes, etc.) from source code.
+    
+    Args:
+        content: The source code content
+        language: The programming language name
+        
+    Returns:
+        List of CodeSignature objects
+    """
+    return SignatureExtractor.extract(content, language)
+
+
 # Binary file extensions to skip content extraction
 BINARY_EXTENSIONS = {
     '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.svg',

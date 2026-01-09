@@ -361,6 +361,7 @@ class AssistantPublicInfo(BaseModel):
     conversation_count: int
     average_rating: float
     is_featured: bool
+    category: Optional[str] = None  # NC-0.8.0.6: Added for category filtering
     
     class Config:
         from_attributes = True
@@ -497,6 +498,31 @@ async def create_assistant(
                     detail=f"Knowledge store not found or inaccessible: {store_id}"
                 )
     
+    # Look up mode from category (category is simple slug like "general", "coding", "research")
+    mode_id = None
+    if request.category:
+        from app.models import AssistantMode
+        
+        # Map simple slugs to mode names
+        SLUG_TO_MODE = {
+            "general": "General",
+            "writing": "Creative Writing",
+            "coding": "Coding",
+            "research": "Deep Research",
+            "legal": "Legal",
+            "analysis": "Data Analysis",
+            "image": "Image Generation",
+        }
+        
+        mode_name = SLUG_TO_MODE.get(request.category.lower())
+        if mode_name:
+            mode_result = await db.execute(
+                select(AssistantMode).where(AssistantMode.name == mode_name)
+            )
+            mode = mode_result.scalar_one_or_none()
+            if mode:
+                mode_id = mode.id
+    
     # Create assistant
     assistant = CustomAssistant(
         owner_id=current_user.id,
@@ -517,6 +543,7 @@ async def create_assistant(
         is_public=request.is_public,
         is_discoverable=request.is_discoverable,
         category=request.category,
+        mode_id=mode_id,
     )
     
     db.add(assistant)
@@ -626,6 +653,7 @@ async def explore_assistants(
             conversation_count=assistant.conversation_count,
             average_rating=assistant.average_rating,
             is_featured=assistant.is_featured,
+            category=assistant.category,  # NC-0.8.0.6: Include category for filtering
         )
         responses.append(response)
     
@@ -687,6 +715,7 @@ async def discover_assistants(
             conversation_count=assistant.conversation_count,
             average_rating=assistant.average_rating,
             is_featured=assistant.is_featured,
+            category=assistant.category,  # NC-0.8.0.6: Include category for filtering
         )
         responses.append(response)
     
@@ -767,6 +796,7 @@ async def list_subscribed_assistants(
             conversation_count=assistant.conversation_count,
             average_rating=assistant.average_rating,
             is_featured=assistant.is_featured,
+            category=assistant.category,  # NC-0.8.0.6: Include category for filtering
         ))
     
     return responses
@@ -891,46 +921,23 @@ class CategoryUpdate(BaseModel):
 
 
 class CategoryResponse(BaseModel):
-    """Category info"""
+    """Category info - now sourced from AssistantModes"""
     id: str
-    value: str
-    label: str
-    icon: str = "📁"
+    value: str  # Same as name, for backward compatibility
+    label: str  # Same as name
+    icon: str = "🤖"  # emoji field
     description: Optional[str] = None
     sort_order: int = 0
-    is_active: bool = True
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    active_tools: List[str] = []
     
     class Config:
         from_attributes = True
 
 
+# Legacy seed function - no longer used, modes are seeded in main.py
 async def seed_default_categories(db: AsyncSession):
-    """Seed default categories if none exist"""
-    from app.models import AssistantCategory
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    defaults = [
-        {"value": "general", "label": "General", "icon": "🤖", "sort_order": 0},
-        {"value": "writing", "label": "Writing", "icon": "✍️", "sort_order": 1},
-        {"value": "coding", "label": "Coding", "icon": "💻", "sort_order": 2},
-        {"value": "research", "label": "Research", "icon": "🔬", "sort_order": 3},
-        {"value": "education", "label": "Education", "icon": "📚", "sort_order": 4},
-        {"value": "business", "label": "Business", "icon": "💼", "sort_order": 5},
-        {"value": "creative", "label": "Creative", "icon": "🎨", "sort_order": 6},
-        {"value": "productivity", "label": "Productivity", "icon": "⚡", "sort_order": 7},
-        {"value": "lifestyle", "label": "Lifestyle", "icon": "🌟", "sort_order": 8},
-        {"value": "other", "label": "Other", "icon": "📁", "sort_order": 99},
-    ]
-    
-    for cat_data in defaults:
-        cat = AssistantCategory(**cat_data)
-        db.add(cat)
-    
-    await db.commit()
-    logger.info("Seeded default assistant categories")
+    """Legacy - categories are now modes, seeded in migrations"""
+    pass
 
 
 @router.get("/categories", response_model=List[CategoryResponse])
@@ -938,24 +945,32 @@ async def list_categories(
     include_inactive: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
-    """List all assistant categories (public endpoint)"""
-    from app.models import AssistantCategory
+    """
+    List all categories (public endpoint).
+    Categories = Modes. Same thing. Admin manages via Assistant Modes tab.
+    """
+    from app.models import AssistantMode
     
-    query = select(AssistantCategory)
+    query = select(AssistantMode)
     if not include_inactive:
-        query = query.where(AssistantCategory.is_active != False)
-    query = query.order_by(AssistantCategory.sort_order, AssistantCategory.label)
+        query = query.where(AssistantMode.enabled == True)
+    query = query.order_by(AssistantMode.sort_order, AssistantMode.name)
     
     result = await db.execute(query)
-    categories = result.scalars().all()
+    modes = result.scalars().all()
     
-    # If no categories exist, seed defaults
-    if not categories:
-        await seed_default_categories(db)
-        result = await db.execute(query)
-        categories = result.scalars().all()
-    
-    return [CategoryResponse.model_validate(c) for c in categories]
+    return [
+        CategoryResponse(
+            id=m.id,
+            value=m.name.lower().replace(' ', '_'),
+            label=m.name,
+            icon=m.emoji or "🤖",
+            description=m.description,
+            sort_order=m.sort_order,
+            active_tools=m.active_tools or [],
+        )
+        for m in modes
+    ]
 
 
 @router.post("/categories", response_model=CategoryResponse)
@@ -1165,6 +1180,35 @@ async def update_assistant(
     # Update version on significant changes
     if any(k in update_dict for k in ["system_prompt", "enabled_tools", "model"]):
         assistant.version += 1
+    
+    # If category is being updated, also update mode_id
+    if "category" in update_dict:
+        from app.models import AssistantMode
+        category_value = update_dict["category"]
+        
+        # Map simple slugs to mode names
+        SLUG_TO_MODE = {
+            "general": "General",
+            "writing": "Creative Writing",
+            "coding": "Coding",
+            "research": "Deep Research",
+            "legal": "Legal",
+            "analysis": "Data Analysis",
+            "image": "Image Generation",
+        }
+        
+        mode_name = SLUG_TO_MODE.get(category_value.lower()) if category_value else None
+        if mode_name:
+            mode_result = await db.execute(
+                select(AssistantMode).where(AssistantMode.name == mode_name)
+            )
+            mode = mode_result.scalar_one_or_none()
+            if mode:
+                assistant.mode_id = mode.id
+            else:
+                assistant.mode_id = None
+        else:
+            assistant.mode_id = None
     
     for field, value in update_dict.items():
         setattr(assistant, field, value)

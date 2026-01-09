@@ -15,14 +15,26 @@ export interface ChatSlice {
   hasMoreChats: boolean;
   chatPage: number;
   chatSearchQuery: string;
+  chatSortBy: 'modified' | 'created' | 'alphabetical' | 'source';
+  chatGroupCounts: Record<string, number> | null;  // Actual totals from database
+  sidebarReloadTrigger: number;  // Increment to force sidebar reload
   
-  fetchChats: (loadMore?: boolean, search?: string) => Promise<void>;
+  // Per-group pagination state
+  groupPages: Record<string, number>;  // Current page per group
+  groupHasMore: Record<string, boolean>;  // Has more per group
+  groupLoading: Record<string, boolean>;  // Loading state per group
+  
+  fetchChats: (loadMore?: boolean, search?: string, sortBy?: string) => Promise<void>;
+  fetchGroupChats: (groupType: 'source' | 'period', groupName: string, loadMore?: boolean, dateField?: 'updated_at' | 'created_at') => Promise<void>;
+  setChatSortBy: (sortBy: 'modified' | 'created' | 'alphabetical' | 'source') => void;
   createChat: (model?: string, systemPrompt?: string) => Promise<Chat>;
   setCurrentChat: (chat: Chat | null) => void;
   deleteChat: (chatId: string) => Promise<void>;
   deleteAllChats: () => Promise<void>;
+  deleteGroupChats: (groupType: 'source' | 'period', groupName: string) => Promise<number>;
   updateChatTitle: (chatId: string, title: string) => Promise<void>;
   updateChatLocally: (chatId: string, updates: Partial<Chat>) => void;
+  triggerSidebarReload: () => void;
 }
 
 /**
@@ -78,6 +90,10 @@ export interface ArtifactSlice {
   // Generated images
   generatedImages: Record<string, GeneratedImage>;
   
+  // Pending image context - for standalone image generation before chat starts
+  // This image will be included in the first message to a new chat
+  pendingImageContext: GeneratedImage | null;
+  
   setSelectedArtifact: (artifact: Artifact | null) => void;
   setShowArtifacts: (show: boolean) => void;
   collectAllArtifacts: () => Artifact[];
@@ -86,6 +102,7 @@ export interface ArtifactSlice {
   fetchUploadedData: (chatId: string) => Promise<void>;
   setZipContext: (context: string | null) => void;
   setGeneratedImage: (messageId: string, image: GeneratedImage) => void;
+  setPendingImageContext: (image: GeneratedImage | null) => void;
   setArtifacts: (artifacts: Artifact[]) => void;
   updateArtifact: (key: string, artifact: Artifact) => void;
 }

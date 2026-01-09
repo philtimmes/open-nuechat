@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type { Artifact } from '../types';
 import { groupArtifactsByFilename, type ArtifactGroup } from '../lib/artifacts';
 import { formatFileSize, formatMessageTime } from '../lib/formatters';
+import api from '../lib/api';
 
 interface ArtifactsPanelProps {
   artifacts: Artifact[];
@@ -27,8 +28,11 @@ export default function ArtifactsPanel({
   const [copied, setCopied] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [isExportingPng, setIsExportingPng] = useState(false);
+  const [currentPath, setCurrentPath] = useState<string[]>([]);  // NC-0.8.0.7: Folder navigation
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const fullscreenIframeRef = useRef<HTMLIFrameElement>(null);
+  const mermaidRef = useRef<HTMLDivElement>(null);
   
   // Group artifacts by filename with versions
   const artifactGroups = useMemo(() => 
@@ -39,11 +43,50 @@ export default function ArtifactsPanel({
   // Count of unique files
   const uniqueFileCount = artifactGroups.length;
   
+  // NC-0.8.0.7: Compute folder structure for current path
+  const { folders, files } = useMemo(() => {
+    const currentPathStr = currentPath.join('/');
+    const foldersSet = new Set<string>();
+    const filesInPath: ArtifactGroup[] = [];
+    
+    for (const group of artifactGroups) {
+      const filepath = group.filename;
+      
+      // Check if this file is under the current path
+      if (currentPathStr && !filepath.startsWith(currentPathStr + '/') && filepath !== currentPathStr) {
+        continue;
+      }
+      
+      // Get the remaining path after current path
+      const remainingPath = currentPathStr 
+        ? filepath.slice(currentPathStr.length + 1) 
+        : filepath;
+      
+      if (!remainingPath) continue;
+      
+      const parts = remainingPath.split('/');
+      
+      if (parts.length === 1) {
+        // This is a file in the current folder
+        filesInPath.push(group);
+      } else {
+        // This is in a subfolder - add the immediate subfolder
+        foldersSet.add(parts[0]);
+      }
+    }
+    
+    return {
+      folders: Array.from(foldersSet).sort(),
+      files: filesInPath,
+    };
+  }, [artifactGroups, currentPath]);
+  
   // Reset view when artifacts change significantly
   useEffect(() => {
     if (artifactGroups.length === 0) {
       setView('list');
       setSelectedGroup(null);
+      setCurrentPath([]);
       onSelect(null);
     }
   }, [artifactGroups.length, onSelect]);
@@ -78,11 +121,40 @@ export default function ArtifactsPanel({
     setTimeout(() => setCopied(false), 2000);
   };
   
-  const downloadArtifact = () => {
+  const downloadArtifact = async () => {
     if (!selectedArtifact) return;
     
     const ext = getFileExtension(selectedArtifact);
     const filename = selectedArtifact.filename || `${selectedArtifact.title.replace(/\s+/g, '_')}.${ext}`;
+    
+    // Handle image downloads differently
+    if (selectedArtifact.type === 'image') {
+      const imgSrc = selectedArtifact.imageData?.url || selectedArtifact.imageData?.base64 || selectedArtifact.content;
+      
+      if (imgSrc.startsWith('http') || imgSrc.startsWith('/')) {
+        // URL - fetch and download
+        try {
+          const response = await fetch(imgSrc);
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename.includes('/') ? filename.split('/').pop()! : filename;
+          a.click();
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          console.error('Failed to download image:', err);
+        }
+      } else {
+        // Base64 - convert and download
+        const base64Data = imgSrc.startsWith('data:') ? imgSrc : `data:image/png;base64,${imgSrc}`;
+        const a = document.createElement('a');
+        a.href = base64Data;
+        a.download = filename.includes('/') ? filename.split('/').pop()! : filename;
+        a.click();
+      }
+      return;
+    }
     
     const blob = new Blob([selectedArtifact.content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -106,25 +178,16 @@ export default function ArtifactsPanel({
         : `${selectedArtifact.title.replace(/\s+/g, '_')}.pdf`;
       
       // Call backend API to convert markdown to PDF
-      const response = await fetch('/api/utils/markdown-to-pdf', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('nexus-auth') ? JSON.parse(localStorage.getItem('nexus-auth')!).state?.token : ''}`
-        },
-        body: JSON.stringify({
-          content: selectedArtifact.content,
-          filename: filename,
-          title: selectedArtifact.title
-        })
+      const response = await api.post('/utils/markdown-to-pdf', {
+        content: selectedArtifact.content,
+        filename: filename,
+        title: selectedArtifact.title
+      }, {
+        responseType: 'blob'
       });
       
-      if (!response.ok) {
-        throw new Error('Failed to generate PDF');
-      }
-      
       // Download the PDF
-      const blob = await response.blob();
+      const blob = new Blob([response.data], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -139,6 +202,91 @@ export default function ArtifactsPanel({
     }
   }, [selectedArtifact]);
   
+  // Export mermaid diagram as PNG with transparency
+  const exportMermaidPng = useCallback(async () => {
+    if (!selectedArtifact || selectedArtifact.type !== 'mermaid') return;
+    if (!iframeRef.current) return;
+    
+    setIsExportingPng(true);
+    
+    try {
+      // Get the iframe's document
+      const iframeDoc = iframeRef.current.contentDocument || iframeRef.current.contentWindow?.document;
+      if (!iframeDoc) throw new Error('Cannot access iframe');
+      
+      // Find the mermaid SVG
+      const svg = iframeDoc.querySelector('svg');
+      if (!svg) throw new Error('No SVG found');
+      
+      // Clone and prepare SVG for export
+      const svgClone = svg.cloneNode(true) as SVGSVGElement;
+      
+      // Ensure SVG has explicit dimensions
+      const bbox = svg.getBBox();
+      const width = Math.ceil(bbox.width + 40);
+      const height = Math.ceil(bbox.height + 40);
+      svgClone.setAttribute('width', String(width));
+      svgClone.setAttribute('height', String(height));
+      svgClone.setAttribute('viewBox', `${bbox.x - 20} ${bbox.y - 20} ${width} ${height}`);
+      
+      // Make background transparent by removing any fill
+      svgClone.style.background = 'transparent';
+      
+      // Serialize SVG to string
+      const serializer = new XMLSerializer();
+      const svgString = serializer.serializeToString(svgClone);
+      const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+      const svgUrl = URL.createObjectURL(svgBlob);
+      
+      // Create canvas and draw SVG
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = width * 2; // 2x for retina
+        canvas.height = height * 2;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Cannot get canvas context');
+        
+        // Don't fill background - keep transparent
+        ctx.scale(2, 2);
+        ctx.drawImage(img, 0, 0);
+        
+        // Export as PNG
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            console.error('Failed to create PNG blob');
+            return;
+          }
+          
+          const filename = selectedArtifact.filename 
+            ? selectedArtifact.filename.replace(/\.mmd$/i, '.png').split('/').pop()
+            : `${selectedArtifact.title.replace(/\s+/g, '_')}.png`;
+          
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename || 'diagram.png';
+          a.click();
+          URL.revokeObjectURL(url);
+          URL.revokeObjectURL(svgUrl);
+          setIsExportingPng(false);
+        }, 'image/png');
+      };
+      
+      img.onerror = () => {
+        console.error('Failed to load SVG as image');
+        URL.revokeObjectURL(svgUrl);
+        setIsExportingPng(false);
+      };
+      
+      img.src = svgUrl;
+      
+    } catch (error) {
+      console.error('Failed to export PNG:', error);
+      setIsExportingPng(false);
+    }
+  }, [selectedArtifact]);
+  
   const getFileExtension = (art: Artifact): string => {
     switch (art.type) {
       case 'html': return 'html';
@@ -149,6 +297,15 @@ export default function ArtifactsPanel({
       case 'json': return 'json';
       case 'csv': return 'csv';
       case 'code': return art.language || 'txt';
+      case 'image': {
+        // Try to get extension from filename or URL
+        const filename = art.filename || art.imageData?.url || '';
+        const ext = filename.split('.').pop()?.toLowerCase();
+        if (ext && ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
+          return ext;
+        }
+        return 'png';
+      }
       default: return 'txt';
     }
   };
@@ -273,6 +430,33 @@ export default function ArtifactsPanel({
     switch (art.type) {
       case 'html':
         return art.content;
+      case 'image':
+        // For images, render as a centered image preview
+        const imgSrc = art.imageData?.url || art.imageData?.base64 || art.content;
+        const isBase64 = imgSrc.startsWith('data:') || (!imgSrc.startsWith('http') && !imgSrc.startsWith('/'));
+        // For relative URLs (starting with /), make them absolute so they work in iframe srcDoc
+        const src = isBase64 && !imgSrc.startsWith('data:') 
+          ? `data:image/png;base64,${imgSrc}` 
+          : imgSrc.startsWith('/') 
+            ? `${window.location.origin}${imgSrc}` 
+            : imgSrc;
+        return `
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body{margin:0;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:100vh;padding:20px;background:#1a1a1a;box-sizing:border-box;font-family:system-ui,sans-serif;color:#e5e5e5}
+    img{max-width:100%;max-height:80vh;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.5)}
+    .info{margin-top:16px;text-align:center;font-size:14px;opacity:0.7}
+  </style>
+</head>
+<body>
+  <img src="${src}" alt="${art.imageData?.prompt || 'Generated image'}" />
+  <div class="info">
+    ${art.imageData?.width || '?'}×${art.imageData?.height || '?'} • Seed: ${art.imageData?.seed || '?'}
+  </div>
+</body>
+</html>`;
       case 'react':
         return `
 <!DOCTYPE html>
@@ -316,12 +500,23 @@ export default function ArtifactsPanel({
 <!DOCTYPE html>
 <html>
 <head>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-  <style>body{margin:0;display:flex;justify-content:center;padding:20px;background:#1a1a1a}</style>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    body{margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;background:#1a1a1a;box-sizing:border-box}
+    .mermaid{color:#e5e5e5}
+    .mermaid svg{max-width:100%;height:auto}
+  </style>
 </head>
 <body>
-  <div class="mermaid">${art.content}</div>
-  <script>mermaid.initialize({startOnLoad:true,theme:'dark'})</script>
+  <pre class="mermaid">${art.content}</pre>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      securityLevel: 'loose',
+      flowchart: { useMaxWidth: true, htmlLabels: true }
+    });
+  </script>
 </body>
 </html>`;
       default:
@@ -339,6 +534,7 @@ export default function ArtifactsPanel({
       case 'mermaid': return 'Mermaid';
       case 'json': return 'JSON';
       case 'csv': return 'CSV';
+      case 'image': return 'Image';
       default: return 'Code';
     }
   };
@@ -352,6 +548,7 @@ export default function ArtifactsPanel({
       case 'react':
         return <svg className={iconClass} viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="2.5"/><ellipse cx="12" cy="12" rx="10" ry="4" fill="none" stroke="currentColor" strokeWidth="1.5"/><ellipse cx="12" cy="12" rx="10" ry="4" fill="none" stroke="currentColor" strokeWidth="1.5" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4" fill="none" stroke="currentColor" strokeWidth="1.5" transform="rotate(120 12 12)"/></svg>;
       case 'svg':
+      case 'image':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>;
       case 'markdown':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>;
@@ -380,6 +577,20 @@ export default function ArtifactsPanel({
     setView('detail');
   };
   
+  // NC-0.8.0.7: Folder navigation handlers
+  const handleFolderClick = (folderName: string) => {
+    setCurrentPath([...currentPath, folderName]);
+  };
+  
+  const handleBreadcrumbClick = (index: number) => {
+    // -1 means root (Artifacts)
+    if (index === -1) {
+      setCurrentPath([]);
+    } else {
+      setCurrentPath(currentPath.slice(0, index + 1));
+    }
+  };
+  
   const handleBackToList = () => {
     setView('list');
     setSelectedGroup(null);
@@ -391,22 +602,56 @@ export default function ArtifactsPanel({
     onSelect(null);
   };
   
-  // Breadcrumb component
+  // Breadcrumb component - NC-0.8.0.7: Enhanced with folder navigation
   const Breadcrumbs = () => {
-    if (view === 'list') return null;
+    // Show breadcrumbs when in folder, versions, or detail view
+    const showFolderBreadcrumbs = currentPath.length > 0 && view === 'list';
+    
+    if (view === 'list' && currentPath.length === 0) return null;
     
     return (
-      <div className="flex items-center gap-1 px-4 py-2 border-b border-[var(--color-border)] text-sm">
+      <div className="flex items-center gap-1 px-4 py-2 border-b border-[var(--color-border)] text-sm overflow-x-auto">
         <button 
-          onClick={handleBackToList}
-          className="text-[var(--color-primary)] hover:underline"
+          onClick={() => {
+            if (view !== 'list') {
+              handleBackToList();
+            }
+            setCurrentPath([]);
+          }}
+          className="text-[var(--color-primary)] hover:underline whitespace-nowrap flex-shrink-0"
         >
           Artifacts
         </button>
+        
+        {/* Folder path breadcrumbs */}
+        {currentPath.map((folder, idx) => (
+          <span key={idx} className="flex items-center gap-1 flex-shrink-0">
+            <span className="text-[var(--color-text-secondary)]">/</span>
+            {idx === currentPath.length - 1 && view === 'list' ? (
+              <span className="text-[var(--color-text)] truncate max-w-[120px]">{folder}</span>
+            ) : (
+              <button 
+                onClick={() => {
+                  handleBreadcrumbClick(idx);
+                  if (view !== 'list') {
+                    setView('list');
+                    setSelectedGroup(null);
+                    onSelect(null);
+                  }
+                }}
+                className="text-[var(--color-primary)] hover:underline truncate max-w-[120px]"
+              >
+                {folder}
+              </button>
+            )}
+          </span>
+        ))}
+        
+        {/* File/version breadcrumbs */}
         {view === 'versions' && selectedGroup && (
           <>
             <span className="text-[var(--color-text-secondary)]">/</span>
-            <span className="text-[var(--color-text)] truncate">{selectedGroup.displayName}</span>
+            <span className="text-[var(--color-text)] truncate max-w-[150px]">{selectedGroup.displayName}</span>
           </>
         )}
         {view === 'detail' && selectedGroup && (
@@ -414,7 +659,7 @@ export default function ArtifactsPanel({
             <span className="text-[var(--color-text-secondary)]">/</span>
             <button 
               onClick={handleBackToVersions}
-              className="text-[var(--color-primary)] hover:underline truncate"
+              className="text-[var(--color-primary)] hover:underline truncate max-w-[150px]"
             >
               {selectedGroup.displayName}
             </button>
@@ -428,14 +673,29 @@ export default function ArtifactsPanel({
     );
   };
   
-  // VIEW 1: File list
+  // Folder icon component
+  const FolderIcon = () => (
+    <svg className="w-5 h-5 text-yellow-500" fill="currentColor" viewBox="0 0 24 24">
+      <path d="M10 4H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-8l-2-2z" />
+    </svg>
+  );
+  
+  // VIEW 1: File list with folder navigation
   if (view === 'list') {
+    const hasContent = folders.length > 0 || files.length > 0;
+    const itemCount = folders.length + files.length;
+    
     return (
       <div className="w-96 border-l border-[var(--color-border)] bg-[var(--color-surface)] flex flex-col">
         <div className="p-4 border-b border-[var(--color-border)] flex items-center justify-between">
           <div>
             <h2 className="font-semibold text-[var(--color-text)]">Artifacts</h2>
-            <p className="text-xs text-[var(--color-text-secondary)]">{uniqueFileCount} unique file{uniqueFileCount !== 1 ? 's' : ''}</p>
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              {currentPath.length > 0 
+                ? `${itemCount} item${itemCount !== 1 ? 's' : ''} in /${currentPath.join('/')}`
+                : `${uniqueFileCount} unique file${uniqueFileCount !== 1 ? 's' : ''}`
+              }
+            </p>
           </div>
           <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -443,6 +703,9 @@ export default function ArtifactsPanel({
             </svg>
           </button>
         </div>
+        
+        {/* Breadcrumbs for folder navigation */}
+        <Breadcrumbs />
         
         <div className="flex-1 overflow-y-auto p-4">
           {artifactGroups.length === 0 ? (
@@ -453,9 +716,36 @@ export default function ArtifactsPanel({
               <p>No artifacts yet</p>
               <p className="text-sm mt-1">Artifacts will appear here when code or files are created</p>
             </div>
+          ) : !hasContent ? (
+            <div className="text-center py-8 text-[var(--color-text-secondary)]">
+              <p>Empty folder</p>
+            </div>
           ) : (
             <div className="space-y-2">
-              {artifactGroups.map((group) => {
+              {/* Folders first */}
+              {folders.map((folderName) => (
+                <button
+                  key={`folder-${folderName}`}
+                  onClick={() => handleFolderClick(folderName)}
+                  className="w-full p-3 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)] text-left transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <FolderIcon />
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-[var(--color-text)] truncate">{folderName}</p>
+                      <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                        <span>Folder</span>
+                      </div>
+                    </div>
+                    <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </div>
+                </button>
+              ))}
+              
+              {/* Files */}
+              {files.map((group) => {
                 const sigCount = group.latestVersion.signatures?.length || 0;
                 // Compute size from content if not provided
                 const fileSize = group.latestVersion.size || (group.latestVersion.content?.length || 0);
@@ -572,6 +862,7 @@ export default function ArtifactsPanel({
     const versionNum = selectedGroup.versions.length - versionIndex;
     const isLatest = versionIndex === 0;
     const isMarkdown = selectedArtifact.type === 'markdown';
+    const isMermaid = selectedArtifact.type === 'mermaid';
     
     // Get the current preview content based on mode
     const getCurrentPreviewContent = () => {
@@ -638,6 +929,26 @@ export default function ArtifactsPanel({
                       </svg>
                     )}
                     PDF
+                  </button>
+                )}
+                {isMermaid && (
+                  <button
+                    onClick={exportMermaidPng}
+                    disabled={isExportingPng}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] text-sm hover:opacity-90 disabled:opacity-50"
+                    title="Export as PNG"
+                  >
+                    {isExportingPng ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                      </svg>
+                    )}
+                    PNG
                   </button>
                 )}
                 <button
@@ -727,6 +1038,26 @@ export default function ArtifactsPanel({
                     ) : (
                       <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                      </svg>
+                    )}
+                  </button>
+                )}
+                {/* PNG export for mermaid */}
+                {isMermaid && activeTab === 'preview' && (
+                  <button
+                    onClick={exportMermaidPng}
+                    disabled={isExportingPng}
+                    className="p-2 rounded-lg hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] disabled:opacity-50"
+                    title="Export as PNG"
+                  >
+                    {isExportingPng ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                       </svg>
                     )}
                   </button>

@@ -14,7 +14,7 @@ import ArtifactsPanel from '../components/ArtifactsPanel';
 import SummaryPanel from '../components/SummaryPanel';
 import VoiceModeOverlay from '../components/VoiceModeOverlay';
 import ActiveToolsBar from '../components/ActiveToolsBar';
-import type { Artifact, Message, GeneratedImage } from '../types';
+import type { Artifact, Message, GeneratedImage, Chat } from '../types';
 import { groupArtifactsByFilename, getLatestArtifacts } from '../lib/artifacts';
 import api, { chatApi } from '../lib/api';
 import ReactMarkdown from 'react-markdown';
@@ -210,6 +210,8 @@ interface MessageListProps {
   onCurrentLeafChange?: (leafId: string | null) => void;
   // NC-0.8.0.0: Text selection hint handler
   onHintSelect?: (hint: import('../types').UserHint, selectedText: string) => void;
+  // Mermaid error handler for auto-fix
+  onMermaidError?: (error: string, code: string, messageId: string) => void;
 }
 
 // Build conversation path from tree structure
@@ -348,6 +350,7 @@ const MessageList = memo(function MessageList({
   initialSelectedVersions,
   onCurrentLeafChange,
   onHintSelect,
+  onMermaidError,
 }: MessageListProps) {
   // Track selected version for each parent (by parent_id -> selected_child_id)
   const [selectedVersions, setSelectedVersions] = useState<Record<string, string>>(
@@ -510,6 +513,7 @@ const MessageList = memo(function MessageList({
               assistantName={assistantName}
               versionInfo={versionInfo}
               onHintSelect={onHintSelect}
+              onMermaidError={onMermaidError}
             />
           </div>
         );
@@ -629,6 +633,8 @@ export default function ChatPage() {
     codeSummary,
     showSummary,
     generatedImages,
+    pendingImageContext,
+    setPendingImageContext,
     setShowSummary,
     updateCodeSummary,
     fetchCodeSummary,
@@ -655,18 +661,55 @@ export default function ChatPage() {
   // Combine saved artifacts with streaming and uploaded artifacts for real-time updates
   // Filter out agent memory files - they're internal and invisible to user
   const artifacts = useMemo(() => {
+    // Combine regular artifacts
     const combined = [...savedArtifacts, ...streamingArtifacts, ...uploadedArtifacts];
-    const filtered = combined.filter(a => !isAgentFile(a.filename));
+    
+    // Add generated images as artifacts
+    const imageArtifacts: typeof savedArtifacts = [];
+    let imageCount = 0;
+    Object.entries(generatedImages).forEach(([messageId, image]) => {
+      imageCount++;
+      // Determine extension from URL or default to png
+      let ext = 'png';
+      if (image.url) {
+        const urlExt = image.url.split('.').pop()?.toLowerCase();
+        if (urlExt && ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(urlExt)) {
+          ext = urlExt;
+        }
+      }
+      
+      imageArtifacts.push({
+        id: `generated-image-${messageId}`,
+        type: 'image',
+        title: `image${String(imageCount).padStart(3, '0')}.${ext}`,
+        filename: `image${String(imageCount).padStart(3, '0')}.${ext}`,
+        content: image.url || image.base64 || '',
+        created_at: new Date().toISOString(),
+        source: 'generated',
+        imageData: {
+          url: image.url,
+          base64: image.base64,
+          width: image.width,
+          height: image.height,
+          prompt: image.prompt,
+          seed: image.seed,
+        },
+      });
+    });
+    
+    const allArtifacts = [...combined, ...imageArtifacts];
+    const filtered = allArtifacts.filter(a => !isAgentFile(a.filename));
     console.log('[ChatPage] Combined artifacts:', {
       saved: savedArtifacts.length,
       streaming: streamingArtifacts.length,
       uploaded: uploadedArtifacts.length,
-      total: combined.length,
+      images: imageArtifacts.length,
+      total: allArtifacts.length,
       visible: filtered.length,
-      agentFilesHidden: combined.length - filtered.length,
+      agentFilesHidden: allArtifacts.length - filtered.length,
     });
     return filtered;
-  }, [savedArtifacts, streamingArtifacts, uploadedArtifacts]);
+  }, [savedArtifacts, streamingArtifacts, uploadedArtifacts, generatedImages]);
   
   // Debug: log showArtifacts value on each render
   console.log('[ChatPage] Render state:', { showArtifacts, artifactsCount: artifacts.length, selectedArtifact: selectedArtifact?.filename });
@@ -858,6 +901,18 @@ export default function ChatPage() {
     setShowModelSelector(false);
   };
   
+  // Handle token limit updates
+  const handleTokenLimitUpdate = async (field: 'max_input_tokens' | 'max_output_tokens', value: number | null) => {
+    if (!currentChat) return;
+    
+    try {
+      await chatApi.update(currentChat.id, { [field]: value || 0 });
+      setCurrentChat({ ...currentChat, [field]: value || undefined });
+    } catch (err) {
+      console.error(`Failed to update ${field}:`, err);
+    }
+  };
+  
   // Get model display name for assistant label
   const { getDisplayName } = useModelsStore();
   const assistantName = currentChat?.model ? getDisplayName(currentChat.model) : 'Assistant';
@@ -865,7 +920,7 @@ export default function ChatPage() {
   // Defensive: ensure messages is always an array
   const messages = Array.isArray(rawMessages) ? rawMessages : [];
   
-  const { sendChatMessage, regenerateMessage, isConnected, stopGeneration } = useWebSocket();
+  const { sendChatMessage, regenerateMessage, isConnected, stopGeneration, reportMermaidError } = useWebSocket();
   
   // Load chat when URL changes
   useEffect(() => {
@@ -880,9 +935,10 @@ export default function ChatPage() {
           const { chats } = useChatStore.getState();
           const chatIndex = chats.findIndex((c) => c.id === chatId);
           if (chatIndex >= 0) {
-            // Update the chat in the list with fresh data
+            // Update the chat in the list with fresh data, preserving _assignedPeriod
+            const existingChat = chats[chatIndex] as Chat & { _assignedPeriod?: string };
             const updatedChats = [...chats];
-            updatedChats[chatIndex] = chat;
+            updatedChats[chatIndex] = { ...chat, _assignedPeriod: existingChat._assignedPeriod };
             useChatStore.setState({ chats: updatedChats });
           }
         }
@@ -1033,7 +1089,7 @@ export default function ChatPage() {
   
   // Define attachment type from ChatInput
   interface ProcessedAttachment {
-    type: 'image' | 'file';
+    type: 'image' | 'file' | 'youtube';
     filename: string;
     mime_type: string;
     data?: string;
@@ -1042,7 +1098,7 @@ export default function ChatPage() {
   
   const handleSendMessage = async (content: string, attachments?: ProcessedAttachment[]) => {
     // Get currentChat from store directly to avoid stale closure issues
-    const { currentChat: storeCurrentChat, messages: storeMessages } = useChatStore.getState();
+    const { currentChat: storeCurrentChat, messages: storeMessages, generatedImages: storeGeneratedImages, pendingImageContext: storePendingImage, setPendingImageContext: clearPendingImage } = useChatStore.getState();
     let targetChatId = storeCurrentChat?.id;
     
     console.log('[handleSendMessage] Starting:', {
@@ -1050,6 +1106,8 @@ export default function ChatPage() {
       totalMessagesInStore: storeMessages.length,
       content: content.substring(0, 50),
       attachmentCount: attachments?.length || 0,
+      hasPendingImage: !!storePendingImage,
+      generatedImageCount: Object.keys(storeGeneratedImages).length,
     });
     
     // Calculate parentId from the currently displayed leaf assistant
@@ -1058,6 +1116,79 @@ export default function ChatPage() {
     let parentId: string | null = currentLeafAssistantIdRef.current;
     
     console.log('[handleSendMessage] Using currentLeafAssistantId as parentId:', parentId?.substring(0, 8) || 'null');
+    
+    // Build final attachments array
+    let finalAttachments = attachments ? [...attachments] : [];
+    let finalContent = content;
+    
+    // Find the most recent generated image in the current chat (if any)
+    let recentGeneratedImage: typeof storePendingImage = null;
+    if (Object.keys(storeGeneratedImages).length > 0 && storeMessages.length > 0) {
+      // Sort messages by date descending to find most recent
+      const sortedMessages = [...storeMessages].sort((a, b) => 
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+      for (const msg of sortedMessages) {
+        if (storeGeneratedImages[msg.id]) {
+          recentGeneratedImage = storeGeneratedImages[msg.id];
+          break;
+        }
+      }
+    }
+    
+    // Use pending image (standalone) or recent generated image from chat
+    const imageToInclude = storePendingImage || recentGeneratedImage;
+    
+    // Include image context if:
+    // 1. We have a pending image (standalone generation before chat) - always include
+    // 2. We have a recent generated image in this chat - always include for multimodal context
+    if (imageToInclude) {
+      // Add the image as an attachment if we have base64 data
+      if (imageToInclude.base64 || imageToInclude.url) {
+        const imageAttachment: ProcessedAttachment = {
+          type: 'image',
+          filename: 'generated_image.png',
+          mime_type: 'image/png',
+          data: imageToInclude.base64 || undefined,
+        };
+        
+        // If we only have URL, we need to fetch it as base64
+        if (!imageToInclude.base64 && imageToInclude.url) {
+          try {
+            const response = await fetch(imageToInclude.url);
+            const blob = await response.blob();
+            const base64 = await new Promise<string>((resolve) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+              reader.readAsDataURL(blob);
+            });
+            imageAttachment.data = base64;
+          } catch (err) {
+            console.error('Failed to fetch image for context:', err);
+          }
+        }
+        
+        if (imageAttachment.data) {
+          finalAttachments.unshift(imageAttachment);
+        }
+      }
+      
+      // Prepend context about the image to the message
+      const imageContext = `[IMAGE CONTEXT - USER-GENERATED, NOT BY LLM]
+The user previously generated this image using the image generation tool.
+Original prompt: "${imageToInclude.prompt}"
+Dimensions: ${imageToInclude.width}x${imageToInclude.height}, Seed: ${imageToInclude.seed}
+The image is attached for reference. Do NOT attempt to generate a new image unless explicitly asked.
+[END IMAGE CONTEXT]
+
+`;
+      finalContent = imageContext + content;
+      
+      // Clear the pending image if it was used (standalone images only)
+      if (storePendingImage) {
+        clearPendingImage(null);
+      }
+    }
     
     // Create new chat if none exists
     if (!targetChatId) {
@@ -1080,7 +1211,7 @@ export default function ChatPage() {
     
     // Pass the current leaf assistant ID as parent_id for linear conversation
     // This tells the backend which conversation path we're continuing from
-    sendChatMessage(targetChatId, content, attachments, parentId);
+    sendChatMessage(targetChatId, finalContent, finalAttachments.length > 0 ? finalAttachments : attachments, parentId);
   };
   
   // Handle file uploads - add to artifacts
@@ -1348,6 +1479,13 @@ export default function ChatPage() {
       sendMessageRef.current(prompt);
     }
   }, [currentChat]);
+  
+  // Handle mermaid rendering errors - report to LLM for auto-fix
+  const handleMermaidError = useCallback((error: string, code: string, messageId: string) => {
+    if (currentChat) {
+      reportMermaidError(currentChat.id, error, code, messageId);
+    }
+  }, [currentChat, reportMermaidError]);
   
   // Handle clicking a file in the zip upload card - find and select the artifact
   const handleZipFileClick = useCallback((filepath: string) => {
@@ -1677,6 +1815,33 @@ export default function ChatPage() {
                       No models available
                     </div>
                   )}
+                  
+                  {/* Token Limits Section */}
+                  {currentChat && (
+                    <>
+                      <div className="border-t border-[var(--color-border)] my-1" />
+                      <div className="px-3 py-1.5 text-xs text-[var(--color-text-secondary)] uppercase tracking-wide">
+                        Context Compression
+                      </div>
+                      <div className="px-3 py-2 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="text-xs text-[var(--color-text-secondary)]">Target Tokens</label>
+                          <input
+                            type="number"
+                            placeholder="65000"
+                            value={currentChat.max_input_tokens || ''}
+                            onChange={(e) => handleTokenLimitUpdate('max_input_tokens', e.target.value ? parseInt(e.target.value) : null)}
+                            className="w-24 px-2 py-1 text-xs rounded bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)]"
+                            min={1000}
+                            step={1000}
+                          />
+                        </div>
+                        <div className="text-[10px] text-[var(--color-text-secondary)]">
+                          Compress if exceeds this
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -1831,6 +1996,7 @@ export default function ChatPage() {
                   initialSelectedVersions={currentChat?.selected_versions}
                   onCurrentLeafChange={setCurrentLeafAssistantId}
                   onHintSelect={handleHintSelect}
+                  onMermaidError={handleMermaidError}
                 />
               )}
               

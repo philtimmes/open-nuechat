@@ -27,9 +27,13 @@ export interface Chat {
   system_prompt?: string;
   is_shared: boolean;
   is_knowledge_indexed?: boolean;  // Part of user's chat knowledge base
+  source?: string;  // Import source: native, chatgpt, grok, claude
   // Assistant Mode (NC-0.8.0.0)
   mode_id?: string;
   active_tools?: string[];  // User's tool overrides
+  // Token limits (NC-0.8.0.4)
+  max_input_tokens?: number;  // Limit on input context
+  max_output_tokens?: number;  // Limit on completion length
   created_at: string;
   updated_at: string;
   total_input_tokens: number;
@@ -56,16 +60,25 @@ export interface ToolCall {
 
 export interface Artifact {
   id: string;
-  type: 'code' | 'document' | 'html' | 'react' | 'svg' | 'mermaid' | 'markdown' | 'json' | 'csv';
+  type: 'code' | 'document' | 'html' | 'react' | 'svg' | 'mermaid' | 'markdown' | 'json' | 'csv' | 'image';
   title: string;
   language?: string;
-  content: string;
+  content: string;  // For images, this is the URL or base64
   filename?: string;
   created_at: string;
   // For zip-extracted files
   size?: number;
   signatures?: CodeSignature[];
   source?: 'upload' | 'generated';  // Track origin for filtering
+  // For image artifacts
+  imageData?: {
+    url?: string;
+    base64?: string;
+    width: number;
+    height: number;
+    prompt: string;
+    seed: number;
+  };
 }
 
 export interface CodeSignature {
@@ -92,6 +105,11 @@ export interface ZipFileResponse {
   path: string;
   content: string;
   formatted: string;  // Pre-formatted for LLM injection
+  // NC-0.8.0.6: Chunked retrieval support
+  offset?: number;
+  end_offset?: number;
+  total_size?: number;
+  more_available?: boolean;
 }
 
 export interface MessageBranch {

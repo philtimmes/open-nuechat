@@ -36,6 +36,8 @@ from app.filters import (
 
 # Structured logger for LLM service
 llm_logger = get_logger("llm_service")
+# Alias for backward compatibility (many places use 'logger' directly)
+logger = llm_logger
 
 
 class LLMService:
@@ -537,6 +539,14 @@ class LLMService:
         
         effective_model = await self._get_effective_model(chat_model)
         
+        # Determine max_output_tokens - use chat-level setting if set, otherwise service default
+        effective_max_output_tokens = chat.max_output_tokens if chat.max_output_tokens else self.max_tokens
+        
+        # Determine max_input_tokens - used later to truncate message history
+        effective_max_input_tokens = chat.max_input_tokens  # None means no limit (use model default)
+        
+        logger.debug(f"[TOKEN_LIMITS] max_input={effective_max_input_tokens}, max_output={effective_max_output_tokens}")
+        
         # Check if safety filters are enabled (admin setting)
         from app.services.settings_service import SettingsService
         safety_filters_enabled = await SettingsService.get_bool(db, "enable_safety_filters")
@@ -584,6 +594,98 @@ class LLMService:
         
         # Build messages from chat history (using tree structure)
         messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id)
+        
+        # Import token estimation for input/output limit validation
+        from app.services.history_compression import estimate_message_tokens
+        
+        # Enforce max_input_tokens if set - store overflow in agent memory files
+        if effective_max_input_tokens:
+            total_tokens = estimate_message_tokens(messages)
+            if total_tokens > effective_max_input_tokens:
+                logger.info(f"[TOKEN_LIMIT] Input tokens ({total_tokens}) exceeds limit ({effective_max_input_tokens}), compressing to agent memory")
+                try:
+                    from app.services.agent_memory import AgentMemoryService
+                    
+                    agent_memory = AgentMemoryService(model_context_size=effective_max_input_tokens)
+                    
+                    # Keep system message and recent messages, archive the rest
+                    keep_recent = 10  # Keep last 10 message pairs
+                    if len(messages) > keep_recent + 1:  # +1 for system message
+                        # Messages to archive (oldest first, excluding system prompt)
+                        messages_to_archive = messages[1:-(keep_recent)]
+                        
+                        if messages_to_archive:
+                            # Store in agent memory file
+                            await agent_memory.compress_messages(
+                                db=db,
+                                chat_id=str(chat.id),
+                                messages_to_compress=messages_to_archive,
+                                llm_client=self.client,
+                                model=effective_model,
+                                api_base=self.base_url,
+                                api_key=self.api_key,
+                            )
+                            
+                            # Keep system + recent messages
+                            messages = [messages[0]] + messages[-(keep_recent):]
+                            new_total = estimate_message_tokens(messages)
+                            logger.info(f"[TOKEN_LIMIT] Archived {len(messages_to_archive)} messages to agent memory, now ~{new_total} tokens")
+                            
+                            # NC-0.8.0.6: Inject relevant context from local FAISS
+                            # Search archived content + attachments for relevant context
+                            try:
+                                from app.services.local_chat_rag import get_local_context_for_overflow
+                                from app.api.routes.admin import get_system_setting_float
+                                
+                                # Get the latest user message for query
+                                query = ""
+                                for msg in reversed(messages):
+                                    if msg.get("role") == "user":
+                                        content = msg.get("content", "")
+                                        if isinstance(content, str):
+                                            query = content
+                                        elif isinstance(content, list):
+                                            for part in content:
+                                                if isinstance(part, dict) and part.get("type") == "text":
+                                                    query = part.get("text", "")
+                                                    break
+                                        break
+                                
+                                if query:
+                                    min_score = await get_system_setting_float(db, "rag_threshold_local", 0.4)
+                                    local_context = await get_local_context_for_overflow(
+                                        db=db,
+                                        chat_id=str(chat.id),
+                                        query=query,
+                                        messages=messages,
+                                        max_tokens=4000,
+                                        min_score=min_score,
+                                    )
+                                    
+                                    if local_context:
+                                        # Inject into system prompt
+                                        if messages and messages[0].get("role") == "system":
+                                            messages[0]["content"] = messages[0]["content"] + "\n" + local_context
+                                            logger.info(f"[LOCAL_RAG] Injected relevant context from local FAISS")
+                            except Exception as e:
+                                logger.warning(f"[LOCAL_RAG] Failed to inject local context: {e}")
+                                
+                except Exception as e:
+                    logger.error(f"[TOKEN_LIMIT] Agent memory storage failed: {e}, falling back to truncation")
+                    # Fallback: simple truncation
+                    while len(messages) > 2 and estimate_message_tokens(messages) > effective_max_input_tokens:
+                        messages.pop(1)
+        
+        # Validate max_output_tokens doesn't exceed remaining context
+        # This prevents the 400 error from going to the user
+        current_input_tokens = estimate_message_tokens(messages)
+        # NC-0.8.0.7: Use configurable context size from admin settings
+        model_context_limit = await SettingsService.get_int(db, "llm_context_size") or 200000
+        max_possible_output = model_context_limit - current_input_tokens - 1000  # 1000 token buffer
+        
+        if effective_max_output_tokens > max_possible_output:
+            logger.warning(f"[TOKEN_LIMIT] max_output_tokens ({effective_max_output_tokens}) exceeds remaining context ({max_possible_output}), capping")
+            effective_max_output_tokens = max(1000, max_possible_output)  # At least 1000 tokens
         
         # Create placeholder assistant message
         assistant_message = Message(
@@ -706,10 +808,15 @@ class LLMService:
             api_params = {
                 "model": effective_model,
                 "messages": messages,
-                "max_tokens": self.max_tokens,
+                "max_tokens": effective_max_output_tokens,
                 "temperature": self.temperature,
                 "stream": True,
             }
+            
+            # NC-0.8.0.7: Add tools to API params if provided
+            if tools:
+                api_params["tools"] = self._convert_tools_to_openai_format(tools)
+                logger.debug(f"[LLM_TOOLS] Added {len(tools)} tools to streaming request")
             
             # Debug: Log the ACTUAL JSON payload size that will be sent
             import json as json_module
@@ -764,48 +871,185 @@ class LLMService:
             cancelled = False
             chunk_count = 0
             first_content = ""
+            
+            # NC-0.8.0.7: Track tool calls for multi-turn tool use
+            streaming_tool_calls = {}
+            max_tool_rounds = 5  # Prevent infinite tool loops
+            tool_round = 0
+            
             try:
-                async for chunk in stream:
-                    chunk_count += 1
+                while tool_round < max_tool_rounds:
+                    tool_round += 1
+                    pending_tool_calls = False
                     
-                    # Check for cancellation at start of each iteration
-                    if cancel_check and cancel_check():
-                        logger.info("Stream cancelled by user request - breaking loop")
-                        cancelled = True
-                        # Try to close the stream
-                        try:
-                            await stream.close()
-                        except Exception:
-                            pass
+                    async for chunk in stream:
+                        chunk_count += 1
+                        
+                        # Check for cancellation at start of each iteration
+                        if cancel_check and cancel_check():
+                            logger.info("Stream cancelled by user request - breaking loop")
+                            cancelled = True
+                            # Try to close the stream
+                            try:
+                                await stream.close()
+                            except Exception:
+                                pass
+                            break
+                        
+                        if not chunk.choices:
+                            continue
+                        
+                        delta = chunk.choices[0].delta
+                        finish_reason = chunk.choices[0].finish_reason
+                        
+                        if delta.content:
+                            filtered_content += delta.content
+                            
+                            # Log first 500 chars of response
+                            if len(first_content) < 500:
+                                first_content += delta.content
+                                if len(first_content) >= 500:
+                                    logger.info(f"[LLM_RESPONSE] First 500 chars: {first_content[:500]!r}")
+                            
+                            yield {
+                                "type": "text_delta",
+                                "text": delta.content,
+                            }
+                        
+                        # NC-0.8.0.7: Handle tool calls in streaming
+                        if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                            for tc in delta.tool_calls:
+                                # Tool calls come in chunks - accumulate them
+                                tc_index = tc.index if hasattr(tc, 'index') else 0
+                                
+                                if tc_index not in streaming_tool_calls:
+                                    streaming_tool_calls[tc_index] = {
+                                        "id": "",
+                                        "name": "",
+                                        "arguments": "",
+                                    }
+                                
+                                stc = streaming_tool_calls[tc_index]
+                                if tc.id:
+                                    stc["id"] = tc.id
+                                if hasattr(tc, 'function'):
+                                    if tc.function.name:
+                                        stc["name"] = tc.function.name
+                                    if tc.function.arguments:
+                                        stc["arguments"] += tc.function.arguments
+                        
+                        if hasattr(chunk, 'usage') and chunk.usage:
+                            total_input_tokens = chunk.usage.prompt_tokens or 0
+                            total_output_tokens = chunk.usage.completion_tokens or 0
+                            # Log token counts when available
+                            if total_input_tokens > 0:
+                                logger.info(f"[LLM_RESPONSE] Token usage: prompt={total_input_tokens}, completion={total_output_tokens}")
+                        
+                        # Check for tool_calls finish reason
+                        if finish_reason == "tool_calls":
+                            pending_tool_calls = True
+                            break
+                        
+                        if finish_reason and finish_reason != "tool_calls":
+                            break
+                    
+                    # If cancelled, exit the while loop
+                    if cancelled:
                         break
                     
-                    if not chunk.choices:
-                        continue
+                    # If no pending tool calls, we're done
+                    if not pending_tool_calls:
+                        break
                     
-                    delta = chunk.choices[0].delta
-                    
-                    if delta.content:
-                        filtered_content += delta.content
+                    # Execute pending tool calls
+                    if streaming_tool_calls and tool_executor:
+                        logger.info(f"[LLM_TOOLS] Tool calls requested (round {tool_round}), executing {len(streaming_tool_calls)} tools...")
                         
-                        # Log first 500 chars of response
-                        if len(first_content) < 500:
-                            first_content += delta.content
-                            if len(first_content) >= 500:
-                                logger.info(f"[LLM_RESPONSE] First 500 chars: {first_content[:500]!r}")
+                        for tc_index, tc_data in streaming_tool_calls.items():
+                            tool_name = tc_data["name"]
+                            try:
+                                tool_args = json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
+                            except json.JSONDecodeError:
+                                tool_args = {}
+                            
+                            logger.info(f"[LLM_TOOLS] Executing tool: {tool_name} with args: {tool_args}")
+                            tool_calls_count += 1
+                            
+                            try:
+                                result = await tool_executor(tool_name, tool_args)
+                                result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                                
+                                # Truncate very long results
+                                if len(result_str) > 15000:
+                                    result_str = result_str[:15000] + "\n... [truncated]"
+                                
+                                # Yield tool call event for frontend
+                                yield {
+                                    "type": "tool_call",
+                                    "tool_name": tool_name,
+                                    "arguments": tool_args,
+                                    "result": result_str[:1000] + "..." if len(result_str) > 1000 else result_str,
+                                }
+                                
+                                # Add tool result to messages for continuation
+                                messages.append({
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [{
+                                        "id": tc_data["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_name,
+                                            "arguments": tc_data["arguments"],
+                                        }
+                                    }]
+                                })
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc_data["id"],
+                                    "content": result_str,
+                                })
+                            except Exception as e:
+                                logger.error(f"[LLM_TOOLS] Tool execution failed: {e}")
+                                messages.append({
+                                    "role": "assistant", 
+                                    "content": None,
+                                    "tool_calls": [{
+                                        "id": tc_data["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_name,
+                                            "arguments": tc_data["arguments"],
+                                        }
+                                    }]
+                                })
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc_data["id"],
+                                    "content": f"Error: {str(e)}",
+                                })
                         
-                        yield {
-                            "type": "text_delta",
-                            "text": delta.content,
+                        # Clear accumulated tool calls for next round
+                        streaming_tool_calls = {}
+                        
+                        # Continue conversation with tool results
+                        logger.info(f"[LLM_TOOLS] Continuing with tool results...")
+                        continue_params = {
+                            "model": effective_model,
+                            "messages": messages,
+                            "max_tokens": effective_max_output_tokens,
+                            "temperature": self.temperature,
+                            "stream": True,
                         }
-                    
-                    if hasattr(chunk, 'usage') and chunk.usage:
-                        total_input_tokens = chunk.usage.prompt_tokens or 0
-                        total_output_tokens = chunk.usage.completion_tokens or 0
-                        # Log token counts when available
-                        if total_input_tokens > 0:
-                            logger.info(f"[LLM_RESPONSE] Token usage: prompt={total_input_tokens}, completion={total_output_tokens}")
-                    
-                    if chunk.choices[0].finish_reason:
+                        if tools:
+                            continue_params["tools"] = self._convert_tools_to_openai_format(tools)
+                        
+                        stream = await self.client.chat.completions.create(**continue_params)
+                        if stream_setter:
+                            stream_setter(stream)
+                        # Continue the while loop to process the new stream
+                    else:
+                        # No tool executor or no tool calls, exit
                         break
             except asyncio.CancelledError:
                 # Task was cancelled - this is expected when stop is requested
@@ -921,6 +1165,10 @@ class LLMService:
         except Exception as e:
             error_msg = str(e) or f"{type(e).__name__}: No error message"
             logger.error(f"Stream error ({type(e).__name__}): {error_msg}")
+            
+            # Sanitize error message for user - don't expose raw API errors
+            user_friendly_error = self._sanitize_error_for_user(error_msg)
+            
             # Use direct SQL for error update too
             message_id = str(assistant_message.id) if assistant_message else None
             if message_id:
@@ -929,7 +1177,7 @@ class LLMService:
                         update(Message)
                         .where(Message.id == message_id)
                         .values(
-                            content=f"Error: {error_msg}",
+                            content=f"Error: {user_friendly_error}",
                             is_error=True,
                             is_streaming=False,
                         )
@@ -939,8 +1187,51 @@ class LLMService:
             
             yield {
                 "type": "error",
-                "error": error_msg,
+                "error": user_friendly_error,
             }
+    
+    def _sanitize_error_for_user(self, error_msg: str) -> str:
+        """
+        Convert raw API errors to user-friendly messages.
+        Prevents exposing internal details like token counts, API keys, etc.
+        """
+        error_lower = error_msg.lower()
+        
+        # Token/context limit errors
+        if "max_tokens" in error_lower or "max_completion_tokens" in error_lower or "context length" in error_lower:
+            return "The conversation is too long. Try starting a new chat or reduce the Max Output Tokens setting."
+        
+        # Rate limit errors
+        if "rate limit" in error_lower or "rate_limit" in error_lower:
+            return "Rate limit reached. Please wait a moment and try again."
+        
+        # Authentication errors
+        if "authentication" in error_lower or "api key" in error_lower or "unauthorized" in error_lower:
+            return "API authentication error. Please check your settings or contact support."
+        
+        # Model not found
+        if "model not found" in error_lower or "does not exist" in error_lower:
+            return "The selected model is not available. Please choose a different model."
+        
+        # Content filtering
+        if "content filter" in error_lower or "safety" in error_lower or "blocked" in error_lower:
+            return "The request was blocked by content filters. Please rephrase your message."
+        
+        # Timeout errors
+        if "timeout" in error_lower or "timed out" in error_lower:
+            return "The request timed out. Please try again."
+        
+        # Connection errors
+        if "connection" in error_lower or "network" in error_lower:
+            return "Connection error. Please check your internet and try again."
+        
+        # Generic server errors
+        if "500" in error_msg or "502" in error_msg or "503" in error_msg or "internal server error" in error_lower:
+            return "The AI service is temporarily unavailable. Please try again in a moment."
+        
+        # If we can't categorize it, return a generic message
+        # Log the full error for debugging but don't expose it
+        return "An error occurred while generating the response. Please try again."
     
     async def _check_needs_search(self, model: str, messages: List[Dict], user_query: str) -> bool:
         """Ask LLM if it needs to search for current information."""
@@ -1316,21 +1607,73 @@ When you receive search results or external data in the conversation, follow the
             logger.debug(f"[BUILD_CONTENT] Processing attachment type={att_type}, filename={attachment.get('filename')}")
             
             if att_type == "image":
-                images.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{attachment.get('mime_type', 'image/jpeg')};base64,{attachment.get('data', '')[:50]}...",
-                    }
-                })
+                # Build image content for multimodal models
+                image_data = attachment.get('data', '')
+                mime_type = attachment.get('mime_type', 'image/jpeg')
+                
+                # Log details for debugging
+                if not image_data:
+                    logger.warning(f"[BUILD_CONTENT] Image attachment has no 'data' field! Keys: {list(attachment.keys())}")
+                    # Try alternative field names
+                    image_data = attachment.get('content', '') or attachment.get('base64', '') or attachment.get('url', '')
+                    if image_data and image_data.startswith('data:'):
+                        # It's a data URL, extract the base64 part
+                        if ';base64,' in image_data:
+                            image_data = image_data.split(';base64,')[1]
+                            logger.info(f"[BUILD_CONTENT] Extracted base64 from data URL, len={len(image_data)}")
+                
+                logger.info(f"[BUILD_CONTENT] Adding image: mime={mime_type}, data_len={len(image_data) if image_data else 0}")
+                
+                if image_data:
+                    images.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{image_data}",
+                        }
+                    })
+                else:
+                    logger.error(f"[BUILD_CONTENT] Skipping image with no data. Attachment: {attachment}")
             elif att_type == "file":
                 # File attachment - include content as text
                 filename = attachment.get("filename", "unnamed")
                 content = attachment.get("content", "")
                 if content:
-                    logger.info(f"[BUILD_CONTENT] Adding file content: {filename} ({len(content)} chars)")
-                    file_contents.append(f"=== FILE: {filename} ===\n{content}\n=== END FILE ===")
+                    # NC-0.8.0.6: Truncate large files to prevent context overflow
+                    # Files over 20KB get truncated with retrieval instructions
+                    MAX_INLINE_FILE = 20_000
+                    if len(content) > MAX_INLINE_FILE:
+                        # Check if this is already a truncation notice
+                        if "[File stored as artifact" in content:
+                            # Already truncated - use as-is
+                            logger.info(f"[BUILD_CONTENT] File already truncated: {filename}")
+                            file_contents.append(f"=== FILE: {filename} ===\n{content}\n=== END FILE ===")
+                        else:
+                            # Truncate with retrieval instructions
+                            truncated = content[:MAX_INLINE_FILE]
+                            # Try to break at a line boundary
+                            last_newline = truncated.rfind('\n')
+                            if last_newline > MAX_INLINE_FILE // 2:
+                                truncated = truncated[:last_newline]
+                            
+                            truncation_notice = f"\n\n[... TRUNCATED at {len(truncated):,} of {len(content):,} chars ...]\n"
+                            truncation_notice += f"[Use <request_file path=\"{filename}\" offset=\"{len(truncated)}\"/> to retrieve more content]"
+                            
+                            logger.info(f"[BUILD_CONTENT] Truncated file: {filename} ({len(content)} -> {len(truncated)} chars)")
+                            file_contents.append(f"=== FILE: {filename} ===\n{truncated}{truncation_notice}\n=== END FILE ===")
+                    else:
+                        logger.info(f"[BUILD_CONTENT] Adding file content: {filename} ({len(content)} chars)")
+                        file_contents.append(f"=== FILE: {filename} ===\n{content}\n=== END FILE ===")
                 else:
                     logger.warning(f"[BUILD_CONTENT] File attachment has no content: {filename}")
+            elif att_type == "youtube":
+                # YouTube video context - include as video context
+                filename = attachment.get("filename", "youtube-video.txt")
+                content = attachment.get("content", "")
+                if content:
+                    logger.info(f"[BUILD_CONTENT] Adding YouTube context: {filename} ({len(content)} chars)")
+                    file_contents.append(f"=== VIDEO CONTEXT ===\n{content}\n=== END VIDEO CONTEXT ===")
+                else:
+                    logger.warning(f"[BUILD_CONTENT] YouTube attachment has no content: {filename}")
         
         # Build the combined text with file contents
         combined_text = text

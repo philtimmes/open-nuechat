@@ -77,12 +77,16 @@ class ChatCreate(BaseModel):
     model: Optional[str] = None
     system_prompt: Optional[str] = None
     is_shared: bool = False
+    max_input_tokens: Optional[int] = None  # Limit on input context
+    max_output_tokens: Optional[int] = None  # Limit on completion length
 
 
 class ChatUpdate(BaseModel):
     title: Optional[str] = None
     model: Optional[str] = None
     system_prompt: Optional[str] = None
+    max_input_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None
 
 
 class ChatResponse(BaseModel):
@@ -94,8 +98,11 @@ class ChatResponse(BaseModel):
     system_prompt: Optional[str]
     is_shared: bool
     is_knowledge_indexed: bool = False
+    source: Optional[str] = "native"  # Import source: native, chatgpt, grok, claude
     total_input_tokens: int
     total_output_tokens: int
+    max_input_tokens: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     selected_versions: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
@@ -109,6 +116,7 @@ class ChatListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    group_counts: Optional[Dict[str, int]] = None  # Actual totals per group from database
 
 
 # ============ Message Schemas ============
