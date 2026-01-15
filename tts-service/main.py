@@ -154,7 +154,17 @@ class KokoroPipeline:
                     logger.info("PyTorch default device set to CUDA/ROCm")
                 
                 # Initialize pipeline - Kokoro uses PyTorch internally
-                self._pipeline = KPipeline(lang_code='a')  # American English
+                try:
+                    self._pipeline = KPipeline(lang_code='a')  # American English
+                except RuntimeError as e:
+                    if "CUDA" in str(e) and self._device == "cuda":
+                        logger.warning(f"CUDA initialization failed: {e}")
+                        logger.warning("Falling back to CPU...")
+                        self._device = "cpu"
+                        torch.set_default_device("cpu")
+                        self._pipeline = KPipeline(lang_code='a')
+                    else:
+                        raise
                 
                 # Log model device placement
                 logger.info(f"Kokoro TTS pipeline initialized on {self._device}")
