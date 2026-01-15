@@ -17,7 +17,7 @@ class UserCreate(BaseModel):
 
 
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: str  # Use str instead of EmailStr to allow localhost
     password: str
 
 
