@@ -592,12 +592,12 @@ async def run_migrations(conn):
 
 async def seed_default_settings(db) -> int:
     """
-    Seed system_settings table with defaults from SETTING_DEFAULTS if empty.
+    Seed system_settings table from default-schema.sql if empty.
     Returns count of settings seeded.
     """
-    from sqlalchemy import select, func
+    from sqlalchemy import select, func, text
     from app.models.settings import SystemSetting
-    from app.core.settings_keys import SETTING_DEFAULTS
+    from pathlib import Path
     
     # Check if settings table is empty
     result = await db.execute(select(func.count()).select_from(SystemSetting))
@@ -606,14 +606,23 @@ async def seed_default_settings(db) -> int:
     if count > 0:
         return 0  # Already has settings, don't seed
     
-    # Seed all defaults
-    seeded = 0
-    for key, value in SETTING_DEFAULTS.items():
-        setting = SystemSetting(key=key, value=str(value))
-        db.add(setting)
-        seeded += 1
+    # Load and execute default-schema.sql
+    schema_file = Path(__file__).parent.parent / "default-schema.sql"
+    if not schema_file.exists():
+        logger.warning(f"default-schema.sql not found at {schema_file}")
+        return 0
     
-    await db.commit()
+    sql_content = schema_file.read_text()
+    
+    # Execute each statement
+    # Split by semicolon but be careful with values containing semicolons
+    async with engine.begin() as conn:
+        await conn.execute(text(sql_content))
+    
+    # Count what was inserted
+    result = await db.execute(select(func.count()).select_from(SystemSetting))
+    seeded = result.scalar()
+    
     return seeded
 
 

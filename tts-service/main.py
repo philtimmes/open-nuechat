@@ -143,7 +143,7 @@ class KokoroPipeline:
             if self._pipeline is not None:
                 return
             
-            logger.info(f"Initializing Kokoro TTS pipeline on {self._device}...")
+            print(f"[TTS] Initializing Kokoro TTS pipeline on {self._device}...")
             try:
                 import torch
                 from kokoro import KPipeline
@@ -151,37 +151,37 @@ class KokoroPipeline:
                 # Set default device for PyTorch tensors
                 if self._device == "cuda" and torch.cuda.is_available():
                     torch.set_default_device("cuda")
-                    logger.info("PyTorch default device set to CUDA/ROCm")
+                    print("[TTS] PyTorch default device set to CUDA/ROCm")
                 
                 # Initialize pipeline - Kokoro uses PyTorch internally
+                print("[TTS] Loading Kokoro model...")
                 try:
                     self._pipeline = KPipeline(lang_code='a')  # American English
                 except RuntimeError as e:
                     if "CUDA" in str(e) and self._device == "cuda":
-                        logger.warning(f"CUDA initialization failed: {e}")
-                        logger.warning("Falling back to CPU...")
+                        print(f"[TTS] CUDA initialization failed: {e}")
+                        print("[TTS] Falling back to CPU...")
                         self._device = "cpu"
                         torch.set_default_device("cpu")
                         self._pipeline = KPipeline(lang_code='a')
                     else:
                         raise
                 
-                # Log model device placement
-                logger.info(f"Kokoro TTS pipeline initialized on {self._device}")
+                print(f"[TTS] Kokoro TTS pipeline initialized on {self._device}")
                 
                 # Warm up with a short phrase to ensure model is loaded to GPU
                 if self._device == "cuda":
-                    logger.info("Warming up GPU with test inference...")
+                    print("[TTS] Warming up GPU with test inference...")
                     try:
                         # Short warmup
                         for _ in self._pipeline("Hello", voice="af_heart"):
                             pass
-                        logger.info("GPU warmup complete")
+                        print("[TTS] GPU warmup complete")
                     except Exception as e:
-                        logger.warning(f"GPU warmup failed: {e}")
+                        print(f"[TTS] GPU warmup failed: {e}")
                 
             except Exception as e:
-                logger.error(f"Failed to initialize Kokoro: {e}")
+                print(f"[TTS] Failed to initialize Kokoro: {e}")
                 raise
     
     def generate_sync(self, text: str, voice: str, speed: float = 1.0) -> bytes:
@@ -503,32 +503,42 @@ AVAILABLE_VOICES = [
 
 # ============ FastAPI App ============
 
-app = FastAPI(
-    title="Kokoro TTS Service",
-    description="Text-to-Speech microservice using Kokoro with request queuing",
-    version="1.0.0"
-)
+from contextlib import asynccontextmanager
 
 # Global instances
 pipeline = KokoroPipeline(device=DEVICE)
 queue_manager: Optional[TTSQueueManager] = None
 
 
-@app.on_event("startup")
-async def startup():
-    """Initialize on startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan - startup and shutdown"""
     global queue_manager
+    
+    # Startup
+    print(f"[TTS] Starting Kokoro TTS Service on {DEVICE}...")
+    print(f"[TTS] Initializing pipeline and loading model...")
+    
     queue_manager = TTSQueueManager(pipeline, MAX_QUEUE_SIZE, MAX_CONCURRENT)
     await queue_manager.start()
-    logger.info("TTS Service started")
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Cleanup on shutdown"""
+    
+    print(f"[TTS] Service ready - {MAX_CONCURRENT} workers, queue size {MAX_QUEUE_SIZE}")
+    
+    yield
+    
+    # Shutdown
+    print("[TTS] Shutting down...")
     if queue_manager:
         await queue_manager.stop()
-    logger.info("TTS Service stopped")
+    print("[TTS] Service stopped")
+
+
+app = FastAPI(
+    title="Kokoro TTS Service",
+    description="Text-to-Speech microservice using Kokoro with request queuing",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 
 @app.get("/health")
