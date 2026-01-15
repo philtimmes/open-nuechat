@@ -20,16 +20,14 @@ Full-stack LLM chat application with:
 
 **Problem:** Admin Panel showed "Failed to load settings" on fresh install because `system_settings` table was empty.
 
-**Solution:** Added `seed_default_settings()` in `main.py` lifespan that populates `system_settings` table from `SETTING_DEFAULTS` if empty.
+**Solution:** 
+1. Added `seed_default_settings()` in `main.py` lifespan that populates `system_settings` table from `SETTING_DEFAULTS` if empty.
+2. Fixed migration version detection: fresh installs now start at `NC-0.0.0` so ALL migrations run, not just those after `NC-0.5.0`.
 
-```python
-async def seed_default_settings(db) -> int:
-    # Check if settings table is empty
-    # If empty, seed all defaults from SETTING_DEFAULTS
-    # Returns count of settings seeded
-```
-
-Called during startup after `seed_default_themes()`.
+**Detection logic:**
+- If `schema_version` row exists → use stored version
+- If no row AND `system_settings` is empty → fresh install → `NC-0.0.0`
+- If no row AND `system_settings` has data → legacy DB → `NC-0.5.0`
 
 ---
 

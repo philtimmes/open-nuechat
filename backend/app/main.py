@@ -88,7 +88,28 @@ async def run_migrations(conn):
     # Get current version
     result = await conn.execute(text("SELECT version FROM schema_version WHERE id = 1"))
     row = result.fetchone()
-    current_version = row[0] if row else "NC-0.5.0"  # Assume 0.5.0 for existing DBs without version
+    
+    if row:
+        current_version = row[0]
+    else:
+        # No version row - check if this is a fresh install or legacy DB
+        # Fresh install: system_settings table is empty
+        # Legacy DB: system_settings may have data from before versioning
+        try:
+            settings_result = await conn.execute(text("SELECT COUNT(*) FROM system_settings"))
+            settings_count = settings_result.scalar()
+            if settings_count == 0:
+                # Fresh install - run ALL migrations
+                current_version = "NC-0.0.0"
+                logger.info("Fresh install detected - will run all migrations")
+            else:
+                # Legacy DB with data but no version tracking
+                current_version = "NC-0.5.0"
+                logger.info("Legacy database detected - assuming NC-0.5.0")
+        except Exception:
+            # system_settings table doesn't exist yet - fresh install
+            current_version = "NC-0.0.0"
+            logger.info("Fresh install detected - will run all migrations")
     
     logger.info(f"Database schema version: {current_version}, App schema version: {SCHEMA_VERSION}")
     
