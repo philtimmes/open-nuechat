@@ -112,10 +112,10 @@ class TierConfig(BaseModel):
 class SystemSettingsSchema(BaseModel):
     """System settings that can be modified by admins"""
     # Prompts
-    default_system_prompt: str
+    default_system_prompt: str = ""
     all_models_prompt: str = ""  # Appended to all system prompts including Custom GPTs
-    title_generation_prompt: str
-    rag_context_prompt: str  # Legacy - used for user documents if specific prompt not set
+    title_generation_prompt: str = ""
+    rag_context_prompt: str = ""  # Legacy - used for user documents if specific prompt not set
     
     # RAG Context Prompts (per source type)
     rag_prompt_global_kb: str = ""  # Global Knowledge Stores (authoritative)
@@ -129,23 +129,23 @@ class SystemSettingsSchema(BaseModel):
     rag_threshold_local: float = Field(default=0.4, ge=0.0, le=1.0, description="Threshold for current chat local RAG (attachments/overflow)")
     
     # Pricing
-    input_token_price: float
-    output_token_price: float
+    input_token_price: float = 3.0
+    output_token_price: float = 15.0
     
     # Token refill (in hours)
-    token_refill_interval_hours: int = Field(ge=1, description="Token refill interval in hours")
+    token_refill_interval_hours: int = Field(default=720, ge=1, description="Token refill interval in hours")
     
     # Token limits by tier
-    free_tier_tokens: int = Field(ge=0)
-    pro_tier_tokens: int = Field(ge=0)
-    enterprise_tier_tokens: int = Field(ge=0)
+    free_tier_tokens: int = Field(default=100000, ge=0)
+    pro_tier_tokens: int = Field(default=1000000, ge=0)
+    enterprise_tier_tokens: int = Field(default=10000000, ge=0)
     
     # Storage limits
-    max_upload_size_mb: int = Field(ge=1, le=10000, description="Maximum file upload size in MB")
-    max_knowledge_store_size_mb: int = Field(ge=1, le=100000, description="Maximum knowledge store size in MB")
-    max_knowledge_stores_free: int = Field(ge=0, description="Max knowledge stores for free tier")
-    max_knowledge_stores_pro: int = Field(ge=0, description="Max knowledge stores for pro tier")
-    max_knowledge_stores_enterprise: int = Field(ge=0, description="Max knowledge stores for enterprise tier")
+    max_upload_size_mb: int = Field(default=100, ge=1, le=10000, description="Maximum file upload size in MB")
+    max_knowledge_store_size_mb: int = Field(default=500, ge=1, le=100000, description="Maximum knowledge store size in MB")
+    max_knowledge_stores_free: int = Field(default=3, ge=0, description="Max knowledge stores for free tier")
+    max_knowledge_stores_pro: int = Field(default=20, ge=0, description="Max knowledge stores for pro tier")
+    max_knowledge_stores_enterprise: int = Field(default=100, ge=0, description="Max knowledge stores for enterprise tier")
 
 
 class OAuthSettingsSchema(BaseModel):

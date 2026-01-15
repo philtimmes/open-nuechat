@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.8.0.9"
+SCHEMA_VERSION = "NC-0.8.0.10"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -569,6 +569,33 @@ async def run_migrations(conn):
     logger.info(f"Schema updated to {SCHEMA_VERSION}")
 
 
+async def seed_default_settings(db) -> int:
+    """
+    Seed system_settings table with defaults from SETTING_DEFAULTS if empty.
+    Returns count of settings seeded.
+    """
+    from sqlalchemy import select, func
+    from app.models.settings import SystemSetting
+    from app.core.settings_keys import SETTING_DEFAULTS
+    
+    # Check if settings table is empty
+    result = await db.execute(select(func.count()).select_from(SystemSetting))
+    count = result.scalar()
+    
+    if count > 0:
+        return 0  # Already has settings, don't seed
+    
+    # Seed all defaults
+    seeded = 0
+    for key, value in SETTING_DEFAULTS.items():
+        setting = SystemSetting(key=key, value=str(value))
+        db.add(setting)
+        seeded += 1
+    
+    await db.commit()
+    return seeded
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown events"""
@@ -630,6 +657,12 @@ async def lifespan(app: FastAPI):
     async with async_session_maker() as db:
         await seed_default_themes(db)
     logger.info("Default themes seeded")
+    
+    # Seed default system settings if empty
+    async with async_session_maker() as db:
+        count = await seed_default_settings(db)
+        if count > 0:
+            logger.info(f"Seeded {count} default system settings")
     
     # Seed admin user if configured
     from app.services.auth import seed_admin_user

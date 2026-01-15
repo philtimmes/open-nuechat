@@ -10,7 +10,26 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.8.0.9
+**Current Version:** NC-0.8.0.10
+
+---
+
+## Recent Changes (NC-0.8.0.10)
+
+### Fresh Install Settings Seeding
+
+**Problem:** Admin Panel showed "Failed to load settings" on fresh install because `system_settings` table was empty.
+
+**Solution:** Added `seed_default_settings()` in `main.py` lifespan that populates `system_settings` table from `SETTING_DEFAULTS` if empty.
+
+```python
+async def seed_default_settings(db) -> int:
+    # Check if settings table is empty
+    # If empty, seed all defaults from SETTING_DEFAULTS
+    # Returns count of settings seeded
+```
+
+Called during startup after `seed_default_themes()`.
 
 ---
 
