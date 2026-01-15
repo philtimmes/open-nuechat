@@ -1,7 +1,7 @@
 # Kokoro TTS Service with NVIDIA CUDA GPU Support
 # Uses PyTorch CUDA for NVIDIA GPU acceleration
 
-FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CUDA_HOME=/usr/local/cuda
