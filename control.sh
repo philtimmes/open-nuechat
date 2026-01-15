@@ -458,7 +458,7 @@ cmd_faiss_build_cuda() {
             echo "Python version: $(python --version)"
             
             echo "Installing build dependencies..."
-            apt-get update && apt-get install -y build-essential cmake git libopenblas-dev swig python3-pip
+            apt-get update && apt-get install -y build-essential cmake git libopenblas-dev swig python3-pip python3-venv
             
             echo "Upgrading pip..."
             pip install --upgrade pip
