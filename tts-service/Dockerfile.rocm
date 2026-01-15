@@ -49,6 +49,8 @@ ENV TTS_RESULT_TTL=300
 ENV TTS_MAX_TEXT_LENGTH=10000
 # Enable GPU by default in ROCm container
 ENV TTS_USE_GPU=true
+# Force unbuffered Python output for Docker logs
+ENV PYTHONUNBUFFERED=1
 
 # Expose port
 EXPOSE 8033

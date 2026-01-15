@@ -386,6 +386,7 @@ services:
     container_name: nuechat-tts
     restart: unless-stopped
     network_mode: host
+    init: true
     profiles:
       - cuda
     deploy:

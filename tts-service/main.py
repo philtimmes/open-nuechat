@@ -1,7 +1,7 @@
 """
 Kokoro TTS Microservice with Request Queuing
 Runs on Python 3.12 via pyenv for Kokoro compatibility
-Supports ROCm GPU acceleration when available
+Supports ROCm/CUDA GPU acceleration when available
 """
 import asyncio
 import io
@@ -48,20 +48,13 @@ def detect_device():
         device_name = torch.cuda.get_device_name(0)
         device_props = torch.cuda.get_device_properties(0)
         vram_gb = device_props.total_memory / (1024**3)
-        logger.info(f"GPU detected: {device_name} ({vram_gb:.1f} GB VRAM)")
-        logger.info(f"PyTorch version: {torch.__version__}")
-        
-        # Check if ROCm
-        if hasattr(torch.version, 'hip') and torch.version.hip:
-            logger.info(f"ROCm/HIP version: {torch.version.hip}")
-        
+        print(f"[TTS] GPU: {device_name} ({vram_gb:.1f} GB)", flush=True)
         return "cuda"
     else:
         if use_gpu:
-            logger.warning("GPU requested but not available, falling back to CPU")
+            print("[TTS] GPU not available, using CPU", flush=True)
         else:
-            logger.info("GPU disabled by TTS_USE_GPU=false")
-        logger.info(f"Using CPU for TTS inference")
+            print("[TTS] GPU disabled, using CPU", flush=True)
         return "cpu"
 
 # Detect device at module load
@@ -143,7 +136,7 @@ class KokoroPipeline:
             if self._pipeline is not None:
                 return
             
-            print(f"[TTS] Initializing Kokoro TTS pipeline on {self._device}...")
+            print(f"[TTS] Initializing Kokoro TTS pipeline on {self._device}...", flush=True)
             try:
                 import torch
                 from kokoro import KPipeline
@@ -151,37 +144,37 @@ class KokoroPipeline:
                 # Set default device for PyTorch tensors
                 if self._device == "cuda" and torch.cuda.is_available():
                     torch.set_default_device("cuda")
-                    print("[TTS] PyTorch default device set to CUDA/ROCm")
+                    print("[TTS] PyTorch default device set to CUDA/ROCm", flush=True)
                 
                 # Initialize pipeline - Kokoro uses PyTorch internally
-                print("[TTS] Loading Kokoro model...")
+                print("[TTS] Loading Kokoro model...", flush=True)
                 try:
                     self._pipeline = KPipeline(lang_code='a')  # American English
                 except RuntimeError as e:
                     if "CUDA" in str(e) and self._device == "cuda":
-                        print(f"[TTS] CUDA initialization failed: {e}")
-                        print("[TTS] Falling back to CPU...")
+                        print(f"[TTS] CUDA initialization failed: {e}", flush=True)
+                        print("[TTS] Falling back to CPU...", flush=True)
                         self._device = "cpu"
                         torch.set_default_device("cpu")
                         self._pipeline = KPipeline(lang_code='a')
                     else:
                         raise
                 
-                print(f"[TTS] Kokoro TTS pipeline initialized on {self._device}")
+                print(f"[TTS] Kokoro TTS pipeline initialized on {self._device}", flush=True)
                 
                 # Warm up with a short phrase to ensure model is loaded to GPU
                 if self._device == "cuda":
-                    print("[TTS] Warming up GPU with test inference...")
+                    print("[TTS] Warming up GPU with test inference...", flush=True)
                     try:
                         # Short warmup
                         for _ in self._pipeline("Hello", voice="af_heart"):
                             pass
-                        print("[TTS] GPU warmup complete")
+                        print("[TTS] GPU warmup complete", flush=True)
                     except Exception as e:
-                        print(f"[TTS] GPU warmup failed: {e}")
+                        print(f"[TTS] GPU warmup failed: {e}", flush=True)
                 
             except Exception as e:
-                print(f"[TTS] Failed to initialize Kokoro: {e}")
+                print(f"[TTS] Failed to initialize Kokoro: {e}", flush=True)
                 raise
     
     def generate_sync(self, text: str, voice: str, speed: float = 1.0) -> bytes:
@@ -516,21 +509,21 @@ async def lifespan(app: FastAPI):
     global queue_manager
     
     # Startup
-    print(f"[TTS] Starting Kokoro TTS Service on {DEVICE}...")
-    print(f"[TTS] Initializing pipeline and loading model...")
+    print(f"[TTS] Starting Kokoro TTS Service on {DEVICE}...", flush=True)
+    print(f"[TTS] Initializing pipeline and loading model...", flush=True)
     
     queue_manager = TTSQueueManager(pipeline, MAX_QUEUE_SIZE, MAX_CONCURRENT)
     await queue_manager.start()
     
-    print(f"[TTS] Service ready - {MAX_CONCURRENT} workers, queue size {MAX_QUEUE_SIZE}")
+    print(f"[TTS] Service ready - {MAX_CONCURRENT} workers, queue size {MAX_QUEUE_SIZE}", flush=True)
     
     yield
     
     # Shutdown
-    print("[TTS] Shutting down...")
+    print("[TTS] Shutting down...", flush=True)
     if queue_manager:
         await queue_manager.stop()
-    print("[TTS] Service stopped")
+    print("[TTS] Service stopped", flush=True)
 
 
 app = FastAPI(
@@ -795,11 +788,18 @@ async def cancel_all_jobs():
 
 if __name__ == "__main__":
     import uvicorn
+    import sys
+    
+    # Force unbuffered output
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     
     # Default to localhost only - prevents unauthorized external access
     # TTS must go through the authenticated backend API
     host = os.getenv("TTS_HOST", "127.0.0.1")
     port = int(os.getenv("TTS_PORT", "8033"))
+    
+    print(f"[TTS] Starting uvicorn on {host}:{port}...", flush=True)
     
     # Custom log config to suppress access logs
     log_config = {
