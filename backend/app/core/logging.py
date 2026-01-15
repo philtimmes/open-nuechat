@@ -268,3 +268,65 @@ def get_logger(name: str) -> StructuredLogger:
         StructuredLogger instance
     """
     return StructuredLogger(name)
+
+
+# NC-0.8.0.8: Dedicated tool debug file logger
+_tool_debug_logger = None
+
+def get_tool_debug_logger():
+    """
+    Get a dedicated file logger for tool debugging.
+    Writes to /app/data/tool_debug.log (or ./data/tool_debug.log locally).
+    """
+    global _tool_debug_logger
+    if _tool_debug_logger is None:
+        import os
+        
+        # Determine log path
+        data_dir = os.environ.get("DATA_PATH", "/app/data")
+        if not os.path.exists(data_dir):
+            data_dir = "./data"
+            os.makedirs(data_dir, exist_ok=True)
+        
+        log_path = os.path.join(data_dir, "tool_debug.log")
+        
+        # Create dedicated logger
+        _tool_debug_logger = logging.getLogger("tool_debug")
+        _tool_debug_logger.setLevel(logging.DEBUG)
+        _tool_debug_logger.propagate = False  # Don't duplicate to console
+        
+        # File handler with rotation
+        from logging.handlers import RotatingFileHandler
+        handler = RotatingFileHandler(
+            log_path,
+            maxBytes=10*1024*1024,  # 10MB
+            backupCount=3,
+            encoding='utf-8'
+        )
+        handler.setLevel(logging.DEBUG)
+        
+        # Detailed format for debugging
+        formatter = logging.Formatter(
+            '%(asctime)s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        handler.setFormatter(formatter)
+        _tool_debug_logger.addHandler(handler)
+    
+    return _tool_debug_logger
+
+
+def log_tool_debug(message: str, **data):
+    """
+    Log tool debug information to dedicated file.
+    
+    Usage:
+        log_tool_debug("Tool call", tool_name="search", args={"q": "test"})
+    """
+    logger = get_tool_debug_logger()
+    if data:
+        # Pretty print data
+        data_str = json.dumps(data, indent=2, default=str)
+        logger.debug(f"{message}\n{data_str}")
+    else:
+        logger.debug(message)

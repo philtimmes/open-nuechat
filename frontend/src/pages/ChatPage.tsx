@@ -196,6 +196,7 @@ interface MessageListProps {
   lastAssistantIndex: number;
   generatedImages: Record<string, GeneratedImage>;
   onRetry: (userMessageId: string, userContent: string) => void;
+  onContinueFrom: (assistantMessageId: string) => void;  // NC-0.8.0.9: Branch from any message
   onEdit: (messageId: string, newContent: string) => void;
   onDelete: (messageId: string) => void;
   onReadAloud?: (content: string) => void;
@@ -337,6 +338,7 @@ const MessageList = memo(function MessageList({
   lastAssistantIndex,
   generatedImages,
   onRetry,
+  onContinueFrom,
   onEdit,
   onDelete,
   onReadAloud,
@@ -500,8 +502,10 @@ const MessageList = memo(function MessageList({
               message={message}
               isLastAssistant={isLastAssistant}
               generatedImage={generatedImages[message.id]}
-              onRetry={isLastAssistant && parentUserMessage ? 
+              onRetry={message.role === 'assistant' && parentUserMessage ? 
                 () => onRetry(parentUserMessage.id, parentUserMessage.content) : undefined}
+              onContinueFrom={message.role === 'assistant' && !isLastAssistant ? 
+                () => onContinueFrom(message.id) : undefined}
               onEdit={(messageId, newContent) => onEdit(messageId, newContent)}
               onDelete={(messageId) => onDelete(messageId)}
               onReadAloud={message.role === 'assistant' && onReadAloud ? onReadAloud : undefined}
@@ -1272,6 +1276,22 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
     regenerateMessage(currentChat.id, userContent, userMessageId);
   }, [currentChat, regenerateMessage]);
   
+  // NC-0.8.0.9: Handle continue from any assistant message (branching)
+  const handleContinueFrom = useCallback((assistantMessageId: string) => {
+    if (!currentChat) return;
+    
+    // Set the leaf to this message so the next user input continues from here
+    // Store in the ref that tracks the current leaf
+    setCurrentLeafAssistantId(assistantMessageId);
+    
+    // Focus the input
+    if (inputRef.current) {
+      inputRef.current.focus();
+    }
+    
+    console.log('Continue from message:', assistantMessageId);
+  }, [currentChat]);
+  
   // Handle retry from voice mode - finds the last user message and retries
   const handleVoiceModeRetry = useCallback(() => {
     if (!currentChat || !messages.length) return;
@@ -2014,6 +2034,7 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
                   lastAssistantIndex={lastAssistantIndex}
                   generatedImages={generatedImages}
                   onRetry={handleRetry}
+                  onContinueFrom={handleContinueFrom}
                   onEdit={handleEditMessage}
                   onDelete={handleDeleteMessage}
                   onReadAloud={ttsEnabled ? readAloud : undefined}

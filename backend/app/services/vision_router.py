@@ -69,7 +69,8 @@ class VisionRouter:
         if not self._primary_provider:
             try:
                 from app.services.settings_service import SettingsService
-                legacy_multimodal = await SettingsService.get_bool(self.db, "llm_multimodal")
+                from app.core.settings_keys import SK
+                legacy_multimodal = await SettingsService.get_bool(self.db, SK.LLM_MULTIMODAL)
                 if legacy_multimodal:
                     # Create a virtual provider to indicate MM capability
                     self._legacy_multimodal = True
@@ -98,13 +99,27 @@ class VisionRouter:
     def vision_provider(self) -> Optional[LLMProvider]:
         return self._vision_provider
     
+    @property
+    def has_vision_capability(self) -> bool:
+        """Check if there's any way to process images."""
+        # Legacy multimodal setting
+        if getattr(self, '_legacy_multimodal', False):
+            return True
+        # Primary provider is multimodal
+        if self._primary_provider and self._primary_provider.is_multimodal:
+            return True
+        # Separate vision provider available
+        if self._vision_provider:
+            return True
+        return False
+    
     def needs_vision_routing(self, attachments: List[Dict]) -> bool:
         """
         Check if we need to route images through vision model.
         
         Returns True if:
         - There are image attachments
-        - Primary model is NOT multimodal
+        - Primary model is NOT multimodal (and not legacy MM)
         - Vision model IS available
         """
         if not attachments:
@@ -114,14 +129,19 @@ class VisionRouter:
         if not has_images:
             return False
         
-        if not self._primary_provider:
+        # Check legacy multimodal - if enabled, images go directly to model
+        if getattr(self, '_legacy_multimodal', False):
             return False
+        
+        # No primary provider - route through vision if available
+        if not self._primary_provider:
+            return self._vision_provider is not None
         
         # If primary is multimodal, no routing needed
         if self._primary_provider.is_multimodal:
             return False
         
-        # Need vision provider for routing
+        # Primary is NOT MM - need vision provider for routing
         return self._vision_provider is not None
     
     def should_strip_images(self, attachments: List[Dict]) -> bool:
@@ -130,8 +150,9 @@ class VisionRouter:
         
         Returns True if:
         - There are images
-        - Primary model is NOT multimodal
+        - Primary model is NOT multimodal (or no provider configured)
         - No vision model available
+        - Legacy multimodal setting is False
         """
         if not attachments:
             return False
@@ -140,14 +161,20 @@ class VisionRouter:
         if not has_images:
             return False
         
+        # Check legacy multimodal setting first
+        if getattr(self, '_legacy_multimodal', False):
+            return False  # Legacy MM enabled, don't strip
+        
+        # No primary provider - check if vision provider exists
         if not self._primary_provider:
-            return False
+            # No primary and no vision = must strip
+            return self._vision_provider is None
         
         # Primary is MM - no stripping needed
         if self._primary_provider.is_multimodal:
             return False
         
-        # No vision provider - must strip
+        # Primary is NOT MM - check if vision provider exists
         return self._vision_provider is None
     
     async def describe_images(
@@ -271,18 +298,29 @@ class VisionRouter:
         if not attachments:
             return attachments, []
         
+        # Debug: Log current state
+        has_images = any(att.get("type") == "image" for att in attachments)
+        logger.info(
+            f"[VISION_ROUTER] Processing: has_images={has_images}, "
+            f"primary={self._primary_provider.name if self._primary_provider else 'None'}, "
+            f"primary_mm={self._primary_provider.is_multimodal if self._primary_provider else 'N/A'}, "
+            f"vision={self._vision_provider.name if self._vision_provider else 'None'}, "
+            f"legacy_mm={getattr(self, '_legacy_multimodal', False)}"
+        )
+        
         # Check if we need to strip images (no MM at all)
-        if self.should_strip_images(attachments):
+        should_strip = self.should_strip_images(attachments)
+        logger.info(f"[VISION_ROUTER] should_strip_images={should_strip}")
+        
+        if should_strip:
             logger.warning("[VISION_ROUTER] No multimodal capability - stripping images")
             filtered = [a for a in attachments if a.get("type") != "image"]
             stripped_count = len(attachments) - len(filtered)
             
-            # Add a note about stripped images
             if stripped_count > 0:
-                return filtered, [{
-                    "note": f"{stripped_count} image(s) were not processed (no vision model configured)",
-                    "stripped": True,
-                }]
+                logger.info(f"[VISION_ROUTER] Stripped {stripped_count} image(s) - no vision model configured")
+            
+            # Return filtered attachments with empty descriptions (no note to LLM)
             return filtered, []
         
         # Check if routing is needed
@@ -369,11 +407,9 @@ def format_image_descriptions_for_llm(descriptions: List[Dict]) -> str:
     
     parts = []
     for i, desc in enumerate(descriptions, 1):
-        if desc.get("stripped"):
-            parts.append(f"[Note: {desc.get('note', 'Images not processed')}]")
-        elif desc.get("error"):
+        if desc.get("error"):
             parts.append(f"[Image {i}: {desc['description']}]")
-        else:
+        elif desc.get("description"):
             parts.append(f"[Image {i} Description: {desc['description']}]")
     
     return "\n\n".join(parts)

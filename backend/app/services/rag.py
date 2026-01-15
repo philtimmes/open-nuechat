@@ -1802,6 +1802,27 @@ class RAGService:
         query_lower = query.lower()
         original_query_lower = original_query.lower()
         
+        # NC-0.8.0.7: Check for force trigger keywords
+        force_triggered_stores = []
+        
+        def check_force_trigger(store) -> bool:
+            """Check if store has force trigger keywords that match the query."""
+            if not getattr(store, 'force_trigger_enabled', False):
+                return False
+            
+            trigger_keywords = getattr(store, 'force_trigger_keywords', None)
+            if not trigger_keywords or not isinstance(trigger_keywords, list):
+                return False
+            
+            for keyword in trigger_keywords:
+                if not isinstance(keyword, str):
+                    continue
+                keyword_lower = keyword.lower().strip()
+                if keyword_lower and (keyword_lower in query_lower or keyword_lower in original_query_lower):
+                    logger.info(f"[GLOBAL_RAG] FORCE TRIGGER: Store '{store.name}' triggered by keyword '{keyword}'")
+                    return True
+            return False
+        
         def store_matches_keywords(store) -> bool:
             """Check if store's required keywords match the query."""
             if not store.require_keywords_enabled:
@@ -1822,17 +1843,27 @@ class RAGService:
             
             return False
         
+        # First, identify force-triggered stores
+        for store in global_stores:
+            if check_force_trigger(store):
+                force_triggered_stores.append(store)
+        
         relevant_stores = [s for s in global_stores if store_matches_keywords(s)]
         skipped_stores = len(global_stores) - len(relevant_stores)
         
         if skipped_stores > 0:
             logger.info(f"[GLOBAL_RAG] Skipped {skipped_stores} stores due to keyword filter (no match)")
         
-        if not relevant_stores:
+        if not relevant_stores and not force_triggered_stores:
             logger.debug("[GLOBAL_RAG] No global stores matched keyword requirements")
             return [], []
         
-        logger.info(f"[GLOBAL_RAG] Searching {len(relevant_stores)} global stores for query: {query[:50]}...")
+        # Ensure force-triggered stores are in relevant_stores
+        for store in force_triggered_stores:
+            if store not in relevant_stores:
+                relevant_stores.append(store)
+        
+        logger.info(f"[GLOBAL_RAG] Searching {len(relevant_stores)} global stores (force_triggered={len(force_triggered_stores)}) for query: {query[:50]}...")
         
         global_store_ids = [str(store.id) for store in relevant_stores]
         
@@ -1870,6 +1901,9 @@ class RAGService:
         matched_store_names = []
         index_manager = self.get_index_manager()
         
+        # NC-0.8.0.7: Track force-triggered store IDs for special handling
+        force_triggered_ids = {str(s.id) for s in force_triggered_stores}
+        
         # Get the lowest min_score among all relevant stores (for initial filter)
         # We'll do per-store filtering after merging
         global_min_score = min((store.global_min_score or 0.7) for store in relevant_stores)
@@ -1877,8 +1911,16 @@ class RAGService:
         for store in relevant_stores:
             store_start = time.time()
             store_id = str(store.id)
-            min_score = store.global_min_score or 0.7
-            max_results = store.global_max_results or 3
+            is_force_triggered = store_id in force_triggered_ids
+            
+            # NC-0.8.0.7: Force triggered stores use different settings
+            if is_force_triggered:
+                min_score = 0.0  # No score threshold - include all results
+                max_results = getattr(store, 'force_trigger_max_chunks', 5) or 5
+                logger.info(f"[GLOBAL_RAG] Force triggered store '{store.name}' - bypassing score threshold, max_chunks={max_results}")
+            else:
+                min_score = store.global_min_score or 0.7
+                max_results = store.global_max_results or 3
             
             # Search this store's FAISS index
             results = await asyncio.get_event_loop().run_in_executor(
@@ -1890,13 +1932,34 @@ class RAGService:
             )
             store_search_time = time.time() - store_start
             
-            # Filter by minimum score threshold
+            # Filter by minimum score threshold (0 for force triggered)
             filtered_results = [(chunk_id, score) for chunk_id, score in results if score >= min_score]
             
-            logger.debug(f"[GLOBAL_RAG_TIMING] Store '{store.name}' search took {store_search_time:.3f}s - raw={len(results)}, filtered={len(filtered_results)}")
+            # NC-0.8.0.7: Force triggered stores - fallback to direct DB query if FAISS returns nothing
+            if is_force_triggered and not filtered_results:
+                logger.info(f"[GLOBAL_RAG] Force triggered store '{store.name}' - FAISS returned no results, falling back to DB query")
+                # Get top chunks from this store directly from database
+                from app.models.document import DocumentChunk, Document
+                fallback_result = await db.execute(
+                    select(DocumentChunk.id)
+                    .join(Document, DocumentChunk.document_id == Document.id)
+                    .where(Document.knowledge_store_id == store_id)
+                    .where(Document.is_processed == True)
+                    .order_by(DocumentChunk.chunk_index)
+                    .limit(max_results)
+                )
+                fallback_chunks = [(str(row[0]), 0.5) for row in fallback_result.fetchall()]  # Assign 0.5 score
+                if fallback_chunks:
+                    logger.info(f"[GLOBAL_RAG] Force triggered store '{store.name}' - loaded {len(fallback_chunks)} chunks via DB fallback")
+                    filtered_results = fallback_chunks
+            
+            logger.debug(f"[GLOBAL_RAG_TIMING] Store '{store.name}' search took {store_search_time:.3f}s - raw={len(results)}, filtered={len(filtered_results)}, force_triggered={is_force_triggered}")
             
             if filtered_results:
-                logger.info(f"[GLOBAL_RAG] Store '{store.name}' matched with {len(filtered_results)} results (min_score={min_score})")
+                if is_force_triggered:
+                    logger.info(f"[GLOBAL_RAG] FORCE TRIGGERED store '{store.name}' loading {len(filtered_results[:max_results])} chunks (bypassed threshold)")
+                else:
+                    logger.info(f"[GLOBAL_RAG] Store '{store.name}' matched with {len(filtered_results)} results (min_score={min_score})")
                 for chunk_id, score in filtered_results[:max_results]:
                     logger.debug(f"[GLOBAL_RAG_DETAIL] Store '{store.name}' - chunk_id={chunk_id}, score={score:.4f}")
                 matched_store_names.append(store.name)
@@ -1912,12 +1975,14 @@ class RAGService:
             all_semantic_results.sort(key=lambda x: x[1], reverse=True)
             chunk_ids = [r[0] for r in all_semantic_results]
             scores_map = {r[0]: r[1] for r in all_semantic_results}
-            # NC-0.8.0.1.1: Enable document-level keyword filtering for global KB
+            # NC-0.8.0.7: Pass force-triggered store IDs to bypass doc keyword filtering
+            # NC-0.8.0.1.1: Enable document-level keyword filtering for global KB (except force-triggered)
             semantic_results = await self._get_chunks_by_ids(
                 db, chunk_ids, scores_map,
                 query=query,
                 history=original_query,  # Include original for broader matching
-                filter_by_doc_keywords=True
+                filter_by_doc_keywords=True,
+                skip_filter_store_ids=force_triggered_ids  # NC-0.8.0.7: Skip filtering for force-triggered stores
             )
         else:
             semantic_results = []
@@ -1961,6 +2026,7 @@ class RAGService:
         query: str = "",
         history: str = "",
         filter_by_doc_keywords: bool = False,
+        skip_filter_store_ids: Optional[set] = None,  # NC-0.8.0.7: Store IDs to skip filtering for
     ) -> List[Dict[str, Any]]:
         """
         Fetch chunk details by IDs.
@@ -1968,6 +2034,9 @@ class RAGService:
         NC-0.8.0.1.1: Optional document-level keyword filtering
         When filter_by_doc_keywords=True, chunks from documents with
         require_keywords_enabled will be filtered based on keyword match.
+        
+        NC-0.8.0.7: skip_filter_store_ids - Set of store IDs to skip filtering for
+        (used for force-triggered stores that should always return results)
         """
         result = await db.execute(
             select(DocumentChunk, Document)
@@ -1978,10 +2047,17 @@ class RAGService:
         
         results = []
         filtered_count = 0
+        skip_filter_store_ids = skip_filter_store_ids or set()
         
         for chunk, document in rows:
+            store_id = str(document.knowledge_store_id) if document.knowledge_store_id else None
+            
+            # NC-0.8.0.7: Skip filtering for force-triggered stores
+            if store_id and store_id in skip_filter_store_ids:
+                # Force-triggered store - include without filtering
+                pass
             # NC-0.8.0.1.1: Check document-level keyword requirements
-            if filter_by_doc_keywords and document.require_keywords_enabled:
+            elif filter_by_doc_keywords and document.require_keywords_enabled:
                 phrases, keywords = _parse_keywords_string(document.required_keywords or "")
                 match_mode = document.keyword_match_mode or 'any'
                 
@@ -1994,7 +2070,7 @@ class RAGService:
                 "chunk_id": str(chunk.id),
                 "document_id": str(document.id),
                 "document_name": document.name,
-                "knowledge_store_id": str(document.knowledge_store_id) if document.knowledge_store_id else None,
+                "knowledge_store_id": store_id,
                 "content": chunk.content,
                 "chunk_index": chunk.chunk_index,
                 "similarity": scores.get(str(chunk.id), 0.0),

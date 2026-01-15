@@ -63,6 +63,8 @@ export default function Admin() {
   const [debugFilterChains, setDebugFilterChains] = useState(false);
   const [enablePreemptiveRag, setEnablePreemptiveRag] = useState(true);  // NC-0.8.0.7
   const [disableImageRequestFilter, setDisableImageRequestFilter] = useState(false);  // NC-0.8.0.7
+  const [debugToolAdvertisements, setDebugToolAdvertisements] = useState(false);  // NC-0.8.0.8
+  const [debugToolCalls, setDebugToolCalls] = useState(false);  // NC-0.8.0.8
   const [lastTokenReset, setLastTokenReset] = useState<string | null>(null);
   const [tokenRefillHours, setTokenRefillHours] = useState(720);
   const [debugSettingsLoading, setDebugSettingsLoading] = useState(false);
@@ -189,6 +191,9 @@ export default function Admin() {
   const [globalKBEnabled, setGlobalKBEnabled] = useState(true);
   const [editingKeywordsStoreId, setEditingKeywordsStoreId] = useState<string | null>(null);
   const [keywordsInput, setKeywordsInput] = useState('');
+  // NC-0.8.0.7: Force trigger keywords editing
+  const [editingForceTriggerStoreId, setEditingForceTriggerStoreId] = useState<string | null>(null);
+  const [forceTriggerInput, setForceTriggerInput] = useState('');
   
   // NC-0.8.0.1.1: Expanded Global KB to show documents
   const [expandedGlobalKBId, setExpandedGlobalKBId] = useState<string | null>(null);
@@ -345,7 +350,10 @@ export default function Admin() {
     minScore: number, 
     maxResults: number,
     requireKeywordsEnabled?: boolean,
-    requiredKeywords?: string[]
+    requiredKeywords?: string[],
+    forceTriggerEnabled?: boolean,
+    forceTriggerKeywords?: string[],
+    forceTriggerMaxChunks?: number
   ) => {
     try {
       await api.post(`/knowledge-stores/admin/global/${store.id}`, null, {
@@ -355,6 +363,9 @@ export default function Admin() {
           max_results: maxResults,
           require_keywords_enabled: requireKeywordsEnabled ?? store.require_keywords_enabled ?? false,
           required_keywords: JSON.stringify(requiredKeywords ?? store.required_keywords ?? []),
+          force_trigger_enabled: forceTriggerEnabled ?? store.force_trigger_enabled ?? false,
+          force_trigger_keywords: JSON.stringify(forceTriggerKeywords ?? store.force_trigger_keywords ?? []),
+          force_trigger_max_chunks: forceTriggerMaxChunks ?? store.force_trigger_max_chunks ?? 5,
         },
       });
       await fetchGlobalKBStores();
@@ -534,6 +545,8 @@ export default function Admin() {
       setDebugFilterChains(res.data.debug_filter_chains);
       setEnablePreemptiveRag(res.data.enable_preemptive_rag ?? true);  // NC-0.8.0.7
       setDisableImageRequestFilter(res.data.disable_image_request_filter ?? false);  // NC-0.8.0.7
+      setDebugToolAdvertisements(res.data.debug_tool_advertisements ?? false);  // NC-0.8.0.8
+      setDebugToolCalls(res.data.debug_tool_calls ?? false);  // NC-0.8.0.8
       setLastTokenReset(res.data.last_token_reset_timestamp);
       setTokenRefillHours(res.data.token_refill_interval_hours);
     } catch (err: any) {
@@ -611,6 +624,30 @@ export default function Admin() {
     }
   };
   
+  // NC-0.8.0.8: Tool advertisements debug toggle
+  const saveDebugToolAdvertisements = async (value: boolean) => {
+    try {
+      await api.put('/admin/debug-settings', { debug_tool_advertisements: value });
+      setDebugToolAdvertisements(value);
+      setSuccess('Tool advertisements debug setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save setting');
+    }
+  };
+  
+  // NC-0.8.0.8: Tool calls debug toggle
+  const saveDebugToolCalls = async (value: boolean) => {
+    try {
+      await api.put('/admin/debug-settings', { debug_tool_calls: value });
+      setDebugToolCalls(value);
+      setSuccess('Tool calls debug setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save setting');
+    }
+  };
+  
   const fetchData = async () => {
     try {
       const [systemRes, oauthRes, llmRes, featuresRes, tiersRes, rateLimitsRes] = await Promise.all([
@@ -670,11 +707,26 @@ export default function Admin() {
     setIsSaving(true);
     setError(null);
     try {
+      // NC-0.8.0.8: Log what we're sending for debugging
+      console.log('[LLM_SETTINGS] Saving:', llmSettings);
       await api.put('/admin/llm-settings', llmSettings);
       setSuccess('LLM settings saved successfully');
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to save LLM settings');
+      // NC-0.8.0.8: Better error handling for 422 validation errors
+      console.error('[LLM_SETTINGS] Save error:', err.response?.data);
+      let errorMsg = 'Failed to save LLM settings';
+      if (err.response?.data?.detail) {
+        if (Array.isArray(err.response.data.detail)) {
+          // Pydantic validation errors come as an array
+          errorMsg = err.response.data.detail.map((e: any) => 
+            `${e.loc?.join('.')}: ${e.msg}`
+          ).join('; ');
+        } else {
+          errorMsg = err.response.data.detail;
+        }
+      }
+      setError(errorMsg);
     } finally {
       setIsSaving(false);
     }
@@ -2503,7 +2555,6 @@ export default function Admin() {
                               <input
                                 type="number"
                                 min="2000"
-                                max="128000"
                                 step="1000"
                                 value={llmSettings.history_compression_target_tokens}
                                 onChange={(e) => setLLMSettings({ ...llmSettings, history_compression_target_tokens: parseInt(e.target.value) || 8000 })}
@@ -4644,7 +4695,23 @@ export default function Admin() {
                           {/* Settings row */}
                           <div className="flex flex-wrap items-center gap-4 mb-3">
                             <div className="flex items-center gap-2">
-                              <label className="text-xs text-[var(--color-text-secondary)]">Min Score:</label>
+                              <label className="text-xs text-[var(--color-text-secondary)]" title="Minimum semantic similarity score (0-1). Lower = more results, Higher = stricter matching">
+                                Relevance Threshold:
+                              </label>
+                              <input
+                                type="range"
+                                min="0"
+                                max="1"
+                                step="0.05"
+                                value={store.global_min_score}
+                                onChange={(e) => {
+                                  const newScore = parseFloat(e.target.value);
+                                  if (!isNaN(newScore) && newScore >= 0 && newScore <= 1) {
+                                    updateGlobalStoreSettings(store, newScore, store.global_max_results);
+                                  }
+                                }}
+                                className="w-24 h-2 bg-[var(--color-border)] rounded-lg appearance-none cursor-pointer"
+                              />
                               <input
                                 type="number"
                                 min="0"
@@ -4659,6 +4726,9 @@ export default function Admin() {
                                 }}
                                 className="w-16 px-2 py-1 text-sm bg-[var(--color-surface)] border border-[var(--color-border)] rounded text-[var(--color-text)]"
                               />
+                              <span className="text-xs text-[var(--color-text-secondary)]">
+                                ({store.global_min_score >= 0.8 ? 'strict' : store.global_min_score >= 0.6 ? 'balanced' : store.global_min_score >= 0.4 ? 'lenient' : 'very lenient'})
+                              </span>
                             </div>
                             <div className="flex items-center gap-2">
                               <label className="text-xs text-[var(--color-text-secondary)]">Max Results:</label>
@@ -4677,6 +4747,9 @@ export default function Admin() {
                               />
                             </div>
                           </div>
+                          <p className="text-xs text-[var(--color-text-secondary)] mb-3 -mt-1">
+                            Lower threshold = more results included. Force Trigger bypasses this threshold when keywords match.
+                          </p>
                           
                           {/* Required Keywords Section */}
                           <div className="border-t border-[var(--color-border)] pt-3 mt-3">
@@ -4798,6 +4871,171 @@ export default function Admin() {
                                     className="text-xs text-[var(--color-primary)] hover:underline"
                                   >
                                     + Add keyword
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          
+                          {/* NC-0.8.0.7: Force Trigger Keywords Section */}
+                          <div className="border-t border-[var(--color-border)] pt-3 mt-3">
+                            <div className="flex items-center gap-3 mb-2">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={store.force_trigger_enabled || false}
+                                  onChange={(e) => {
+                                    updateGlobalStoreSettings(
+                                      store,
+                                      store.global_min_score,
+                                      store.global_max_results,
+                                      store.require_keywords_enabled,
+                                      store.required_keywords || [],
+                                      e.target.checked,
+                                      store.force_trigger_keywords || [],
+                                      store.force_trigger_max_chunks
+                                    );
+                                  }}
+                                  className="w-4 h-4 rounded border-[var(--color-border)] bg-[var(--color-surface)]"
+                                />
+                                <span className="text-sm text-[var(--color-text)] font-medium">Force Trigger Keywords</span>
+                              </label>
+                              <span className="text-xs text-orange-400">
+                                ⚡ Bypasses score threshold when matched
+                              </span>
+                            </div>
+                            <p className="text-xs text-[var(--color-text-secondary)] mb-2 ml-6">
+                              When query contains these keywords, KB content is ALWAYS injected as authoritative (ignores min score).
+                            </p>
+                            
+                            {store.force_trigger_enabled && (
+                              <div className="ml-6 space-y-2">
+                                {/* Max chunks setting */}
+                                <div className="flex items-center gap-2 mb-2">
+                                  <label className="text-xs text-[var(--color-text-secondary)]">Max chunks when triggered:</label>
+                                  <input
+                                    type="number"
+                                    value={store.force_trigger_max_chunks || 5}
+                                    onChange={(e) => {
+                                      updateGlobalStoreSettings(
+                                        store,
+                                        store.global_min_score,
+                                        store.global_max_results,
+                                        store.require_keywords_enabled,
+                                        store.required_keywords || [],
+                                        store.force_trigger_enabled,
+                                        store.force_trigger_keywords || [],
+                                        parseInt(e.target.value) || 5
+                                      );
+                                    }}
+                                    min={1}
+                                    max={20}
+                                    className="w-16 px-2 py-1 text-sm bg-[var(--color-surface)] border border-[var(--color-border)] rounded text-[var(--color-text)]"
+                                  />
+                                </div>
+                                
+                                {/* Current force trigger keywords */}
+                                <div className="flex flex-wrap gap-1 mb-2">
+                                  {(store.force_trigger_keywords || []).map((kw, idx) => (
+                                    <span 
+                                      key={idx}
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-orange-500/20 text-orange-400 rounded text-xs"
+                                    >
+                                      ⚡ {kw}
+                                      <button
+                                        onClick={() => {
+                                          const newKw = (store.force_trigger_keywords || []).filter((_, i) => i !== idx);
+                                          updateGlobalStoreSettings(
+                                            store,
+                                            store.global_min_score,
+                                            store.global_max_results,
+                                            store.require_keywords_enabled,
+                                            store.required_keywords || [],
+                                            store.force_trigger_enabled,
+                                            newKw,
+                                            store.force_trigger_max_chunks
+                                          );
+                                        }}
+                                        className="hover:text-red-400"
+                                      >
+                                        ×
+                                      </button>
+                                    </span>
+                                  ))}
+                                  {(store.force_trigger_keywords || []).length === 0 && (
+                                    <span className="text-xs text-[var(--color-text-secondary)] italic">
+                                      No force trigger keywords - add some below
+                                    </span>
+                                  )}
+                                </div>
+                                
+                                {/* Add force trigger keyword input */}
+                                {editingForceTriggerStoreId === store.id ? (
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      value={forceTriggerInput}
+                                      onChange={(e) => setForceTriggerInput(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && forceTriggerInput.trim()) {
+                                          const newKw = [...(store.force_trigger_keywords || []), forceTriggerInput.trim()];
+                                          updateGlobalStoreSettings(
+                                            store,
+                                            store.global_min_score,
+                                            store.global_max_results,
+                                            store.require_keywords_enabled,
+                                            store.required_keywords || [],
+                                            store.force_trigger_enabled,
+                                            newKw,
+                                            store.force_trigger_max_chunks
+                                          );
+                                          setForceTriggerInput('');
+                                        }
+                                      }}
+                                      placeholder="Type keyword and press Enter"
+                                      className="flex-1 px-2 py-1 text-sm bg-[var(--color-surface)] border border-orange-500/50 rounded text-[var(--color-text)]"
+                                      autoFocus
+                                    />
+                                    <button
+                                      onClick={() => {
+                                        if (forceTriggerInput.trim()) {
+                                          const newKw = [...(store.force_trigger_keywords || []), forceTriggerInput.trim()];
+                                          updateGlobalStoreSettings(
+                                            store,
+                                            store.global_min_score,
+                                            store.global_max_results,
+                                            store.require_keywords_enabled,
+                                            store.required_keywords || [],
+                                            store.force_trigger_enabled,
+                                            newKw,
+                                            store.force_trigger_max_chunks
+                                          );
+                                          setForceTriggerInput('');
+                                        }
+                                      }}
+                                      className="px-2 py-1 text-sm bg-orange-500 text-white rounded hover:opacity-90"
+                                    >
+                                      Add
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setEditingForceTriggerStoreId(null);
+                                        setForceTriggerInput('');
+                                      }}
+                                      className="px-2 py-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+                                    >
+                                      Done
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => {
+                                      setEditingForceTriggerStoreId(store.id);
+                                      setForceTriggerInput('');
+                                    }}
+                                    className="text-xs text-orange-400 hover:underline"
+                                  >
+                                    + Add force trigger keyword
                                   </button>
                                 )}
                               </div>
@@ -5169,6 +5407,46 @@ export default function Admin() {
                         <div className="text-[var(--color-text)] font-medium">Disable Image Request Filter</div>
                         <div className="text-sm text-[var(--color-text-secondary)]">
                           When enabled, the system won't auto-detect image generation requests. Instead, let the LLM decide when to use the image generation tool.
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* Tool Debugging - NC-0.8.0.8 */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">🔧 Tool Debugging</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    Debug tool advertisements and tool calls sent to/from the LLM.
+                  </p>
+                  
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={debugToolAdvertisements}
+                        onChange={(e) => saveDebugToolAdvertisements(e.target.checked)}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                      />
+                      <div>
+                        <div className="text-[var(--color-text)] font-medium">DEBUG_Tool_Advertisements</div>
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                          Log all tool definitions sent to the LLM (tool names, descriptions, parameters).
+                        </div>
+                      </div>
+                    </label>
+                    
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={debugToolCalls}
+                        onChange={(e) => saveDebugToolCalls(e.target.checked)}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                      />
+                      <div>
+                        <div className="text-[var(--color-text)] font-medium">DEBUG_Tool_Calls</div>
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                          Log all data exchanged with LLM and tools (tool call requests, arguments, and results).
                         </div>
                       </div>
                     </label>

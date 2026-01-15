@@ -62,6 +62,10 @@ class KnowledgeStoreResponse(BaseModel):
     # NC-0.8.0.1: Required keywords filter
     require_keywords_enabled: bool = False
     required_keywords: Optional[List[str]] = None
+    # NC-0.8.0.7: Force trigger keywords
+    force_trigger_enabled: bool = False
+    force_trigger_keywords: Optional[List[str]] = None
+    force_trigger_max_chunks: int = 5
     document_count: int
     total_chunks: int
     total_size_bytes: int
@@ -1065,6 +1069,9 @@ async def set_store_global(
     max_results: int = 3,
     require_keywords_enabled: bool = False,
     required_keywords: Optional[str] = None,  # JSON string of keywords list
+    force_trigger_enabled: bool = False,  # NC-0.8.0.7
+    force_trigger_keywords: Optional[str] = None,  # NC-0.8.0.7: JSON string of trigger keywords
+    force_trigger_max_chunks: int = 5,  # NC-0.8.0.7
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1077,6 +1084,12 @@ async def set_store_global(
     NC-0.8.0.1: Added required keywords filter
     - When require_keywords_enabled=True, store only searched if query contains keywords
     - required_keywords: JSON array of keywords/phrases
+    
+    NC-0.8.0.7: Added force trigger keywords
+    - When force_trigger_enabled=True and query contains trigger keywords,
+      KB content is ALWAYS injected (bypasses score threshold)
+    - force_trigger_keywords: JSON array of trigger keywords
+    - force_trigger_max_chunks: Max chunks to load when force triggered
     """
     import json
     
@@ -1112,6 +1125,18 @@ async def set_store_global(
     else:
         store.required_keywords = []
     
+    # NC-0.8.0.7: Force trigger keywords
+    store.force_trigger_enabled = force_trigger_enabled
+    store.force_trigger_max_chunks = force_trigger_max_chunks
+    if force_trigger_keywords:
+        try:
+            store.force_trigger_keywords = json.loads(force_trigger_keywords)
+        except json.JSONDecodeError:
+            # If not valid JSON, treat as single keyword
+            store.force_trigger_keywords = [force_trigger_keywords] if force_trigger_keywords.strip() else []
+    else:
+        store.force_trigger_keywords = []
+    
     # Global stores should also be public so users can see they exist
     # (they're being searched on their behalf, so they should know about it)
     if is_global:
@@ -1131,6 +1156,9 @@ async def set_store_global(
         "global_max_results": max_results,
         "require_keywords_enabled": require_keywords_enabled,
         "required_keywords": store.required_keywords,
+        "force_trigger_enabled": force_trigger_enabled,
+        "force_trigger_keywords": store.force_trigger_keywords,
+        "force_trigger_max_chunks": force_trigger_max_chunks,
     }
 
 

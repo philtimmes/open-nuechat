@@ -192,7 +192,7 @@ async def resolve_model(
             raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
         
         # Check access
-        is_owner = assistant.user_id == user.id
+        is_owner = assistant.owner_id == user.id
         is_public = assistant.is_public
         
         prefs = user.preferences or {}
@@ -210,7 +210,7 @@ async def resolve_model(
     result = await db.execute(
         select(CustomAssistant).where(
             or_(
-                CustomAssistant.user_id == user.id,
+                CustomAssistant.owner_id == user.id,
                 CustomAssistant.is_public == True,
             )
         )
@@ -225,7 +225,7 @@ async def resolve_model(
                 raise HTTPException(status_code=403, detail="Access to this model is not allowed")
             
             # Check access
-            is_owner = assistant.user_id == user.id
+            is_owner = assistant.owner_id == user.id
             is_public = assistant.is_public
             
             prefs = user.preferences or {}

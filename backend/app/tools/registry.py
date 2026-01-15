@@ -334,24 +334,81 @@ class ToolRegistry:
             handler=FileViewingTools.request_file,
         )
         
-        # Task Queue tools - Agentic task management
+        # NC-0.8.0.9: Create file tool for artifact creation
+        self.register(
+            name="create_file",
+            description="""Create or overwrite a file with the given content. Use this to save code, documents, data files, or any text content.
+
+USAGE: When you need to create files for the user - code files, config files, documents, etc.
+
+The file will be saved and made available for download. Supports any text-based file type.""",
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": "File path/name to create (e.g., 'script.py', 'data.json', 'src/main.cpp')",
+                    "required": True,
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The content to write to the file",
+                    "required": True,
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "If true, overwrite existing file. Default: true",
+                    "required": False,
+                }
+            },
+            handler=self._create_file_handler,
+        )
+        
+        # =============================================================
+        # TASK QUEUE TOOLS - Agentic Multi-Step Task Management
+        # =============================================================
+        # PURPOSE: Break complex requests into discrete, trackable steps.
+        # 
+        # WORKFLOW:
+        # 1. User makes complex request → LLM plans tasks with add_task/add_tasks_batch
+        # 2. System auto-feeds tasks to LLM one at a time
+        # 3. LLM works on task → calls complete_task when done
+        # 4. System sends next task → repeat until queue empty
+        #
+        # IMPORTANT: You must ACTUALLY DO THE WORK described in each task!
+        # complete_task is called AFTER you've done the work, not instead of it.
+        # =============================================================
+        
         self.register(
             name="add_task",
-            description="Add a task to the agentic task queue. Tasks auto-start if queue is not paused.",
+            description="""Add a task to the agentic task queue for multi-step workflows.
+
+USE THIS WHEN: User requests something complex that needs multiple steps (research, create files, analyze data, etc.)
+
+WORKFLOW:
+1. Plan: Break user's request into discrete tasks using add_task or add_tasks_batch
+2. Execute: System will feed you tasks one at a time
+3. Work: Actually DO the work described in each task
+4. Complete: Call complete_task AFTER you've finished the work
+
+Example - User asks "Research AI trends and write a report":
+  → add_tasks_batch with tasks: ["Research recent AI developments", "Analyze key trends", "Write executive summary", "Create full report document"]
+  → System feeds you "Research recent AI developments"
+  → You actually search/fetch/read about AI trends
+  → You call complete_task("Found 5 major trends: ...")
+  → System feeds next task, and so on""",
             parameters={
                 "description": {
                     "type": "string",
-                    "description": "Short task description",
+                    "description": "Short task title (shown in UI)",
                     "required": True,
                 },
                 "instructions": {
                     "type": "string",
-                    "description": "Detailed instructions (up to 512 tokens)",
+                    "description": "Detailed instructions for what to do (up to 512 tokens). Be specific about expected outputs.",
                     "required": True,
                 },
                 "priority": {
                     "type": "integer",
-                    "description": "Priority (0=normal, higher=more urgent)",
+                    "description": "Priority level (0=normal, higher=more urgent, processed first)",
                     "required": False,
                 },
                 "auto_continue": {
@@ -365,20 +422,33 @@ class ToolRegistry:
         
         self.register(
             name="add_tasks_batch",
-            description="Add multiple tasks to the queue at once. Use this to plan a series of steps.",
+            description="""Add multiple tasks to the queue at once - use for planning multi-step workflows.
+
+BEST PRACTICE: Plan all steps upfront, then execute them one by one.
+
+Example - User asks "Build me a Python web scraper":
+  add_tasks_batch([
+    {"description": "Design scraper architecture", "instructions": "Plan the scraper structure, decide on libraries (requests/beautifulsoup/selenium), identify target data"},
+    {"description": "Write core scraping logic", "instructions": "Implement the main scraping functions with error handling"},
+    {"description": "Add data extraction", "instructions": "Parse HTML and extract the structured data user needs"},
+    {"description": "Create output handling", "instructions": "Save results to CSV/JSON, add progress logging"},
+    {"description": "Write usage documentation", "instructions": "Create README with installation and usage instructions"}
+  ])
+
+After adding tasks, the system will feed them to you one at a time. Do the actual work for each task before calling complete_task.""",
             parameters={
                 "tasks": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "description": {"type": "string"},
-                            "instructions": {"type": "string"},
+                            "description": {"type": "string", "description": "Short task title"},
+                            "instructions": {"type": "string", "description": "What to do for this task"},
                             "priority": {"type": "integer"},
                             "auto_continue": {"type": "boolean"}
                         }
                     },
-                    "description": "Array of tasks with description, instructions, optional priority and auto_continue",
+                    "description": "Array of task objects with description and instructions",
                     "required": True,
                 }
             },
@@ -387,11 +457,20 @@ class ToolRegistry:
         
         self.register(
             name="complete_task",
-            description="Mark the current task as completed. Call this when you've finished a task from the queue.",
+            description="""Mark the current task as COMPLETED - call this AFTER you've done the actual work.
+
+⚠️ IMPORTANT: This does NOT do the work for you! You must:
+1. Actually perform the task (search, write code, create files, analyze, etc.)
+2. THEN call complete_task to record what you accomplished
+
+WRONG: Receiving task "Research AI" → immediately calling complete_task
+RIGHT: Receiving task "Research AI" → search web → read articles → summarize findings → THEN call complete_task
+
+The result_summary should describe what you actually did and any outputs created.""",
             parameters={
                 "result_summary": {
                     "type": "string",
-                    "description": "Brief summary of what was accomplished",
+                    "description": "Brief summary of what was actually accomplished (files created, findings, etc.)",
                     "required": False,
                 }
             },
@@ -400,11 +479,18 @@ class ToolRegistry:
         
         self.register(
             name="fail_task",
-            description="Mark the current task as failed. Use when you cannot complete a task.",
+            description="""Mark the current task as FAILED - use when you genuinely cannot complete it.
+
+Use this when:
+- Required resources are unavailable (broken links, API errors)
+- Task is impossible with available tools
+- Task requirements are unclear and user clarification is needed
+
+Don't use this just because a task is difficult - try your best first!""",
             parameters={
                 "reason": {
                     "type": "string",
-                    "description": "Why the task failed",
+                    "description": "Specific reason why the task could not be completed",
                     "required": False,
                 }
             },
@@ -413,52 +499,132 @@ class ToolRegistry:
         
         self.register(
             name="skip_task",
-            description="Skip the current task and move to the next one.",
+            description="Skip the current task and move to the next one. Use sparingly - prefer complete_task or fail_task.",
             parameters={},
             handler=self._skip_task_handler,
         )
         
         self.register(
             name="get_task_queue",
-            description="Get the current status of the task queue.",
+            description="View the current task queue status - see pending tasks, completed count, and what's next.",
             parameters={},
             handler=self._get_task_queue_handler,
         )
         
         self.register(
             name="clear_task_queue",
-            description="Clear all pending tasks from the queue.",
+            description="Clear all pending tasks from the queue. Use when user wants to start over or cancel planned work.",
             parameters={},
             handler=self._clear_task_queue_handler,
         )
         
         self.register(
             name="pause_task_queue",
-            description="Pause task queue execution. Tasks won't auto-start until resumed.",
+            description="Pause automatic task execution. Tasks won't auto-start until resumed. Use when user needs to review progress.",
             parameters={},
             handler=self._pause_task_queue_handler,
         )
         
         self.register(
             name="resume_task_queue",
-            description="Resume task queue execution after pausing.",
+            description="Resume task queue execution after pausing. The next pending task will be sent to you.",
             parameters={},
             handler=self._resume_task_queue_handler,
         )
         
-        # Agent Memory tools - for accessing archived conversation history
+        # =============================================================
+        # MEMORY TOOLS - Access Archived Conversation History
+        # =============================================================
+        # PURPOSE: Long conversations get archived into Agent Memory files
+        # (Agent0001.md, Agent0002.md, etc.) to manage context size.
+        # Use these tools to recall information from earlier in the conversation.
+        #
+        # WORKFLOW:
+        # 1. memory_search("topic") → Find relevant archived content
+        # 2. memory_read(memory_number, offset) → Read full content at location
+        # =============================================================
+        
         self.register(
-            name="agent_search",
-            description="Search through archived conversation history stored in Agent Memory files. Use this when you need to recall information from earlier in a long conversation that may have been archived.",
+            name="memory_search",
+            description="""Search through archived conversation history stored in Agent Memory files.
+
+USE THIS WHEN: 
+- User references something discussed "earlier" or "before"
+- You need context from a long conversation that may have been archived
+- User asks "what did we decide about X" or "remember when we discussed Y"
+
+Returns: List of matches with memory_number and offset - use memory_read() to get full content.
+
+Example:
+  memory_search("database schema design")
+  → Returns: [{memory_number: 3, offset: 15420, preview: "...we decided on PostgreSQL..."}]
+  → Then call: memory_read(3, 15420) to get full context""",
             parameters={
                 "query": {
                     "type": "string",
-                    "description": "Search query - keywords or phrases to find in archived conversation history",
+                    "description": "Keywords or phrases to search for in archived conversation history",
                     "required": True,
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 3)",
+                    "description": "Maximum results to return (default: 3, max: 10)",
+                    "required": False,
+                }
+            },
+            handler=self._agent_search_handler,
+        )
+        
+        self.register(
+            name="memory_read",
+            description="""Read content from a specific Agent Memory file at a given offset.
+
+USE THIS AFTER memory_search() to retrieve the full context around a match.
+
+Parameters:
+- memory_number: Which file (1 = Agent0001.md, 2 = Agent0002.md, etc.)
+- offset: Where to start reading (from memory_search results)
+- length: How much to read (default: 4000 chars)
+
+Returns: Content chunk, plus has_more/next_offset if more content available.
+
+Example:
+  memory_read(3, 15420)
+  → Returns: {content: "...full conversation segment...", has_more: true, next_offset: 19420}
+  memory_read(3, 19420)  // Continue reading if needed
+  → Returns: {content: "...more content...", has_more: false}""",
+            parameters={
+                "memory_number": {
+                    "type": "integer",
+                    "description": "Memory file number (1, 2, 3, etc. - from memory_search results)",
+                    "required": True,
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Character offset to start reading from (default: 0)",
+                    "required": False,
+                },
+                "length": {
+                    "type": "integer",
+                    "description": "Number of characters to read (default: 4000)",
+                    "required": False,
+                }
+            },
+            handler=self._memory_read_handler,
+        )
+        
+        # Legacy aliases for backward compatibility (hidden from typical tool listings)
+        self.register(
+            name="agent_search",
+            description="[DEPRECATED: Use memory_search instead] Search archived conversation history.",
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "Search query",
+                    "required": True,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results (default: 3)",
                     "required": False,
                 }
             },
@@ -467,16 +633,66 @@ class ToolRegistry:
         
         self.register(
             name="agent_read",
-            description="Read the contents of a specific Agent Memory file. Use this after agent_search to get the full context from a specific archived conversation segment.",
+            description="[DEPRECATED: Use memory_read instead] Read Agent Memory file by filename.",
             parameters={
                 "filename": {
                     "type": "string",
-                    "description": "The agent memory filename to read (e.g., '{Agent0001}.md')",
+                    "description": "The agent memory filename (e.g., 'Agent0001.md')",
                     "required": True,
                 }
             },
             handler=self._agent_read_handler,
         )
+        
+        # NC-0.8.0.7: Temporary MCP server installation tools
+        self.register(
+            name="install_mcp_server",
+            description="Install a temporary MCP (Model Context Protocol) server. The server will be automatically removed after 4 hours of non-use. Use this to add new capabilities on-demand.",
+            parameters={
+                "name": {
+                    "type": "string",
+                    "description": "Display name for the MCP server (e.g., 'GitHub Tools', 'Slack Integration')",
+                    "required": True,
+                },
+                "url": {
+                    "type": "string",
+                    "description": "MCP server URL or npx command (e.g., 'npx -y @modelcontextprotocol/server-github' or 'http://localhost:3000/mcp')",
+                    "required": True,
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Brief description of what tools this server provides",
+                    "required": False,
+                },
+                "api_key": {
+                    "type": "string",
+                    "description": "API key if the MCP server requires authentication",
+                    "required": False,
+                }
+            },
+            handler=self._install_mcp_handler,
+        )
+        
+        self.register(
+            name="uninstall_mcp_server",
+            description="Uninstall a temporary MCP server that was previously installed.",
+            parameters={
+                "name": {
+                    "type": "string",
+                    "description": "Name of the MCP server to uninstall",
+                    "required": True,
+                }
+            },
+            handler=self._uninstall_mcp_handler,
+        )
+        
+        self.register(
+            name="list_mcp_servers",
+            description="List all temporary MCP servers currently installed, including their expiry status.",
+            parameters={},
+            handler=self._list_mcp_handler,
+        )
+
     
     async def _calculator_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Safe mathematical expression evaluator"""
@@ -825,20 +1041,31 @@ class ToolRegistry:
             from app.db.database import async_session_maker
             from app.services.settings_service import SettingsService
             
-            # NC-0.8.0.7: Get default dimensions from admin settings
+            # NC-0.8.0.9: Get default dimensions from admin settings using SK keys
+            from app.core.settings_keys import SK
             default_width = 1024
             default_height = 1024
             
             if db:
                 try:
-                    default_width = await SettingsService.get_int(db, "image_gen_default_width") or 1024
-                    default_height = await SettingsService.get_int(db, "image_gen_default_height") or 1024
+                    raw_width = await SettingsService.get(db, SK.IMAGE_GEN_DEFAULT_WIDTH)
+                    raw_height = await SettingsService.get(db, SK.IMAGE_GEN_DEFAULT_HEIGHT)
+                    logger.info(f"[IMAGE_TOOL] Raw settings from DB: width='{raw_width}', height='{raw_height}'")
+                    
+                    default_width = await SettingsService.get_int(db, SK.IMAGE_GEN_DEFAULT_WIDTH)
+                    default_height = await SettingsService.get_int(db, SK.IMAGE_GEN_DEFAULT_HEIGHT)
+                    logger.info(f"[IMAGE_TOOL] Parsed settings: {default_width}x{default_height}")
                 except Exception as e:
                     logger.warning(f"[IMAGE_TOOL] Could not fetch default dimensions: {e}")
+            else:
+                logger.warning("[IMAGE_TOOL] No db context provided, using defaults 1024x1024")
             
             # Use provided dimensions or fall back to admin defaults
-            width = args.get("width") or default_width
-            height = args.get("height") or default_height
+            arg_width = args.get("width")
+            arg_height = args.get("height")
+            width = arg_width if arg_width else default_width
+            height = arg_height if arg_height else default_height
+            logger.info(f"[IMAGE_TOOL] Final dimensions: {width}x{height} (args: width={arg_width}, height={arg_height})")
             
             queue = get_image_queue()
             
@@ -1485,6 +1712,108 @@ class ToolRegistry:
             }
         return None
     
+    async def _create_file_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Create a file with the given content - NC-0.8.0.9"""
+        import os
+        import logging
+        from pathlib import Path
+        
+        logger = logging.getLogger(__name__)
+        
+        path = args.get("path", "").strip()
+        content = args.get("content", "")
+        overwrite = args.get("overwrite", True)
+        
+        if not path:
+            return {"error": "No path provided"}
+        
+        if not content:
+            return {"error": "No content provided"}
+        
+        # Sanitize path - prevent directory traversal
+        path = path.lstrip("/").lstrip("\\")
+        path = path.replace("..", "").replace("~", "")
+        
+        # Get safe filename
+        safe_path = Path(path).name if "/" not in path and "\\" not in path else path
+        
+        # Determine output directory
+        # Use /app/data/artifacts for container, fallback to temp
+        artifacts_dir = os.environ.get("ARTIFACTS_DIR", "/app/data/artifacts")
+        if not os.path.exists(artifacts_dir):
+            try:
+                os.makedirs(artifacts_dir, exist_ok=True)
+            except:
+                artifacts_dir = "/tmp/artifacts"
+                os.makedirs(artifacts_dir, exist_ok=True)
+        
+        # Handle subdirectories in path
+        if "/" in path or "\\" in path:
+            # Create subdirectory structure
+            subdir = os.path.dirname(path)
+            full_dir = os.path.join(artifacts_dir, subdir)
+            try:
+                os.makedirs(full_dir, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"Could not create subdirectory {subdir}: {e}")
+                # Fall back to flat structure
+                safe_path = path.replace("/", "_").replace("\\", "_")
+                full_dir = artifacts_dir
+            full_path = os.path.join(full_dir, os.path.basename(path))
+        else:
+            full_path = os.path.join(artifacts_dir, safe_path)
+        
+        # Check if file exists
+        if os.path.exists(full_path) and not overwrite:
+            return {
+                "error": f"File already exists: {path}",
+                "hint": "Set overwrite=true to replace the file"
+            }
+        
+        try:
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            file_size = os.path.getsize(full_path)
+            line_count = content.count('\n') + 1
+            
+            logger.info(f"[CREATE_FILE] Created: {full_path} ({file_size} bytes, {line_count} lines)")
+            
+            # Store in context for artifact tracking if available
+            if context:
+                chat_id = context.get("chat_id")
+                message_id = context.get("message_id")
+                db = context.get("db")
+                
+                if chat_id and message_id and db:
+                    try:
+                        from sqlalchemy import text
+                        # Save artifact metadata to message
+                        artifact_data = {
+                            "type": "file",
+                            "path": path,
+                            "full_path": full_path,
+                            "size": file_size,
+                            "lines": line_count,
+                        }
+                        # This could be enhanced to save to message_metadata
+                        logger.debug(f"[CREATE_FILE] Artifact metadata: {artifact_data}")
+                    except Exception as e:
+                        logger.warning(f"Could not save artifact metadata: {e}")
+            
+            return {
+                "success": True,
+                "path": path,
+                "full_path": full_path,
+                "size_bytes": file_size,
+                "line_count": line_count,
+                "message": f"File created: {path} ({file_size} bytes)"
+            }
+            
+        except Exception as e:
+            logger.error(f"[CREATE_FILE] Failed to create {path}: {e}")
+            return {"error": f"Failed to create file: {str(e)}"}
+    
     async def _fetch_urls_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Fetch multiple URLs, with special handling for video platforms."""
         import asyncio
@@ -1861,11 +2190,30 @@ class ToolRegistry:
                     "message": "No relevant archived conversation history found for this query."
                 }
             
+            # NC-0.8.0.8: Format results with memory_number and offset for memory_read()
+            formatted_results = []
+            for r in results:
+                filename = r.get("filename", "")
+                # Extract memory number from filename (e.g., "{Agent0001}.md" -> 1)
+                memory_num = 0
+                import re
+                match = re.search(r'Agent(\d+)', filename)
+                if match:
+                    memory_num = int(match.group(1))
+                
+                formatted_results.append({
+                    "memory_number": memory_num,
+                    "filename": filename,
+                    "offset": r.get("offset", 0),
+                    "preview": r.get("preview", r.get("snippet", "")),
+                    "score": r.get("score", 0),
+                })
+            
             return {
                 "found": True,
-                "results_count": len(results),
-                "results": results,
-                "tip": "Use agent_read to get full content from a specific file."
+                "results_count": len(formatted_results),
+                "results": formatted_results,
+                "tip": "Use memory_read(memory_number, offset) to get full content."
             }
             
         except Exception as e:
@@ -1925,6 +2273,187 @@ class ToolRegistry:
             
         except Exception as e:
             return {"error": f"Agent memory read failed: {str(e)}"}
+    
+    # NC-0.8.0.8: New memory_read handler with offset support
+    async def _memory_read_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Read contents from a specific Agent Memory file at a given offset."""
+        memory_number = args.get("memory_number", 0)
+        offset = args.get("offset", 0)
+        length = args.get("length", 4000)
+        
+        if not memory_number:
+            return {"error": "memory_number is required (e.g., 1 for Agent0001.md)"}
+        
+        if not context or "db" not in context or "chat_id" not in context:
+            return {"error": "Database context required for memory read"}
+        
+        db = context["db"]
+        chat_id = context["chat_id"]
+        
+        try:
+            from app.services.agent_memory import AgentMemoryService, AGENT_FILE_PREFIX
+            from sqlalchemy import select
+            from app.models.models import UploadedFile
+            
+            # Build filename from memory number (e.g., 1 -> "{Agent0001}.md")
+            filename = f"{AGENT_FILE_PREFIX}{memory_number:04d}}}.md"
+            
+            # Query for the file
+            result = await db.execute(
+                select(UploadedFile)
+                .where(UploadedFile.chat_id == chat_id)
+                .where(UploadedFile.filepath == filename)
+            )
+            agent_file = result.scalar_one_or_none()
+            
+            if not agent_file:
+                # List available agent files
+                all_result = await db.execute(
+                    select(UploadedFile.filepath)
+                    .where(UploadedFile.chat_id == chat_id)
+                    .where(UploadedFile.filepath.like(f"{AGENT_FILE_PREFIX}%"))
+                )
+                available = [r[0] for r in all_result.fetchall()]
+                
+                # Extract memory numbers from available files
+                available_nums = []
+                import re
+                for f in available:
+                    match = re.search(r'Agent(\d+)', f)
+                    if match:
+                        available_nums.append(int(match.group(1)))
+                
+                return {
+                    "error": f"Memory file {memory_number} (Agent{memory_number:04d}.md) not found",
+                    "available_memory_numbers": sorted(available_nums) if available_nums else "No agent memory files exist for this chat"
+                }
+            
+            # Extract content at offset
+            content = agent_file.content or ""
+            total_size = len(content)
+            
+            # Clamp offset and length
+            offset = max(0, min(offset, total_size))
+            end_offset = min(offset + length, total_size)
+            
+            extracted_content = content[offset:end_offset]
+            
+            return {
+                "memory_number": memory_number,
+                "filename": filename,
+                "offset": offset,
+                "length": len(extracted_content),
+                "total_size": total_size,
+                "has_more": end_offset < total_size,
+                "next_offset": end_offset if end_offset < total_size else None,
+                "content": extracted_content,
+            }
+            
+        except Exception as e:
+            return {"error": f"Memory read failed: {str(e)}"}
+    
+    # NC-0.8.0.7: Temporary MCP server management handlers
+    async def _install_mcp_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Install a temporary MCP server."""
+        name = args.get("name", "").strip()
+        url = args.get("url", "").strip()
+        description = args.get("description", "")
+        api_key = args.get("api_key", "")
+        
+        if not name:
+            return {"error": "Server name is required"}
+        if not url:
+            return {"error": "Server URL is required"}
+        
+        if not context or "db" not in context or "user" not in context:
+            return {"error": "Authentication context required for MCP installation"}
+        
+        db = context["db"]
+        user = context["user"]
+        
+        try:
+            from app.services.temp_mcp_manager import get_temp_mcp_manager
+            
+            manager = get_temp_mcp_manager()
+            if not manager:
+                return {"error": "MCP installation service not available"}
+            
+            result = await manager.install_temp_server(
+                db=db,
+                user_id=user.id,
+                name=name,
+                url=url,
+                description=description,
+                api_key=api_key
+            )
+            
+            return result
+            
+        except Exception as e:
+            return {"error": f"MCP installation failed: {str(e)}"}
+    
+    async def _uninstall_mcp_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Uninstall a temporary MCP server."""
+        name = args.get("name", "").strip()
+        
+        if not name:
+            return {"error": "Server name is required"}
+        
+        if not context or "db" not in context or "user" not in context:
+            return {"error": "Authentication context required for MCP uninstallation"}
+        
+        db = context["db"]
+        user = context["user"]
+        
+        try:
+            from app.services.temp_mcp_manager import get_temp_mcp_manager
+            
+            manager = get_temp_mcp_manager()
+            if not manager:
+                return {"error": "MCP service not available"}
+            
+            result = await manager.uninstall_temp_server(
+                db=db,
+                user_id=user.id,
+                tool_name=name
+            )
+            
+            return result
+            
+        except Exception as e:
+            return {"error": f"MCP uninstallation failed: {str(e)}"}
+    
+    async def _list_mcp_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """List all temporary MCP servers."""
+        if not context or "db" not in context or "user" not in context:
+            return {"error": "Authentication context required to list MCP servers"}
+        
+        db = context["db"]
+        user = context["user"]
+        
+        try:
+            from app.services.temp_mcp_manager import get_temp_mcp_manager
+            
+            manager = get_temp_mcp_manager()
+            if not manager:
+                return {"error": "MCP service not available"}
+            
+            servers = await manager.list_temp_servers(db=db, user_id=user.id)
+            
+            if not servers:
+                return {
+                    "message": "No temporary MCP servers installed",
+                    "servers": []
+                }
+            
+            return {
+                "count": len(servers),
+                "servers": servers,
+                "note": "Servers are automatically removed after 4 hours of non-use"
+            }
+            
+        except Exception as e:
+            return {"error": f"Failed to list MCP servers: {str(e)}"}
 
 
 # Session-based file store for uploaded files

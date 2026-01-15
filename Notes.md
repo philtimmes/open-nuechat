@@ -10,11 +10,81 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.8.0.7
+**Current Version:** NC-0.8.0.9
 
 ---
 
-## Recent Changes (NC-0.8.0.7)
+## Recent Changes (NC-0.8.0.9)
+
+### Centralized Settings Keys
+
+All system setting keys are now defined in `/backend/app/core/settings_keys.py`:
+
+```python
+from app.core.settings_keys import SK, SETTING_DEFAULTS
+
+# Use constants instead of strings
+width = await SettingsService.get_int(db, SK.IMAGE_GEN_DEFAULT_WIDTH)
+```
+
+**Benefits:**
+- Single source of truth for all setting keys and defaults
+- IDE autocomplete with `SK.`
+- Typos caught at import time
+- No more duplicate SETTING_DEFAULTS dicts
+
+**Key Categories:**
+- `SK.IMAGE_GEN_*` - Image generation settings
+- `SK.LLM_*` - LLM settings
+- `SK.GOOGLE_*` / `SK.GITHUB_*` - OAuth settings
+- `SK.DEBUG_*` - Debug flags
+- `SK.HISTORY_COMPRESSION_*` - Compression settings
+- `SK.API_RATE_LIMIT_*` - Rate limits
+
+### New Tool: create_file
+
+Creates files with arbitrary content. Used for saving code, documents, configs, or any text-based files.
+
+```python
+create_file(path="src/main.cpp", content="...", overwrite=True)
+```
+
+Files saved to `/app/data/artifacts/` (or `ARTIFACTS_DIR` env var).
+
+### Hallucinated Tool Delegates
+
+LLMs often hallucinate tools from their training data (like `create_artifact` from Claude). These are now automatically delegated to real tools:
+
+| Hallucinated Tool | Delegates To |
+|-------------------|--------------|
+| `create_artifact`, `write_file`, `save_file`, `artifact` | `create_file` |
+| `run_code`, `run_python`, `code_interpreter`, `execute_code` | `execute_python` |
+| `web_search`, `search_web`, `browse`, `browser` | `fetch_webpage` |
+| `create_image`, `dalle`, `dall-e`, `text_to_image` | `generate_image` |
+| `read_file`, `view_file`, `cat_file`, `open_file` | `view_file_lines` |
+| `math`, `calculate`, `compute` | `calculator` |
+| `get_time`, `current_time`, `now`, `date` | `get_current_time` |
+| `agent_search`, `agent_read` | `memory_search`, `memory_read` |
+
+**Argument Mapping:** Common argument name variations are mapped:
+- `data`, `text`, `body`, `source` → `content` (for create_file)
+- `filename`, `file_path`, `name` → `path` (for create_file)
+- `uri`, `link` → `url` (for fetch_webpage)
+- `description`, `text` → `prompt` (for generate_image)
+
+**Rejection:** Unknown tools still get `TOOL_NOT_FOUND` error with available tools list.
+
+### Image Gen Settings Fix
+
+Fixed admin panel image generation settings not being applied:
+- Auto-detection flow now uses admin settings
+- Tool handler now uses admin settings
+- Removed `or 1024` fallback pattern that masked issues
+- All code paths now use `SK.IMAGE_GEN_DEFAULT_WIDTH/HEIGHT`
+
+---
+
+## Recent Changes (NC-0.8.0.8)
 
 ### Admin Image Generation Settings
 
@@ -76,6 +146,133 @@ const canPreview = (art: Artifact): boolean => {
 ```
 
 **Solution:** Added regex to `preprocessContent()` in `MessageBubble.tsx` to strip these blocks from display while preserving in message history.
+
+### Temporary MCP Server Installation
+
+New tool category **mcp_install** allows LLM to install MCP (Model Context Protocol) servers on-demand:
+
+**Tools:**
+- `install_mcp_server` - Install a temporary MCP server by name and URL
+- `uninstall_mcp_server` - Manually remove an installed server
+- `list_mcp_servers` - List all temporary servers with expiry status
+
+**Auto-Cleanup:**
+- Servers automatically removed after 4 hours of non-use
+- Background worker checks every 15 minutes
+- Usage tracked via `updated_at` timestamp
+
+**Backend Implementation:**
+- New service: `app/services/temp_mcp_manager.py`
+- `TempMCPManager` class with install/uninstall/list methods
+- Cleanup worker started in `main.py` lifespan
+- Temporary flag stored in `Tool.config['is_temporary']`
+
+**Frontend:**
+- New toggle in ActiveToolsBar: "MCP Install" (package/box icon)
+- When enabled, LLM can call install/uninstall/list tools
+
+### Force Trigger Keywords for Global KB
+
+New feature allowing Global KB content to be ALWAYS injected when specific keywords are detected, bypassing the semantic search score threshold.
+
+**Use Case:** Ensure authoritative content (policies, procedures, guidelines) is loaded whenever relevant topics are mentioned, regardless of semantic similarity scores.
+
+**New Database Columns (knowledge_stores):**
+- `force_trigger_enabled` - Enable force trigger mode
+- `force_trigger_keywords` - JSON list of trigger keywords
+- `force_trigger_max_chunks` - Max chunks to load when triggered (default: 5)
+
+**Backend Logic (rag.py):**
+1. Check each global store for force trigger keywords in query
+2. If matched, bypass `global_min_score` threshold (use 0.0)
+3. Load up to `force_trigger_max_chunks` instead of `global_max_results`
+4. Log: `[GLOBAL_RAG] FORCE TRIGGER: Store 'X' triggered by keyword 'Y'`
+
+**Admin UI (Admin.tsx → Global KB tab):**
+
+| Setting | Control | Description |
+|---------|---------|-------------|
+| Relevance Threshold | Slider + Input (0-1) | Minimum semantic similarity score. Shows label: strict/balanced/lenient/very lenient |
+| Max Results | Input (1-20) | Maximum chunks to return from search |
+| Require Keywords | Toggle + Tags | Only search when query contains keywords |
+| Force Trigger | Toggle + Tags + Max | Bypass threshold when trigger keywords match |
+
+**Relevance Threshold Labels:**
+- ≥0.8 = strict (fewer but highly relevant)
+- 0.6-0.8 = balanced
+- 0.4-0.6 = lenient (more results)
+- <0.4 = very lenient
+
+**Example:**
+- Store: "Company Policies"
+- Force trigger keywords: `["policy", "procedure", "guideline", "rule"]`
+- When user asks "What is the vacation policy?", the KB content is ALWAYS loaded regardless of semantic score.
+
+### Tool Debugging Settings
+
+New debug settings in **Admin Panel → Site Dev** to trace tool-related data:
+
+| Setting | Description |
+|---------|-------------|
+| `DEBUG_Tool_Advertisements` | Log all tool definitions sent to the LLM (names, descriptions, parameters) |
+| `DEBUG_Tool_Calls` | Log all data exchanged with LLM and tools (call requests, arguments, results) |
+
+**Log Tags:**
+- `[DEBUG_TOOL_ADVERTISEMENTS]` - Tool definitions being sent to LLM
+- `[DEBUG_TOOL_CALLS]` - Tool call requests and results
+
+**Example Output:**
+```
+[DEBUG_TOOL_ADVERTISEMENTS] ========== TOOLS SENT TO LLM ==========
+[DEBUG_TOOL_ADVERTISEMENTS] Total tools: 5
+[DEBUG_TOOL_ADVERTISEMENTS] [1] fetch_webpage
+[DEBUG_TOOL_ADVERTISEMENTS]     Description: Fetch content from a webpage URL...
+[DEBUG_TOOL_ADVERTISEMENTS]     Parameters: ['url']
+[DEBUG_TOOL_ADVERTISEMENTS] ==========================================
+
+[DEBUG_TOOL_CALLS] ========== TOOL CALL REQUEST ==========
+[DEBUG_TOOL_CALLS] Tool: fetch_webpage
+[DEBUG_TOOL_CALLS] Arguments: {"url": "https://example.com"}
+
+[DEBUG_TOOL_CALLS] ========== TOOL CALL RESULT ==========
+[DEBUG_TOOL_CALLS] Tool: fetch_webpage
+[DEBUG_TOOL_CALLS] Result length: 4532
+[DEBUG_TOOL_CALLS] Result preview: <html>...
+[DEBUG_TOOL_CALLS] ======================================
+```
+
+### Task Queue Auto-Execute
+
+**Problem:** When the LLM stops responding without processing queued tasks, the tasks just sit there.
+
+**Solution:** Auto-execute pending tasks when LLM goes silent.
+
+**How it works:**
+1. After each LLM response, check if there are pending tasks but no current task
+2. If tasks are waiting and queue is not paused, automatically send the next task to the LLM
+3. The task is wrapped in a `[TASK QUEUE - AUTO EXECUTION]` prompt with instructions to call `complete_task` or `fail_task`
+4. Recursively processes tasks until queue is empty (max depth: 10 to prevent infinite loops)
+5. When queue is empty, sends `task_queue_empty` WebSocket event
+
+**WebSocket Events:**
+- `task_auto_execute` - Sent when auto-starting a task
+- `task_queue_empty` - Sent when all tasks are complete
+
+**Log Tags:**
+- `[TASK_QUEUE_AUTO]` - Auto-execution messages
+
+**Example Flow:**
+```
+User: "Plan a 3-day trip to Paris"
+LLM: [adds 5 tasks: research, hotels, restaurants, attractions, itinerary]
+LLM: [stops responding]
+System: [TASK_QUEUE_AUTO] Detected 5 pending tasks, auto-executing...
+System: [sends first task to LLM]
+LLM: [researches, calls complete_task]
+System: [sends second task to LLM]
+... continues until queue empty ...
+System: [task_queue_empty] 5 tasks completed
+```
 
 ### Active Tools Filtering Fix
 
@@ -1543,11 +1740,11 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
-| NC-0.8.0.7 | 2026-01-09 | Active Tools Filtering fix - WebSocket now reads chat.active_tools and filters tools by category. **Streaming Tool Calls** - Fixed tools not being passed to LLM in streaming mode, added tool execution and conversation continuation. **Pre-emptive RAG Toggle** - Admin setting to disable automatic Chat History KB and Assistant KB searches (Global KB always runs). When disabled, filter chains run unconditionally. API model names use cleaned assistant names instead of UUIDs. Performance indexes added. |
+| NC-0.8.0.8 | 2026-01-10 | **Force Trigger Keywords for Global KB** - Bypass score threshold when keywords match. New DB columns: `force_trigger_enabled`, `force_trigger_keywords`, `force_trigger_max_chunks`. Enhanced Admin UI with relevance threshold slider. **Tool Debugging** - New DEBUG_Tool_Advertisements and DEBUG_Tool_Calls settings in Admin Site Dev. **Task Queue Auto-Execute** - Automatically feeds pending tasks to LLM when it stops responding without processing them. |
+| NC-0.8.0.7 | 2026-01-09 | Active Tools Filtering fix, Streaming Tool Calls fix, Pre-emptive RAG Toggle, API model names use cleaned assistant names, Performance indexes, Admin image gen settings, image persistence, image preview in artifacts, Download All includes images, image context hidden, generate_image tool, temporary MCP server installation (4h auto-cleanup) |
 | NC-0.8.0.6 | 2026-01-08 | Smart RAG Compression - subject re-ranking (keyword overlap boost), extractive summarization for large chunks, token budget support |
 | NC-0.8.0.5 | 2026-01-08 | Per-chat token limits (max_input_tokens, max_output_tokens), Agent Memory tools (agent_search, agent_read), error sanitization, max output token validation |
 | NC-0.8.0.4 | 2026-01-08 | Mode/Category unification - Categories pull from AssistantModes, emojis derived from name, slug mapping for backward compatibility |
-| NC-0.8.0.7 | 2026-01-09 | Admin image gen settings tab (default resolution, aspect ratio, available resolutions), image persistence across reloads (metadata saved to message), image preview in artifacts panel, Download All includes actual images, image context blocks hidden from display, generate_image tool uses admin defaults, tool filtering fix, streaming tool calls fix, API model names by assistant name |
 | NC-0.8.0.3 | 2026-01-08 | Sidebar real-time updates (sidebarReloadTrigger), timestamp preservation (removed onupdate trigger), migration system fix, chat click fix (_assignedPeriod preservation), import preserves original timestamps |
 | NC-0.8.0.1.2 | 2026-01-07 | Chat source field for import tracking, sidebar filtering by source instead of title prefix |
 | NC-0.8.0.1.1 | 2026-01-07 | Generated images in Artifacts panel (imageNNN.ext), LLM image context injection |
@@ -1647,12 +1844,13 @@ with log_duration(logger, "database_query", table="users"):
 
 ## Database Schema Version
 
-Current: **NC-0.8.0.7**
+Current: **NC-0.8.0.8**
 
 Migrations run automatically on startup in `backend/app/main.py`.
 
 Key tables added/modified:
-- NC-0.8.0.7: No schema changes. New admin settings stored in `system_settings` table: `image_gen_default_width`, `image_gen_default_height`, `image_gen_default_aspect_ratio`, `image_gen_available_resolutions`. Image metadata stored in existing `messages.message_metadata` JSON column.
+- NC-0.8.0.8: New columns on `knowledge_stores`: `force_trigger_enabled`, `force_trigger_keywords`, `force_trigger_max_chunks`.
+- NC-0.8.0.7: No schema changes. Admin settings stored in `system_settings` table for image generation. Image metadata stored in `messages.message_metadata`.
 - NC-0.8.0.6: No schema changes (Smart RAG Compression is code-only)
 - NC-0.8.0.5: `chats.max_input_tokens` and `chats.max_output_tokens` INTEGER columns for per-chat token limits
 - NC-0.8.0.4: No schema changes (mode/category unification is code-only, emoji derived from name)

@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.8.0.7"
+SCHEMA_VERSION = "NC-0.8.0.9"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -438,6 +438,15 @@ async def run_migrations(conn):
             # Message index for lookups within a chat
             ("CREATE INDEX IF NOT EXISTS idx_message_id_chat ON messages(id, chat_id)", "messages.idx_id_chat"),
         ],
+        "NC-0.8.0.7": [
+            # No schema changes in NC-0.8.0.7 - code-only changes
+        ],
+        "NC-0.8.0.8": [
+            # Force trigger keywords for Global KB - bypass semantic search when keywords match
+            ("ALTER TABLE knowledge_stores ADD COLUMN force_trigger_enabled BOOLEAN DEFAULT 0", "knowledge_stores.force_trigger_enabled"),
+            ("ALTER TABLE knowledge_stores ADD COLUMN force_trigger_keywords JSON", "knowledge_stores.force_trigger_keywords"),
+            ("ALTER TABLE knowledge_stores ADD COLUMN force_trigger_max_chunks INTEGER DEFAULT 5", "knowledge_stores.force_trigger_max_chunks"),
+        ],
     }
     
     # Sort versions and run migrations in order
@@ -712,12 +721,21 @@ async def lifespan(app: FastAPI):
     queue_status = doc_queue.get_queue_status()
     logger.info(f"Document queue started: {queue_status['total']} tasks in queue")
     
+    # NC-0.8.0.7: Start temporary MCP server cleanup worker
+    from app.services.temp_mcp_manager import init_temp_mcp_manager
+    temp_mcp_mgr = init_temp_mcp_manager(async_session_maker)
+    await temp_mcp_mgr.start_cleanup_worker()
+    logger.info("Temporary MCP server cleanup worker started")
+    
     logger.info("Open-NueChat started successfully!")
     
     yield
     
     # Shutdown
     logger.info("Shutting down Open-NueChat...")
+    
+    # NC-0.8.0.7: Stop temporary MCP cleanup worker
+    await temp_mcp_mgr.stop_cleanup_worker()
     
     # Stop document queue worker
     doc_queue.stop_worker()

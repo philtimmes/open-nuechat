@@ -556,7 +556,17 @@ class DocumentChunk(Base):
 class KnowledgeStore(Base):
   id, owner_id
   name, description, icon, color
-  is_public, is_discoverable
+  is_public, is_discoverable, is_global
+  # Global KB settings
+  global_min_score        # Relevance threshold (0-1, default 0.7)
+  global_max_results      # Max chunks to return (default 3)
+  # Required keywords filter (NC-0.8.0.1)
+  require_keywords_enabled, required_keywords  # JSON list
+  # Force trigger keywords (NC-0.8.0.8)
+  force_trigger_enabled   # When True, bypasses global_min_score when keywords match
+  force_trigger_keywords  # JSON list of trigger keywords
+  force_trigger_max_chunks  # Max chunks when force triggered (default 5)
+  # Stats
   document_count, total_chunks, total_size_bytes
   embedding_model, chunk_size, chunk_overlap
   created_at, updated_at
@@ -1925,6 +1935,7 @@ The frontend ActiveToolsBar uses category IDs that map to backend tool names:
 | `file_ops` | `view_file_lines`, `search_in_file`, `list_uploaded_files`, `view_signature`, `request_file` | File viewing tools |
 | `kb_search` | `search_documents` | Knowledge base RAG search |
 | `image_gen` | `generate_image` | LLM-triggered image generation |
+| `mcp_install` | `install_mcp_server`, `uninstall_mcp_server`, `list_mcp_servers` | Temporary MCP server installation (4h auto-cleanup) |
 | `user_chats_kb` | (always available) | Agent Memory toggle (UI only) |
 | `artifacts` | (frontend-only) | Artifact panel display |
 | `local_rag` | (auto injection) | Chat document RAG context |
@@ -1989,6 +2000,43 @@ GET /api/admin/public/image-settings
   # Public endpoint for frontend (no auth required)
   # Returns same as admin endpoint
 ```
+
+### Global KB Admin Endpoints (NC-0.8.0.8)
+
+```python
+POST /api/knowledge-stores/admin/global/{store_id}
+  # Set or update Global KB settings
+  # Query params:
+  #   is_global: bool = True
+  #   min_score: float = 0.7           # Relevance threshold (0-1)
+  #   max_results: int = 3             # Max chunks to return
+  #   require_keywords_enabled: bool = False
+  #   required_keywords: str           # JSON array string
+  #   force_trigger_enabled: bool = False
+  #   force_trigger_keywords: str      # JSON array string
+  #   force_trigger_max_chunks: int = 5
+
+GET /api/knowledge-stores/admin/all
+  # List all knowledge stores (admin only)
+  # Returns: List[KnowledgeStoreResponse] with global fields
+```
+
+### Global KB Admin UI Settings
+
+In Admin Panel → Global KB tab, each store shows:
+
+| Setting | Description | Range |
+|---------|-------------|-------|
+| Relevance Threshold | Minimum semantic similarity score | 0-1 (slider + input) |
+| Max Results | Maximum chunks to return | 1-20 |
+| Require Keywords | Only search when query contains keywords | Toggle + keywords list |
+| Force Trigger | Bypass threshold when trigger keywords match | Toggle + keywords list + max chunks |
+
+**Relevance Threshold Labels:**
+- 0.8+ = strict (fewer but more relevant results)
+- 0.6-0.8 = balanced
+- 0.4-0.6 = lenient (more results)
+- <0.4 = very lenient (many results)
 
 ### generate_image Tool
 
@@ -2075,12 +2123,89 @@ if (artifact.type === 'image') {
 
 ---
 
+## Temporary MCP Server Installation (NC-0.8.0.7)
+
+### Overview
+
+LLM can install MCP (Model Context Protocol) servers on-demand when the `mcp_install` tool category is enabled. Servers are automatically removed after 4 hours of non-use.
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `install_mcp_server` | Install a temporary MCP server by name and URL |
+| `uninstall_mcp_server` | Manually remove an installed server |
+| `list_mcp_servers` | List all temporary servers with expiry status |
+
+### install_mcp_server
+
+```python
+{
+    "name": "install_mcp_server",
+    "parameters": {
+        "name": {"type": "string", "required": True},  # Display name
+        "url": {"type": "string", "required": True},   # MCP URL or npx command
+        "description": {"type": "string"},             # Optional description
+        "api_key": {"type": "string"},                 # Optional API key
+    }
+}
+
+# Example usage:
+install_mcp_server(
+    name="GitHub Tools",
+    url="npx -y @modelcontextprotocol/server-github",
+    description="GitHub repository management"
+)
+```
+
+### Backend Service
+
+```python
+# app/services/temp_mcp_manager.py
+
+class TempMCPManager:
+    async def install_temp_server(db, user_id, name, url, description, api_key) -> Dict
+    async def uninstall_temp_server(db, user_id, tool_id=None, tool_name=None) -> Dict
+    async def list_temp_servers(db, user_id) -> List[Dict]
+    async def refresh_server_usage(db, user_id, tool_id) -> bool
+    async def cleanup_expired_servers() -> int
+
+# Expiry configuration
+TEMP_MCP_EXPIRY_HOURS = 4
+CLEANUP_INTERVAL_SECONDS = 15 * 60  # Check every 15 minutes
+```
+
+### Storage
+
+Temporary servers stored in `tools` table with special config:
+
+```python
+Tool(
+    tool_type=ToolType.MCP,
+    config={
+        "is_temporary": True,
+        "installed_at": "2026-01-09T12:00:00Z"
+    },
+    created_by=user_id,  # Private to installing user
+    is_public=False
+)
+```
+
+### Expiry Tracking
+
+- `updated_at` timestamp refreshed on each tool usage
+- Cleanup worker deletes tools where `updated_at < now() - 4 hours`
+- Background task runs every 15 minutes
+
+---
+
 ## Current Schema Version
 
-**NC-0.8.0.7**
+**NC-0.8.0.8**
 
 Changes:
-- NC-0.8.0.7: **Admin Image Gen Settings** - New admin tab for default resolution, aspect ratio, available resolutions. Settings stored in `system_settings` table. **Image Persistence** - `generate_image` tool saves metadata to `message_metadata`, frontend loads on `fetchMessages`. **Image Preview** - Added 'image' to `canPreview()` for proper preview rendering. **Download All Images** - Fetches actual image files for ZIP. **Image Context Hidden** - `[IMAGE CONTEXT]` blocks stripped from display. **Active Tools Filtering** - Fixed tool buttons in ActiveToolsBar not affecting LLM tool availability. WebSocket handler now reads `chat.active_tools` and filters tools based on category. Added `TOOL_CATEGORY_MAP` mapping frontend categories to backend tool names. Added `UTILITY_TOOLS` list (calculator, time, json, text analysis, agent memory) always available. **Streaming Tool Calls** - Fixed tools not being sent to LLM in streaming mode. Added tool call handling in `stream_message()` to execute tools and continue conversation. **API Model Names** - `/v1/models` now exposes assistants by cleaned name instead of UUID (spaces→underscores, non-alphanumeric removed, lowercased). **Performance Indexes** - Added indexes for documents, token_usage, and messages tables.
+- NC-0.8.0.8: **Force Trigger Keywords for Global KB** - New DB columns: `force_trigger_enabled`, `force_trigger_keywords`, `force_trigger_max_chunks`. When enabled and query contains trigger keywords, KB content is always loaded bypassing the semantic search score threshold. Enhanced Admin UI with relevance threshold slider showing labels (strict/balanced/lenient). Added `KnowledgeStoreResponse` schema fields for force trigger. Backend fallback to direct DB query if FAISS returns empty for force-triggered stores. **Tool Debugging** - New `debug_tool_advertisements` and `debug_tool_calls` settings in Admin Site Dev. When enabled, logs `[DEBUG_TOOL_ADVERTISEMENTS]` (tool definitions) and `[DEBUG_TOOL_CALLS]` (call requests/results) to backend console.
+- NC-0.8.0.7: **Admin Image Gen Settings** - New admin tab for default resolution, aspect ratio, available resolutions. Settings stored in `system_settings` table. **Image Persistence** - `generate_image` tool saves metadata to `message_metadata`, frontend loads on `fetchMessages`. **Image Preview** - Added 'image' to `canPreview()` for proper preview rendering. **Download All Images** - Fetches actual image files for ZIP. **Image Context Hidden** - `[IMAGE CONTEXT]` blocks stripped from display. **Temporary MCP Installation** - New `mcp_install` tool category with `install_mcp_server`, `uninstall_mcp_server`, `list_mcp_servers` tools. Servers auto-removed after 4 hours of non-use. New service `temp_mcp_manager.py` with cleanup worker. **Active Tools Filtering** - Fixed tool buttons in ActiveToolsBar not affecting LLM tool availability. WebSocket handler now reads `chat.active_tools` and filters tools based on category. Added `TOOL_CATEGORY_MAP` mapping frontend categories to backend tool names. Added `UTILITY_TOOLS` list (calculator, time, json, text analysis, agent memory) always available. **Streaming Tool Calls** - Fixed tools not being sent to LLM in streaming mode. Added tool call handling in `stream_message()` to execute tools and continue conversation. **API Model Names** - `/v1/models` now exposes assistants by cleaned name instead of UUID (spaces→underscores, non-alphanumeric removed, lowercased). **Performance Indexes** - Added indexes for documents, token_usage, and messages tables.
 - NC-0.8.0.6: **Smart RAG Compression** - RAG results now re-ranked by subject relevance (keyword overlap boost), large chunks auto-summarized using extractive summarization (top sentences by query relevance), token budget support for context building. New methods: `_rerank_by_subject()`, `_summarize_chunk()`. `get_knowledge_store_context()` now accepts `max_context_tokens` and `enable_summarization` parameters. **Category filter fix** - Added `category` field to `AssistantPublicInfo`. Updated `/explore`, `/discover`, `/subscribed` to return category. `/assistants/categories` returns slugified mode names.
 - NC-0.8.0.5: **Token limits & Agent Memory tools** - Added `max_input_tokens` and `max_output_tokens` columns to `chats` table. Added `agent_search` and `agent_read` tools to tool registry for accessing archived conversation history in Agent Memory files. Error sanitization prevents raw API errors from reaching browser. Max output tokens validated against remaining context.
 - NC-0.8.0.4: **Mode/Category unification** - Categories now pull from AssistantModes table. Emojis derived from mode name in code (not stored). Category slugs mapped for backward compatibility.

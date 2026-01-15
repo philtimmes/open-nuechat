@@ -1166,6 +1166,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             parent_id: chunk.parent_id,
             input_tokens: chunk.usage?.input_tokens,
             output_tokens: chunk.usage?.output_tokens,
+            duration_ms: chunk.usage?.duration_ms,
+            ttft_ms: chunk.usage?.ttft_ms,
+            tokens_per_second: chunk.usage?.tokens_per_second,
             created_at: new Date().toISOString(),
             // Attach extracted artifacts to the message
             artifacts: extractedArtifacts.length > 0 ? extractedArtifacts : undefined,

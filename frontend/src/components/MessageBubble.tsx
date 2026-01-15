@@ -601,6 +601,7 @@ interface MessageProps {
   toolCitations?: ToolCitation[];
   generatedImage?: GeneratedImage;
   onRetry?: () => void;
+  onContinueFrom?: () => void;  // NC-0.8.0.9: Continue/branch from this message
   onEdit?: (messageId: string, newContent: string) => void;
   onDelete?: (messageId: string) => void;
   onReadAloud?: (content: string) => void;
@@ -667,6 +668,7 @@ function MessageBubbleInner({
   toolCitations,
   generatedImage,
   onRetry,
+  onContinueFrom,
   onEdit,
   onDelete,
   onReadAloud,
@@ -1328,7 +1330,7 @@ function MessageBubbleInner({
                 </button>
               )}
               
-              {/* Regenerate button (assistant only) */}
+              {/* Regenerate button (all assistant messages) */}
               {isAssistant && onRetry && (
                 <button
                   onClick={onRetry}
@@ -1337,6 +1339,19 @@ function MessageBubbleInner({
                 >
                   <svg className="w-5 h-5 md:w-4 md:h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+              )}
+              
+              {/* Continue from here button (assistant messages not at end) */}
+              {isAssistant && onContinueFrom && !isLastAssistant && (
+                <button
+                  onClick={onContinueFrom}
+                  className="p-2 md:p-1.5 rounded text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface)] active:bg-[var(--color-surface)] transition-colors touch-manipulation"
+                  title="Continue from here (create branch)"
+                >
+                  <svg className="w-5 h-5 md:w-4 md:h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
                   </svg>
                 </button>
               )}
@@ -1376,6 +1391,15 @@ function MessageBubbleInner({
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                   </svg>
                 </button>
+              )}
+              
+              {/* NC-0.8.0.9: Token stats for assistant messages */}
+              {isAssistant && !isStreaming && message.output_tokens && (
+                <span className="ml-auto text-xs text-[var(--color-text-secondary)] opacity-60 tabular-nums">
+                  {message.output_tokens} tokens
+                  {message.ttft_ms && ` · ${(message.ttft_ms / 1000).toFixed(2)}s TTFT`}
+                  {message.tokens_per_second && ` · ${message.tokens_per_second} tok/s`}
+                </span>
               )}
             </div>
             

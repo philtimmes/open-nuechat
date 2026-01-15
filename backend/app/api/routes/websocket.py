@@ -337,27 +337,93 @@ async def handle_chat_message(
     parent_id = payload.get("parent_id")  # For conversation branching
     client_message_id = payload.get("message_id")  # Client-generated UUID for the user message
     
-    # NC-0.8.0.7: Tool category to backend tool name mapping
-    # Frontend uses categories (web_search, file_ops, etc.)
-    # Backend has individual tools (fetch_webpage, view_file_lines, etc.)
+    # NC-0.8.0.8: Reorganized tool categories into logical sections
+    # Maps frontend category toggles to backend tool names
+    # 
+    # Built-in tool categories:
+    #   - utilities: Basic helper tools (calculator, time, etc.)
+    #   - task_mgr: Task queue management
+    #   - web: Web fetching tools
+    #   - knowledge_bases: Document/RAG search
+    #   - chat_history: Agent memory for past conversations
+    #   - file_manager: File operations
+    #   - code_exec: Python execution
+    #   - image_gen: Image generation
+    #   - mcp_install: Temporary MCP installation
+    #
+    # External tool categories (dynamic, loaded from database):
+    #   - extern_tools_mcp: External MCP server tools
+    #   - extern_tools_openapi: External OpenAPI tools
+    
     TOOL_CATEGORY_MAP = {
+        # Utilities - Basic helper tools
+        "utilities": [
+            "calculator", "get_current_time", "format_json", "analyze_text",
+        ],
+        
+        # TaskMgr - Task queue management tools
+        "task_mgr": [
+            "add_task", "add_tasks_batch", "complete_task", "fail_task", 
+            "skip_task", "get_task_queue", "clear_task_queue", 
+            "pause_task_queue", "resume_task_queue",
+        ],
+        
+        # Web - Web fetching and search tools
+        "web": [
+            "fetch_webpage", "fetch_urls",
+        ],
+        
+        # KnowledgeBases - Document/RAG search tools
+        "knowledge_bases": [
+            "search_documents",
+        ],
+        
+        # ChatHistory - Agent memory tools for past conversations
+        "chat_history": [
+            "memory_search", "memory_read",
+            "agent_search", "agent_read",  # Legacy aliases
+        ],
+        
+        # FileManager - File operations tools
+        "file_manager": [
+            "view_file_lines", "search_in_file", "list_uploaded_files", 
+            "view_signature", "request_file",
+        ],
+        
+        # CodeExec - Code execution tools
+        "code_exec": [
+            "execute_python",
+        ],
+        
+        # ImageGen - Image generation tools
+        "image_gen": [
+            "generate_image",
+        ],
+        
+        # MCPInstall - Temporary MCP server installation
+        "mcp_install": [
+            "install_mcp_server", "uninstall_mcp_server", "list_mcp_servers",
+        ],
+        
+        # ExternToolsMCP - External MCP tools (populated dynamically)
+        # These are tools from MCP servers configured in Admin > Tools
+        "extern_tools_mcp": [],  # Populated at runtime from database
+        
+        # ExternToolsOpenAPI - External OpenAPI tools (populated dynamically)
+        # These are tools from OpenAPI specs configured in Admin > Tools
+        "extern_tools_openapi": [],  # Populated at runtime from database
+        
+        # Legacy category mappings (for backward compatibility with existing UI)
         "web_search": ["fetch_webpage", "fetch_urls"],
-        "code_exec": ["execute_python"],
-        "file_ops": ["view_file_lines", "search_in_file", "list_uploaded_files", "view_signature", "request_file"],
         "kb_search": ["search_documents"],
-        "image_gen": ["generate_image"],  # NC-0.8.0.7: Image generation tool
-        # These categories affect RAG/behavior, not tool calls:
-        # "artifacts" - frontend-only
-        # "local_rag" - auto RAG injection
-        # "user_chats_kb" - chat history RAG (agent tools always available)
-        # "citations" - LLM prompt hint
+        "file_ops": ["view_file_lines", "search_in_file", "list_uploaded_files", "view_signature", "request_file"],
+        "user_chats_kb": ["memory_search", "memory_read", "agent_search", "agent_read"],  # Legacy alias for chat_history
     }
     
-    # Utility tools always available when tools enabled
-    # Includes agent memory tools for searching archived conversation history
+    # Tools that are always available when tools are enabled
+    # These are essential utilities that should always be accessible
     UTILITY_TOOLS = [
         "calculator", "get_current_time", "format_json", "analyze_text",
-        "agent_search", "agent_read",  # Agent Memory - always available
     ]
     
     # Log attachment info
@@ -449,7 +515,16 @@ async def handle_chat_message(
             if not width:
                 width, height = extract_aspect_ratio_from_text(content)
             if not width:
-                width, height = 1024, 1024
+                # NC-0.8.0.9: Use admin settings for default dimensions
+                try:
+                    from app.services.settings_service import SettingsService
+                    from app.core.settings_keys import SK
+                    width = await SettingsService.get_int(db, SK.IMAGE_GEN_DEFAULT_WIDTH)
+                    height = await SettingsService.get_int(db, SK.IMAGE_GEN_DEFAULT_HEIGHT)
+                    logger.debug(f"[IMAGE_AUTO] Using admin defaults: {width}x{height}")
+                except Exception as e:
+                    logger.warning(f"[IMAGE_AUTO] Could not load admin settings, using 1024x1024: {e}")
+                    width, height = 1024, 1024
             
             # Save user message first (use client ID if provided)
             img_msg_kwargs = {
@@ -779,11 +854,13 @@ async def handle_chat_message(
             try:
                 from app.models.models import KnowledgeStore
                 global_store_check = await db.execute(
-                    select(KnowledgeStore.id).where(KnowledgeStore.is_global == True).limit(1)
+                    select(KnowledgeStore.id, KnowledgeStore.name).where(KnowledgeStore.is_global == True)
                 )
-                has_global_stores = global_store_check.scalar_one_or_none() is not None
+                global_stores_found = global_store_check.fetchall()
+                has_global_stores = len(global_stores_found) > 0
                 
                 if has_global_stores:
+                    logger.info(f"[GLOBAL_RAG_DEBUG] Found {len(global_stores_found)} global stores: {[(str(s.id), s.name) for s in global_stores_found]}")
                     global_kb_start = time.time()
                     rag_service = RAGService()
                     global_results, global_store_names = await rag_service.search_global_stores(db, content, chat_id=chat_id)
@@ -833,9 +910,9 @@ When answering questions related to the above topics, you MUST use this authorit
                         system_prompt = f"{system_prompt}{knowledge_addendum}"
                         logger.info(f"[GLOBAL_RAG_DEBUG] Injected {len(global_results)} results from global KB")
                 else:
-                    logger.debug("[GLOBAL_RAG_DEBUG] No global knowledge stores exist, skipping search")
+                    logger.info("[GLOBAL_RAG_DEBUG] No global knowledge stores exist (is_global=True), skipping search")
             except Exception as e:
-                logger.warning(f"[GLOBAL_RAG_DEBUG] Failed to search global stores: {e}")
+                logger.warning(f"[GLOBAL_RAG_DEBUG] Failed to search global stores: {e}", exc_info=True)
         
         # 2. User's Chat History Knowledge Base search (skip for tool results OR if preemptive RAG disabled)
         # NC-0.8.0.7: Only run if preemptive_rag_enabled
@@ -1344,6 +1421,26 @@ The following is relevant information from your previous conversations:
             try:
                 tool_service = ToolService()
                 mcp_tools, mcp_map = await tool_service.get_tools_for_llm(db, user)
+                
+                # NC-0.8.0.8: Filter external tools based on categories
+                # If specific categories are set, only include external tools if their category is active
+                if active_tool_categories:
+                    include_mcp = "extern_tools_mcp" in active_tool_categories
+                    include_openapi = "extern_tools_openapi" in active_tool_categories
+                    
+                    if include_mcp or include_openapi:
+                        filtered_mcp_tools = []
+                        for tool in mcp_tools:
+                            tool_type = tool.get("_tool_type", "")
+                            if (include_mcp and tool_type == "mcp") or (include_openapi and tool_type == "openapi"):
+                                filtered_mcp_tools.append(tool)
+                        mcp_tools = filtered_mcp_tools
+                        logger.debug(f"Filtered external tools: MCP={include_mcp}, OpenAPI={include_openapi}, count={len(mcp_tools)}")
+                    else:
+                        # No external tool categories active, exclude all external tools
+                        mcp_tools = []
+                        logger.debug("No external tool categories active, excluding all MCP/OpenAPI tools")
+                
                 tools = (tools or []) + mcp_tools
                 mcp_tool_map = mcp_map
                 if mcp_tools:
@@ -1353,13 +1450,216 @@ The following is relevant information from your previous conversations:
         
         logger.debug(f"Tools enabled: {enable_tools}, tool_count: {len(tools) if tools else 0}")
         
+        # NC-0.8.0.8: Debug tool advertisements if enabled
+        debug_tool_advertisements = await get_system_setting(db, "debug_tool_advertisements") == "true"
+        debug_tool_calls = await get_system_setting(db, "debug_tool_calls") == "true"
+        
+        if debug_tool_advertisements:
+            from app.core.logging import log_tool_debug
+            log_tool_debug("=" * 60)
+            log_tool_debug("WEBSOCKET TOOL DEBUG - Tools being passed to LLM")
+            log_tool_debug("=" * 60)
+            log_tool_debug("Context", 
+                chat_id=chat_id,
+                chat_model=chat.model,
+                enable_tools=enable_tools,
+                active_tool_categories=active_tool_categories
+            )
+            if tools:
+                log_tool_debug(f"Total tools: {len(tools)}")
+                for i, tool in enumerate(tools):
+                    log_tool_debug(f"Tool [{i+1}]",
+                        name=tool.get('name', 'unknown'),
+                        description=tool.get('description', 'N/A')[:200],
+                        parameters=list(tool.get('parameters', {}).get('properties', {}).keys())
+                    )
+            else:
+                log_tool_debug("NO TOOLS BEING SENT",
+                    reason=f"enable_tools={enable_tools}, filtering may have removed all"
+                )
+            log_tool_debug("=" * 60)
+        
         # Stream response (using database settings)
         llm = await LLMService.from_database(db)
         logger.debug(f"Starting LLM stream for chat {chat_id}")
         
         # Create tool executor function
+        # NC-0.8.0.9: Tool delegates - map common hallucinated tool names to actual tools
+        # LLMs often hallucinate tools from their training data (Claude, ChatGPT, etc.)
+        TOOL_DELEGATES = {
+            # Artifact/file creation patterns (Claude, ChatGPT)
+            "create_artifact": "create_file",
+            "write_file": "create_file",
+            "save_file": "create_file",
+            "artifact": "create_file",
+            "make_file": "create_file",
+            "output_file": "create_file",
+            
+            # Code execution patterns
+            "run_code": "execute_python",
+            "run_python": "execute_python",
+            "python": "execute_python",
+            "code_interpreter": "execute_python",
+            "execute_code": "execute_python",
+            "eval": "execute_python",
+            
+            # Web/search patterns
+            "web_search": "fetch_webpage",
+            "search": "search_documents",
+            "search_web": "fetch_webpage",
+            "browse": "fetch_webpage",
+            "browser": "fetch_webpage",
+            "get_url": "fetch_webpage",
+            "read_url": "fetch_webpage",
+            "fetch_url": "fetch_webpage",
+            "http_get": "fetch_webpage",
+            
+            # Image patterns
+            "create_image": "generate_image",
+            "make_image": "generate_image",
+            "dalle": "generate_image",
+            "dall-e": "generate_image",
+            "image_gen": "generate_image",
+            "text_to_image": "generate_image",
+            
+            # File viewing patterns
+            "read_file": "view_file_lines",
+            "view_file": "view_file_lines",
+            "cat_file": "view_file_lines",
+            "get_file": "view_file_lines",
+            "open_file": "view_file_lines",
+            "file_read": "view_file_lines",
+            
+            # Calculator patterns
+            "math": "calculator",
+            "calculate": "calculator",
+            "eval_math": "calculator",
+            "compute": "calculator",
+            
+            # Time patterns
+            "get_time": "get_current_time",
+            "current_time": "get_current_time",
+            "time": "get_current_time",
+            "date": "get_current_time",
+            "now": "get_current_time",
+            
+            # Memory patterns (legacy names)
+            "agent_search": "memory_search",
+            "agent_read": "memory_read",
+        }
+        
         async def execute_tool(tool_name: str, arguments: dict):
             """Execute a tool and return result"""
+            # NC-0.8.0.9: Check for delegated tool names first
+            original_name = tool_name
+            if tool_name in TOOL_DELEGATES:
+                delegated_to = TOOL_DELEGATES[tool_name]
+                logger.info(f"[LLM_TOOLS] DELEGATE: '{tool_name}' → '{delegated_to}'")
+                tool_name = delegated_to
+                
+                # Map arguments for common patterns
+                if delegated_to == "create_file":
+                    # Handle various content/path argument names for artifact creation
+                    content = (
+                        arguments.get("content") or 
+                        arguments.get("data") or 
+                        arguments.get("text") or
+                        arguments.get("code") or
+                        arguments.get("body") or
+                        arguments.get("source")
+                    )
+                    path = (
+                        arguments.get("path") or 
+                        arguments.get("filename") or 
+                        arguments.get("file_path") or
+                        arguments.get("name") or
+                        arguments.get("file")
+                    )
+                    overwrite = arguments.get("overwrite", True)
+                    if isinstance(overwrite, str):
+                        overwrite = overwrite.lower() in ("true", "1", "yes")
+                    
+                    if content and path:
+                        arguments = {"path": path, "content": content, "overwrite": overwrite}
+                    elif content:
+                        # No path provided - generate one from content type
+                        arguments = {"path": "output.txt", "content": content, "overwrite": overwrite}
+                    
+                elif delegated_to == "execute_python":
+                    # Handle various code argument names
+                    code = (
+                        arguments.get("code") or 
+                        arguments.get("script") or 
+                        arguments.get("python_code") or
+                        arguments.get("source") or
+                        arguments.get("program")
+                    )
+                    if code:
+                        arguments = {"code": code}
+                    
+                elif delegated_to == "fetch_webpage":
+                    # Handle various URL argument names
+                    url = (
+                        arguments.get("url") or 
+                        arguments.get("uri") or 
+                        arguments.get("link") or
+                        arguments.get("query")  # For search-like calls
+                    )
+                    if url:
+                        arguments = {"url": url}
+                        
+                elif delegated_to == "generate_image":
+                    # Handle various prompt argument names
+                    prompt = (
+                        arguments.get("prompt") or 
+                        arguments.get("description") or 
+                        arguments.get("text") or
+                        arguments.get("query")
+                    )
+                    if prompt:
+                        arguments = {"prompt": prompt}
+                        
+                elif delegated_to == "view_file_lines":
+                    # Handle various file path argument names
+                    path = (
+                        arguments.get("path") or 
+                        arguments.get("file") or 
+                        arguments.get("filename") or
+                        arguments.get("file_path")
+                    )
+                    if path:
+                        new_args = {"filename": path}
+                        # Preserve line range if provided
+                        if "start_line" in arguments:
+                            new_args["start_line"] = arguments.get("start_line")
+                        if "end_line" in arguments:
+                            new_args["end_line"] = arguments.get("end_line")
+                        arguments = new_args
+            
+            # NC-0.8.0.9: Validate tool exists before execution
+            # Prevents LLM from hallucinating tools that don't exist
+            is_valid_tool = (
+                tool_name in mcp_tool_map or 
+                tool_registry.get_handler(tool_name) is not None
+            )
+            if not is_valid_tool:
+                logger.warning(f"[LLM_TOOLS] HALLUCINATED TOOL: '{tool_name}' does not exist. Available: {list(mcp_tool_map.keys()) + [t['function']['name'] for t in tool_registry.get_tool_definitions()]}")
+                return {
+                    "error": f"TOOL_NOT_FOUND: '{tool_name}' is not an available tool. You may be hallucinating a tool from your training data. Please use only the tools that were provided to you in this conversation.",
+                    "available_tools": [t['function']['name'] for t in tool_registry.get_tool_definitions()] + list(mcp_tool_map.keys())
+                }
+            
+            # NC-0.8.0.8: Debug tool calls if enabled
+            if debug_tool_calls:
+                from app.core.logging import log_tool_debug
+                log_tool_debug("=" * 60)
+                log_tool_debug("TOOL CALL REQUEST")
+                log_tool_debug("=" * 60)
+                log_tool_debug("Tool execution request",
+                    tool_name=tool_name,
+                    arguments=arguments
+                )
+            
             # Check if it's an MCP/OpenAPI tool
             if tool_name in mcp_tool_map:
                 tool_db, operation = mcp_tool_map[tool_name]
@@ -1386,6 +1686,16 @@ The following is relevant information from your previous conversations:
                         "message_id": streaming_handler._current_message_id,
                     },
                 )
+            
+            # NC-0.8.0.8: Debug tool result if enabled
+            if debug_tool_calls:
+                from app.core.logging import log_tool_debug
+                log_tool_debug("TOOL CALL RESULT",
+                    tool_name=tool_name,
+                    result_length=len(str(result)),
+                    result_preview=str(result)[:2000]
+                )
+                log_tool_debug("=" * 60)
             
             logger.debug(f"Tool executed, result length: {len(str(result))}")
             return result
@@ -1562,11 +1872,93 @@ The following is relevant information from your previous conversations:
                 
                 # Archive log if getting large
                 await task_queue.archive_log_overflow()
+            
+            # NC-0.8.0.8: Auto-execute tasks if LLM stopped without processing them
+            # If there are queued tasks but no current task (LLM didn't pick one up),
+            # automatically feed the next task to the LLM
+            task_auto_depth = payload.get("_task_auto_depth", 0)
+            max_auto_depth = 10  # Prevent infinite recursion
+            
+            if (queue_status["has_pending"] and 
+                not queue_status["current_task"] and 
+                not queue_status["paused"] and
+                queue_status["queue_length"] > 0 and
+                task_auto_depth < max_auto_depth):
+                
+                logger.info(f"[TASK_QUEUE_AUTO] LLM stopped with {queue_status['queue_length']} pending tasks - auto-executing (depth={task_auto_depth})")
+                
+                # Get and start the next task
+                next_task = await task_queue.get_next_task()
+                if next_task:
+                    # Mark it as in progress
+                    await task_queue._load_queue()
+                    started_task = await task_queue._start_next_task()
+                    await task_queue._save_queue()
+                    
+                    if started_task:
+                        # Build task instruction message
+                        task_prompt = f"""[TASK QUEUE - AUTO EXECUTION]
+
+You have pending tasks in your queue. Please work on the following task:
+
+**Task:** {started_task.description}
+
+**Instructions:** {started_task.instructions}
+
+When you complete this task, call the `complete_task` tool with a brief summary of what you did.
+If you cannot complete it, call `fail_task` with the reason.
+
+There are {queue_status['queue_length'] - 1} more tasks waiting after this one."""
+
+                        # Send task notification to frontend
+                        await ws_manager.send_to_connection(connection, {
+                            "type": "task_auto_execute",
+                            "payload": {
+                                "chat_id": chat_id,
+                                "task_id": started_task.id,
+                                "task_description": started_task.description,
+                                "remaining_tasks": queue_status['queue_length'] - 1,
+                            },
+                        })
+                        
+                        logger.info(f"[TASK_QUEUE_AUTO] Sending task '{started_task.description}' to LLM (depth={task_auto_depth + 1})")
+                        
+                        # Create task payload with incremented depth
+                        task_payload = {
+                            "chat_id": chat_id,
+                            "content": task_prompt,
+                            "enable_tools": True,
+                            "_task_auto_depth": task_auto_depth + 1,
+                        }
+                        
+                        # Recursive call to handle_chat_message
+                        await handle_chat_message(
+                            connection=connection,
+                            streaming_handler=streaming_handler,
+                            user_id=user_id,
+                            payload=task_payload,
+                            save_user_message=False,  # Don't save auto-execute as user message
+                        )
+                        
+                        # After returning, check if queue is now empty
+                        final_status = await task_queue.get_queue_status()
+                        if not final_status["has_pending"] and final_status["queue_length"] == 0 and not final_status["current_task"]:
+                            # Queue is empty - notify frontend
+                            await ws_manager.send_to_connection(connection, {
+                                "type": "task_queue_empty",
+                                "payload": {
+                                    "chat_id": chat_id,
+                                    "completed_count": final_status["completed_count"],
+                                },
+                            })
+                            
+                            logger.info(f"[TASK_QUEUE_AUTO] Queue complete - {final_status['completed_count']} tasks processed")
+            
+            elif task_auto_depth >= max_auto_depth:
+                logger.warning(f"[TASK_QUEUE_AUTO] Max recursion depth ({max_auto_depth}) reached, stopping auto-execution")
                 
         except Exception as task_err:
-            logger.debug(f"[TASK_QUEUE] Status update skipped: {task_err}")
-        except Exception as task_err:
-            logger.warning(f"[TASK_QUEUE] Task processing error: {task_err}")
+            logger.warning(f"[TASK_QUEUE] Task processing error: {task_err}", exc_info=True)
         
         # Auto-generate title using LLM
         # Check current title with direct SQL

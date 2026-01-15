@@ -517,6 +517,7 @@ class LLMService:
         
         # Track timing for structured logging
         stream_start_time = time.time()
+        first_token_time = None  # NC-0.8.0.9: Track TTFT
         tool_calls_count = 0
         filters_applied = []
         
@@ -724,6 +725,7 @@ class LLMService:
             total_output_tokens = 0
             filtered_content = ""
             tool_results = []
+            tool_call_history = []  # NC-0.8.0.8: Track tool calls for history
             
             # Automatic search disabled - use filter chains for web search orchestration
             # search_tools = [t for t in (tools or []) if 'search' in t.get('name', '').lower() or 'fetch' in t.get('name', '').lower()]
@@ -777,6 +779,13 @@ class LLMService:
                                 "query": search_query,
                                 "result": result_str,
                             })
+                            # NC-0.8.0.8: Also track in tool_call_history
+                            tool_call_history.append({
+                                "tool": tool_name,
+                                "args": {"query": search_query},
+                                "result": result_str[:5000] if len(result_str) > 5000 else result_str,
+                                "success": True,
+                            })
                             logger.debug(f"Tool result length: {len(result_str)}")
                             
                         except Exception as e:
@@ -785,6 +794,13 @@ class LLMService:
                                 "tool": tool_name,
                                 "query": search_query,
                                 "error": str(e),
+                            })
+                            # NC-0.8.0.8: Also track in tool_call_history
+                            tool_call_history.append({
+                                "tool": tool_name,
+                                "args": {"query": search_query},
+                                "error": str(e),
+                                "success": False,
                             })
             
             # Step 4: Generate final response (with or without tool results)
@@ -813,10 +829,35 @@ class LLMService:
                 "stream": True,
             }
             
+            # NC-0.8.0.8: Fetch debug settings for tool logging
+            from app.services.settings_service import SettingsService
+            debug_tool_calls = await SettingsService.get_bool(db, "debug_tool_calls", False)
+            
             # NC-0.8.0.7: Add tools to API params if provided
             if tools:
                 api_params["tools"] = self._convert_tools_to_openai_format(tools)
-                logger.debug(f"[LLM_TOOLS] Added {len(tools)} tools to streaming request")
+                # NC-0.8.0.8: Set tool_choice to "auto" to encourage tool usage
+                # Some models (like Qwen) may need this hint
+                api_params["tool_choice"] = "auto"
+                logger.debug(f"[LLM_TOOLS] Added {len(tools)} tools to streaming request with tool_choice=auto")
+                
+                # NC-0.8.0.8: Log tool advertisements if debug enabled
+                debug_tool_advertisements = await SettingsService.get_bool(db, "debug_tool_advertisements", False)
+                if debug_tool_advertisements:
+                    from app.core.logging import log_tool_debug
+                    log_tool_debug("=" * 60)
+                    log_tool_debug("TOOLS IN API PARAMS (OpenAI format)")
+                    log_tool_debug("=" * 60)
+                    log_tool_debug(f"Total tools in API request: {len(api_params['tools'])}")
+                    log_tool_debug(f"tool_choice: {api_params.get('tool_choice', 'not set')}")
+                    for i, t in enumerate(api_params["tools"]):
+                        func = t.get("function", {})
+                        log_tool_debug(f"API Tool [{i+1}]",
+                            name=func.get('name'),
+                            description=func.get('description', '')[:200],
+                            parameters=func.get('parameters', {})
+                        )
+                    log_tool_debug("=" * 60)
             
             # Debug: Log the ACTUAL JSON payload size that will be sent
             import json as json_module
@@ -858,7 +899,11 @@ class LLMService:
                     text_parts = [p.get("text", "")[:50] for p in content if isinstance(p, dict) and p.get("type") == "text"]
                     logger.debug(f"[LLM_REQUEST] msg[{i}] role={msg.get('role')} len={content_len} multimodal_parts={text_parts}")
             
-            stream = await self.client.chat.completions.create(**api_params)
+            try:
+                stream = await self.client.chat.completions.create(**api_params)
+            except Exception as stream_create_err:
+                logger.error(f"[LLM_REQUEST] Failed to create stream: {type(stream_create_err).__name__}: {stream_create_err}")
+                raise
             
             # Log successful request creation
             logger.debug(f"[LLM_REQUEST] Stream created successfully")
@@ -876,6 +921,7 @@ class LLMService:
             streaming_tool_calls = {}
             max_tool_rounds = 5  # Prevent infinite tool loops
             tool_round = 0
+            hit_max_tool_rounds = False
             
             try:
                 while tool_round < max_tool_rounds:
@@ -902,7 +948,21 @@ class LLMService:
                         delta = chunk.choices[0].delta
                         finish_reason = chunk.choices[0].finish_reason
                         
+                        # NC-0.8.0.8: Enhanced debug logging for tool calls
+                        if debug_tool_calls:
+                            from app.core.logging import log_tool_debug
+                            # Log raw chunk structure to debug tool call format
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                chunk_dict = chunk.model_dump() if hasattr(chunk, 'model_dump') else str(chunk)
+                                log_tool_debug("RAW CHUNK WITH TOOL_CALLS", chunk=chunk_dict)
+                            elif finish_reason:
+                                log_tool_debug(f"Stream chunk finish_reason: {finish_reason}")
+                        
                         if delta.content:
+                            # NC-0.8.0.9: Record time to first token
+                            if first_token_time is None:
+                                first_token_time = time.time()
+                            
                             filtered_content += delta.content
                             
                             # Log first 500 chars of response
@@ -951,6 +1011,14 @@ class LLMService:
                             break
                         
                         if finish_reason and finish_reason != "tool_calls":
+                            # NC-0.8.0.8: Log when stream finishes without tool calls
+                            if debug_tool_calls and tools:
+                                from app.core.logging import log_tool_debug
+                                log_tool_debug("STREAM FINISHED WITHOUT TOOL CALLS",
+                                    finish_reason=finish_reason,
+                                    tools_available=len(tools),
+                                    note="LLM did not request any tool calls"
+                                )
                             break
                     
                     # If cancelled, exit the while loop
@@ -959,6 +1027,13 @@ class LLMService:
                     
                     # If no pending tool calls, we're done
                     if not pending_tool_calls:
+                        if debug_tool_calls and tools and not streaming_tool_calls:
+                            from app.core.logging import log_tool_debug
+                            log_tool_debug("RESPONSE COMPLETE - NO TOOL USAGE",
+                                tools_available=len(tools),
+                                tool_names=[t.get('function', {}).get('name') for t in api_params.get('tools', [])],
+                                note="LLM chose not to use any available tools"
+                            )
                         break
                     
                     # Execute pending tool calls
@@ -982,6 +1057,14 @@ class LLMService:
                                 # Truncate very long results
                                 if len(result_str) > 15000:
                                     result_str = result_str[:15000] + "\n... [truncated]"
+                                
+                                # NC-0.8.0.8: Track tool call for history
+                                tool_call_history.append({
+                                    "tool": tool_name,
+                                    "args": tool_args,
+                                    "result": result_str[:5000] if len(result_str) > 5000 else result_str,  # Limit history size
+                                    "success": True,
+                                })
                                 
                                 # Yield tool call event for frontend
                                 yield {
@@ -1011,6 +1094,15 @@ class LLMService:
                                 })
                             except Exception as e:
                                 logger.error(f"[LLM_TOOLS] Tool execution failed: {e}")
+                                
+                                # NC-0.8.0.8: Track failed tool call
+                                tool_call_history.append({
+                                    "tool": tool_name,
+                                    "args": tool_args,
+                                    "error": str(e),
+                                    "success": False,
+                                })
+                                
                                 messages.append({
                                     "role": "assistant", 
                                     "content": None,
@@ -1043,6 +1135,7 @@ class LLMService:
                         }
                         if tools:
                             continue_params["tools"] = self._convert_tools_to_openai_format(tools)
+                            continue_params["tool_choice"] = "auto"
                         
                         stream = await self.client.chat.completions.create(**continue_params)
                         if stream_setter:
@@ -1051,6 +1144,12 @@ class LLMService:
                     else:
                         # No tool executor or no tool calls, exit
                         break
+                
+                # NC-0.8.0.8: Check if we hit max tool rounds without generating content
+                if tool_round >= max_tool_rounds and not filtered_content.strip():
+                    hit_max_tool_rounds = True
+                    logger.warning(f"[LLM_TOOLS] Hit max tool rounds ({max_tool_rounds}) without generating content, forcing final response...")
+                    
             except asyncio.CancelledError:
                 # Task was cancelled - this is expected when stop is requested
                 logger.info("Stream task cancelled (CancelledError)")
@@ -1067,7 +1166,6 @@ class LLMService:
             # If cancelled, still save partial content and notify
             if cancelled:
                 # Use direct SQL update for robustness
-                from sqlalchemy import update
                 message_id = str(assistant_message.id)
                 try:
                     await db.execute(
@@ -1087,6 +1185,50 @@ class LLMService:
                 }
                 return
             
+            # NC-0.8.0.8: Force a final response if we hit max tool rounds without content
+            if hit_max_tool_rounds and not filtered_content.strip():
+                logger.info("[LLM_TOOLS] Forcing final response without tools...")
+                
+                # Add instruction to summarize tool results
+                messages.append({
+                    "role": "user",
+                    "content": "[SYSTEM: You have completed your tool calls. Now please provide your final response to the user based on the information you gathered. Do not make any more tool calls.]"
+                })
+                
+                # Make one more API call WITHOUT tools to force text generation
+                final_params = {
+                    "model": effective_model,
+                    "messages": messages,
+                    "max_tokens": effective_max_output_tokens,
+                    "temperature": self.temperature,
+                    "stream": True,
+                    # NO tools parameter - force text output
+                }
+                
+                try:
+                    final_stream = await self.client.chat.completions.create(**final_params)
+                    async for chunk in final_stream:
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        if delta.content:
+                            content_chunk = delta.content
+                            filtered_content += content_chunk
+                            yield {
+                                "type": "content",
+                                "content": content_chunk,
+                            }
+                    logger.info(f"[LLM_TOOLS] Forced response generated: {len(filtered_content)} chars")
+                except Exception as e:
+                    logger.error(f"[LLM_TOOLS] Failed to generate forced response: {e}")
+                    # Generate a fallback message
+                    fallback = "\n\n*[I completed several tool calls but encountered an issue generating my final response. Here's a summary of what I found:]*\n\n"
+                    for tc in tool_call_history[-3:]:  # Last 3 tool calls
+                        if tc.get("success"):
+                            fallback += f"- **{tc['tool']}**: {tc['result'][:500]}...\n"
+                    filtered_content = fallback
+                    yield {"type": "content", "content": filtered_content}
+            
             # Estimate tokens if not provided
             if total_input_tokens == 0:
                 total_input_tokens = self._estimate_tokens(messages)
@@ -1094,11 +1236,14 @@ class LLMService:
                 total_output_tokens = self._estimate_tokens(filtered_content)
             
             # Log stream completion summary
-            logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}")
+            logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}, tool_calls={len(tool_call_history)}")
+            
+            # NC-0.8.0.9: Tool call results are handled through proper tool message flow
+            # Don't prepend them to assistant content (causes display issues and LLM mimicry)
+            content_to_save = filtered_content
             
             # Use direct SQL update instead of ORM to avoid stale object issues
             # This is more robust during long streaming sessions
-            from sqlalchemy import update
             message_id = str(assistant_message.id)
             chat_id = str(chat.id)
             
@@ -1108,7 +1253,7 @@ class LLMService:
                     update(Message)
                     .where(Message.id == message_id)
                     .values(
-                        content=filtered_content,
+                        content=content_to_save,
                         input_tokens=total_input_tokens,
                         output_tokens=total_output_tokens,
                         is_streaming=False,
@@ -1155,11 +1300,18 @@ class LLMService:
                 tool_calls=tool_calls_count if tool_calls_count > 0 else None,
             )
             
+            # NC-0.8.0.9: Calculate timing stats
+            ttft_ms = ((first_token_time - stream_start_time) * 1000) if first_token_time else None
+            tokens_per_second = (total_output_tokens / (duration_ms / 1000)) if duration_ms > 0 and total_output_tokens > 0 else None
+            
             yield {
                 "type": "message_end",
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,
                 "parent_id": parent_id,  # For conversation tree tracking
+                "duration_ms": duration_ms,
+                "ttft_ms": ttft_ms,
+                "tokens_per_second": round(tokens_per_second, 1) if tokens_per_second else None,
             }
             
         except Exception as e:
@@ -1330,6 +1482,7 @@ Search query:"""
         attachments: Optional[List[Dict]] = None,
         tools: Optional[List[Dict]] = None,
         parent_id: Optional[str] = None,  # For tree-based conversation building
+        include_images: bool = True,  # NC-0.8.0.9: Whether to include images in messages
     ) -> List[Dict]:
         """
         Build message list from chat history in OpenAI format.
@@ -1337,6 +1490,17 @@ Search query:"""
         Uses tree structure: if parent_id is provided, traces back from that message
         to root to build the conversation path. Otherwise falls back to chronological.
         """
+        
+        # NC-0.8.0.9: Check vision capability - strip images if no MM support
+        if include_images:
+            try:
+                from app.services.vision_router import get_vision_router
+                vision_router = await get_vision_router(db)
+                include_images = vision_router.has_vision_capability
+                if not include_images:
+                    logger.warning("[BUILD_MESSAGES] No vision capability - images will be stripped from all messages")
+            except Exception as e:
+                logger.warning(f"[BUILD_MESSAGES] Could not check vision capability: {e}")
         
         # Get ALL messages for this chat (we'll filter by tree structure)
         result = await db.execute(
@@ -1446,7 +1610,7 @@ When you receive search results or external data in the conversation, follow the
             
             # Build message content
             if msg.role == MessageRole.USER:
-                content = self._build_user_content(msg.content, msg.attachments)
+                content = self._build_user_content(msg.content, msg.attachments, include_images)
                 messages.append({
                     "role": "user",
                     "content": content,
@@ -1475,7 +1639,7 @@ When you receive search results or external data in the conversation, follow the
                 messages.append(message_dict)
         
         # Add current user message
-        content = self._build_user_content(user_message, attachments)
+        content = self._build_user_content(user_message, attachments, include_images)
         
         messages.append({
             "role": "user",
@@ -1588,12 +1752,13 @@ When you receive search results or external data in the conversation, follow the
         self,
         text: str,
         attachments: Optional[List[Dict]] = None,
+        include_images: bool = True,  # NC-0.8.0.9: Whether to include images
     ) -> Any:
         """Build user message content, handling text, images, and file attachments"""
         import logging
         logger = logging.getLogger(__name__)
         
-        logger.debug(f"[BUILD_CONTENT] text_len={len(text)}, attachments={len(attachments) if attachments else 0}")
+        logger.debug(f"[BUILD_CONTENT] text_len={len(text)}, attachments={len(attachments) if attachments else 0}, include_images={include_images}")
         
         if not attachments:
             return text
@@ -1607,6 +1772,11 @@ When you receive search results or external data in the conversation, follow the
             logger.debug(f"[BUILD_CONTENT] Processing attachment type={att_type}, filename={attachment.get('filename')}")
             
             if att_type == "image":
+                # NC-0.8.0.9: Skip images if no vision capability
+                if not include_images:
+                    logger.debug(f"[BUILD_CONTENT] Skipping image (include_images=False)")
+                    continue
+                    
                 # Build image content for multimodal models
                 image_data = attachment.get('data', '')
                 mime_type = attachment.get('mime_type', 'image/jpeg')

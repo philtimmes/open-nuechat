@@ -247,9 +247,11 @@ class Settings(BaseSettings):
     
     WS_HEARTBEAT_INTERVAL: int = 30
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
     
     def get_branding(self) -> Dict[str, Any]:
         """Get all branding settings as a dictionary for the frontend"""

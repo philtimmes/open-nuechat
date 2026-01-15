@@ -32,6 +32,9 @@ export interface WSStreamEnd {
     usage: {
       input_tokens: number;
       output_tokens: number;
+      duration_ms?: number;
+      ttft_ms?: number;  // Time to first token
+      tokens_per_second?: number;
     };
   };
 }

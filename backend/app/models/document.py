@@ -137,6 +137,13 @@ class KnowledgeStore(Base):
     require_keywords_enabled = Column(Boolean, default=False)
     required_keywords = Column(JSON, nullable=True)  # List of keywords/phrases: ["pricing", "cost", "subscription"]
     
+    # Force trigger keywords (NC-0.8.0.7)
+    # When query contains these keywords, KB content is ALWAYS injected (bypasses score threshold)
+    # This ensures authoritative content is loaded when specific topics are mentioned
+    force_trigger_enabled = Column(Boolean, default=False)
+    force_trigger_keywords = Column(JSON, nullable=True)  # List of keywords: ["policy", "procedure", "guideline"]
+    force_trigger_max_chunks = Column(Integer, default=5)  # Max chunks to inject when force triggered
+    
     # Stats
     document_count = Column(Integer, default=0)
     total_chunks = Column(Integer, default=0)

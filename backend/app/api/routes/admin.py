@@ -1,7 +1,9 @@
 """
 Admin routes for system settings management
+
+NC-0.8.0.9: Now uses centralized SK keys and SETTING_DEFAULTS from settings_keys.py
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -10,13 +12,14 @@ import json
 from app.api.dependencies import get_current_user, get_db
 from app.models.models import User, SystemSetting, UserTier, Chat, Message
 from app.core.config import settings
+from app.core.settings_keys import SK, SETTING_DEFAULTS
 from app.services.billing import BillingService
 from sqlalchemy import select, func, or_
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-# Default tier configuration
+# Default tier configuration (used when not in DB)
 DEFAULT_TIERS = [
     {
         "id": "free",
@@ -45,72 +48,6 @@ DEFAULT_TIERS = [
 ]
 
 
-# Default values from config (fallback when not in DB)
-SETTING_DEFAULTS = {
-    # Prompts
-    "default_system_prompt": settings.DEFAULT_SYSTEM_PROMPT,
-    "all_models_prompt": settings.ALL_MODELS_PROMPT,
-    "title_generation_prompt": settings.TITLE_GENERATION_PROMPT,
-    "rag_context_prompt": settings.RAG_CONTEXT_PROMPT,
-    
-    # Token limits by tier
-    "free_tier_tokens": str(settings.FREE_TIER_TOKENS),
-    "pro_tier_tokens": str(settings.PRO_TIER_TOKENS),
-    "enterprise_tier_tokens": str(settings.ENTERPRISE_TIER_TOKENS),
-    
-    # Pricing
-    "input_token_price": str(settings.INPUT_TOKEN_PRICE),
-    "output_token_price": str(settings.OUTPUT_TOKEN_PRICE),
-    
-    # Token refill (in hours)
-    "token_refill_interval_hours": "720",  # 30 days default
-    
-    # Tiers JSON
-    "tiers": json.dumps(DEFAULT_TIERS),
-    
-    # OAuth - Google
-    "google_client_id": settings.GOOGLE_CLIENT_ID or "",
-    "google_client_secret": settings.GOOGLE_CLIENT_SECRET or "",
-    "google_oauth_enabled": str(settings.ENABLE_OAUTH_GOOGLE).lower(),
-    "google_oauth_timeout": "30",
-    
-    # OAuth - GitHub
-    "github_client_id": settings.GITHUB_CLIENT_ID or "",
-    "github_client_secret": settings.GITHUB_CLIENT_SECRET or "",
-    "github_oauth_enabled": str(settings.ENABLE_OAUTH_GITHUB).lower(),
-    "github_oauth_timeout": "30",
-    
-    # LLM Settings
-    "llm_api_base_url": settings.LLM_API_BASE_URL,
-    "llm_api_key": settings.LLM_API_KEY,
-    "llm_model": settings.LLM_MODEL,
-    "llm_timeout": str(settings.LLM_TIMEOUT),
-    "llm_max_tokens": str(settings.LLM_MAX_TOKENS),
-    "llm_context_size": "200000",  # NC-0.8.0.7: Model context window size
-    "llm_temperature": str(settings.LLM_TEMPERATURE),
-    "llm_stream_default": str(settings.LLM_STREAM_DEFAULT).lower(),
-    "llm_multimodal": "false",  # Whether legacy model supports vision/images
-    
-    # Feature flags
-    "enable_registration": str(settings.ENABLE_REGISTRATION).lower(),
-    "enable_billing": str(settings.ENABLE_BILLING).lower(),
-    "freeforall": str(settings.FREEFORALL).lower(),
-    
-    # API Rate Limits (per minute, per API key)
-    "api_rate_limit_completions": "60",
-    "api_rate_limit_embeddings": "200",
-    "api_rate_limit_images": "10",
-    "api_rate_limit_models": "100",
-    
-    # Storage limits
-    "max_upload_size_mb": str(settings.MAX_UPLOAD_SIZE_MB),
-    "max_knowledge_store_size_mb": "500",  # 500MB default per knowledge store
-    "max_knowledge_stores_free": "3",
-    "max_knowledge_stores_pro": "20",
-    "max_knowledge_stores_enterprise": "100",
-}
-
-
 async def get_system_setting(db: AsyncSession, key: str) -> str:
     """Get a system setting value with fallback to defaults."""
     result = await db.execute(
@@ -136,6 +73,13 @@ async def get_system_setting_int(db: AsyncSession, key: str, default: int = 0) -
     try:
         return int(value)
     except (ValueError, TypeError):
+        # Fall back to SETTING_DEFAULTS first, then to provided default
+        default_str = SETTING_DEFAULTS.get(key, "")
+        if default_str:
+            try:
+                return int(default_str)
+            except (ValueError, TypeError):
+                pass
         return default
 
 
@@ -145,6 +89,13 @@ async def get_system_setting_float(db: AsyncSession, key: str, default: float = 
     try:
         return float(value)
     except (ValueError, TypeError):
+        # Fall back to SETTING_DEFAULTS first, then to provided default
+        default_str = SETTING_DEFAULTS.get(key, "")
+        if default_str:
+            try:
+                return float(default_str)
+            except (ValueError, TypeError):
+                pass
         return default
 
 
@@ -214,20 +165,24 @@ class OAuthSettingsSchema(BaseModel):
 
 class LLMSettingsSchema(BaseModel):
     """LLM connectivity settings"""
-    llm_api_base_url: str
+    llm_api_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = "default"
-    llm_timeout: int = Field(default=120, ge=10, le=600)
-    llm_max_tokens: int = Field(default=4096, ge=1)
-    llm_context_size: int = Field(default=200000, ge=1024)  # NC-0.8.0.7: Model context window
-    llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    llm_timeout: int = 120
+    llm_max_tokens: int = 4096
+    llm_context_size: int = 200000  # NC-0.8.0.7: Model context window
+    llm_temperature: float = 0.7
     llm_stream_default: bool = True
     llm_multimodal: bool = False  # Whether legacy model supports vision/images
     # History compression settings
     history_compression_enabled: bool = True
-    history_compression_threshold: int = Field(default=20, ge=5, le=100)
-    history_compression_keep_recent: int = Field(default=6, ge=2, le=20)
-    history_compression_target_tokens: int = Field(default=8000, ge=2000, le=128000)
+    history_compression_threshold: int = 20
+    history_compression_keep_recent: int = 6
+    history_compression_target_tokens: int = 8000
+    
+    # NC-0.8.0.8: Make validation more permissive
+    class Config:
+        extra = "ignore"  # Ignore extra fields
 
 
 # NC-0.8.0.7: Image generation settings
@@ -474,20 +429,20 @@ async def get_llm_settings(
 ):
     """Get LLM connectivity settings"""
     return LLMSettingsSchema(
-        llm_api_base_url=await get_system_setting(db, "llm_api_base_url"),
-        llm_api_key=await get_system_setting(db, "llm_api_key"),
-        llm_model=await get_system_setting(db, "llm_model"),
-        llm_timeout=await get_system_setting_int(db, "llm_timeout"),
-        llm_max_tokens=await get_system_setting_int(db, "llm_max_tokens"),
-        llm_context_size=await get_system_setting_int(db, "llm_context_size") or 200000,  # NC-0.8.0.7
-        llm_temperature=await get_system_setting_float(db, "llm_temperature"),
-        llm_stream_default=await get_system_setting_bool(db, "llm_stream_default"),
-        llm_multimodal=await get_system_setting_bool(db, "llm_multimodal"),
+        llm_api_base_url=await get_system_setting(db, "llm_api_base_url") or "http://localhost:11434/v1",
+        llm_api_key=await get_system_setting(db, "llm_api_key") or "",
+        llm_model=await get_system_setting(db, "llm_model") or "default",
+        llm_timeout=await get_system_setting_int(db, "llm_timeout", 120),
+        llm_max_tokens=await get_system_setting_int(db, "llm_max_tokens", 4096),
+        llm_context_size=await get_system_setting_int(db, "llm_context_size", 200000),
+        llm_temperature=await get_system_setting_float(db, "llm_temperature", 0.7),
+        llm_stream_default=await get_system_setting_bool(db, "llm_stream_default", True),
+        llm_multimodal=await get_system_setting_bool(db, "llm_multimodal", False),
         # History compression
-        history_compression_enabled=await get_system_setting_bool(db, "history_compression_enabled"),
-        history_compression_threshold=await get_system_setting_int(db, "history_compression_threshold") or 20,
-        history_compression_keep_recent=await get_system_setting_int(db, "history_compression_keep_recent") or 6,
-        history_compression_target_tokens=await get_system_setting_int(db, "history_compression_target_tokens") or 8000,
+        history_compression_enabled=await get_system_setting_bool(db, "history_compression_enabled", True),
+        history_compression_threshold=await get_system_setting_int(db, "history_compression_threshold", 20),
+        history_compression_keep_recent=await get_system_setting_int(db, "history_compression_keep_recent", 6),
+        history_compression_target_tokens=await get_system_setting_int(db, "history_compression_target_tokens", 8000),
     )
 
 
@@ -498,24 +453,47 @@ async def update_llm_settings(
     db: AsyncSession = Depends(get_db),
 ):
     """Update LLM connectivity settings"""
-    await set_setting(db, "llm_api_base_url", data.llm_api_base_url)
-    await set_setting(db, "llm_api_key", data.llm_api_key)
-    await set_setting(db, "llm_model", data.llm_model)
-    await set_setting(db, "llm_timeout", str(data.llm_timeout))
-    await set_setting(db, "llm_max_tokens", str(data.llm_max_tokens))
-    await set_setting(db, "llm_context_size", str(data.llm_context_size))  # NC-0.8.0.7
-    await set_setting(db, "llm_temperature", str(data.llm_temperature))
-    await set_setting(db, "llm_stream_default", str(data.llm_stream_default).lower())
-    await set_setting(db, "llm_multimodal", str(data.llm_multimodal).lower())
-    # History compression
-    await set_setting(db, "history_compression_enabled", str(data.history_compression_enabled).lower())
-    await set_setting(db, "history_compression_threshold", str(data.history_compression_threshold))
-    await set_setting(db, "history_compression_keep_recent", str(data.history_compression_keep_recent))
-    await set_setting(db, "history_compression_target_tokens", str(data.history_compression_target_tokens))
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[LLM_SETTINGS] Saving LLM settings: url={data.llm_api_base_url}, model={data.llm_model}, timeout={data.llm_timeout}, context_size={data.llm_context_size}")
     
-    await db.commit()
-    
-    return data
+    try:
+        await set_setting(db, "llm_api_base_url", data.llm_api_base_url)
+        await set_setting(db, "llm_api_key", data.llm_api_key)
+        await set_setting(db, "llm_model", data.llm_model)
+        await set_setting(db, "llm_timeout", str(data.llm_timeout))
+        await set_setting(db, "llm_max_tokens", str(data.llm_max_tokens))
+        await set_setting(db, "llm_context_size", str(data.llm_context_size))
+        await set_setting(db, "llm_temperature", str(data.llm_temperature))
+        await set_setting(db, "llm_stream_default", str(data.llm_stream_default).lower())
+        await set_setting(db, "llm_multimodal", str(data.llm_multimodal).lower())
+        # History compression
+        await set_setting(db, "history_compression_enabled", str(data.history_compression_enabled).lower())
+        await set_setting(db, "history_compression_threshold", str(data.history_compression_threshold))
+        await set_setting(db, "history_compression_keep_recent", str(data.history_compression_keep_recent))
+        await set_setting(db, "history_compression_target_tokens", str(data.history_compression_target_tokens))
+        
+        await db.commit()
+        logger.info("[LLM_SETTINGS] Settings saved successfully")
+        
+        return data
+    except Exception as e:
+        logger.error(f"[LLM_SETTINGS] Failed to save settings: {e}")
+        raise
+
+
+# NC-0.8.0.8: Debug endpoint for LLM settings validation
+@router.post("/llm-settings/debug")
+async def debug_llm_settings(
+    request: Request,
+    user: User = Depends(require_admin),
+):
+    """Debug endpoint to see raw request body"""
+    import logging
+    logger = logging.getLogger(__name__)
+    body = await request.json()
+    logger.info(f"[LLM_SETTINGS_DEBUG] Raw body: {body}")
+    return {"received": body}
 
 
 @router.post("/llm-settings/test")
@@ -592,12 +570,12 @@ async def get_image_gen_settings(
     """Get image generation settings"""
     import json
     
-    default_width = await get_system_setting_int(db, "image_gen_default_width") or 1024
-    default_height = await get_system_setting_int(db, "image_gen_default_height") or 1024
-    default_aspect_ratio = await get_system_setting(db, "image_gen_default_aspect_ratio") or "1:1"
+    default_width = await get_system_setting_int(db, SK.IMAGE_GEN_DEFAULT_WIDTH)
+    default_height = await get_system_setting_int(db, SK.IMAGE_GEN_DEFAULT_HEIGHT)
+    default_aspect_ratio = await get_system_setting(db, SK.IMAGE_GEN_DEFAULT_ASPECT_RATIO) or "1:1"
     
     # Get available resolutions (stored as JSON)
-    resolutions_json = await get_system_setting(db, "image_gen_available_resolutions")
+    resolutions_json = await get_system_setting(db, SK.IMAGE_GEN_AVAILABLE_RESOLUTIONS)
     if resolutions_json:
         try:
             resolutions = json.loads(resolutions_json)
@@ -625,16 +603,16 @@ async def update_image_gen_settings(
     """Update image generation settings"""
     import json
     
-    await set_setting(db, "image_gen_default_width", str(data.image_gen_default_width))
-    await set_setting(db, "image_gen_default_height", str(data.image_gen_default_height))
-    await set_setting(db, "image_gen_default_aspect_ratio", data.image_gen_default_aspect_ratio)
+    await set_setting(db, SK.IMAGE_GEN_DEFAULT_WIDTH, str(data.image_gen_default_width))
+    await set_setting(db, SK.IMAGE_GEN_DEFAULT_HEIGHT, str(data.image_gen_default_height))
+    await set_setting(db, SK.IMAGE_GEN_DEFAULT_ASPECT_RATIO, data.image_gen_default_aspect_ratio)
     
     # Store resolutions as JSON
     resolutions = [
         {"width": r.width, "height": r.height, "label": r.label}
         for r in data.image_gen_available_resolutions
     ]
-    await set_setting(db, "image_gen_available_resolutions", json.dumps(resolutions))
+    await set_setting(db, SK.IMAGE_GEN_AVAILABLE_RESOLUTIONS, json.dumps(resolutions))
     
     await db.commit()
     
@@ -784,12 +762,12 @@ async def get_public_image_settings(
     """Get image generation settings (public endpoint for chat interface)"""
     import json
     
-    default_width = await get_system_setting_int(db, "image_gen_default_width") or 1024
-    default_height = await get_system_setting_int(db, "image_gen_default_height") or 1024
-    default_aspect_ratio = await get_system_setting(db, "image_gen_default_aspect_ratio") or "1:1"
+    default_width = await get_system_setting_int(db, SK.IMAGE_GEN_DEFAULT_WIDTH)
+    default_height = await get_system_setting_int(db, SK.IMAGE_GEN_DEFAULT_HEIGHT)
+    default_aspect_ratio = await get_system_setting(db, SK.IMAGE_GEN_DEFAULT_ASPECT_RATIO) or "1:1"
     
     # Get available resolutions (stored as JSON)
-    resolutions_json = await get_system_setting(db, "image_gen_available_resolutions")
+    resolutions_json = await get_system_setting(db, SK.IMAGE_GEN_AVAILABLE_RESOLUTIONS)
     if resolutions_json:
         try:
             resolutions = json.loads(resolutions_json)
@@ -1665,6 +1643,8 @@ class DebugSettingsResponse(BaseModel):
     debug_filter_chains: bool
     enable_preemptive_rag: bool  # NC-0.8.0.7
     disable_image_request_filter: bool  # NC-0.8.0.7: Let LLM use image gen tool instead
+    debug_tool_advertisements: bool  # NC-0.8.0.8: Log tool definitions sent to LLM
+    debug_tool_calls: bool  # NC-0.8.0.8: Log tool call data exchanged with LLM
     last_token_reset_timestamp: Optional[str] = None
     token_refill_interval_hours: int
 
@@ -1676,6 +1656,8 @@ class DebugSettingsUpdate(BaseModel):
     debug_filter_chains: Optional[bool] = None
     enable_preemptive_rag: Optional[bool] = None  # NC-0.8.0.7
     disable_image_request_filter: Optional[bool] = None  # NC-0.8.0.7
+    debug_tool_advertisements: Optional[bool] = None  # NC-0.8.0.8
+    debug_tool_calls: Optional[bool] = None  # NC-0.8.0.8
 
 
 @router.get("/debug-settings", response_model=DebugSettingsResponse)
@@ -1693,6 +1675,9 @@ async def get_debug_settings(
     enable_preemptive_rag = enable_preemptive_rag_val != "false"  # Default true if not set
     # NC-0.8.0.7: Image request filter (default False - filter enabled)
     disable_image_request_filter = await get_system_setting(db, "disable_image_request_filter") == "true"
+    # NC-0.8.0.8: Tool debugging settings
+    debug_tool_advertisements = await get_system_setting(db, "debug_tool_advertisements") == "true"
+    debug_tool_calls = await get_system_setting(db, "debug_tool_calls") == "true"
     last_token_reset = await get_system_setting(db, "last_token_reset_timestamp")
     refill_hours = await get_system_setting_int(db, "token_refill_interval_hours")
     
@@ -1703,6 +1688,8 @@ async def get_debug_settings(
         debug_filter_chains=debug_filter_chains,
         enable_preemptive_rag=enable_preemptive_rag,
         disable_image_request_filter=disable_image_request_filter,
+        debug_tool_advertisements=debug_tool_advertisements,
+        debug_tool_calls=debug_tool_calls,
         last_token_reset_timestamp=last_token_reset if last_token_reset else None,
         token_refill_interval_hours=refill_hours,
     )
@@ -1729,6 +1716,11 @@ async def update_debug_settings(
     # NC-0.8.0.7: Image request filter toggle
     if data.disable_image_request_filter is not None:
         await set_setting(db, "disable_image_request_filter", "true" if data.disable_image_request_filter else "false")
+    # NC-0.8.0.8: Tool debugging toggles
+    if data.debug_tool_advertisements is not None:
+        await set_setting(db, "debug_tool_advertisements", "true" if data.debug_tool_advertisements else "false")
+    if data.debug_tool_calls is not None:
+        await set_setting(db, "debug_tool_calls", "true" if data.debug_tool_calls else "false")
     
     await db.commit()
     

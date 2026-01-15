@@ -393,8 +393,9 @@ async def seed_admin_user(db: AsyncSession) -> Optional[User]:
     
     if admin:
         logger.info(f"Updating existing admin user: id={admin.id}, is_active={admin.is_active}")
-        # Update existing admin password
+        # Update existing admin password and username
         admin.hashed_password = hashed_password
+        admin.username = settings.ADMIN_USERNAME  # Also update username from env
         admin.is_admin = True
         admin.is_active = True  # Ensure admin is active
         admin.tier = UserTier.ENTERPRISE  # Admin gets enterprise tier

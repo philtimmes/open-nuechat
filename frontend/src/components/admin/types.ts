@@ -292,6 +292,10 @@ export interface GlobalKBStore {
   // NC-0.8.0.1: Required keywords filter
   require_keywords_enabled: boolean;
   required_keywords: string[] | null;
+  // NC-0.8.0.7: Force trigger keywords
+  force_trigger_enabled: boolean;
+  force_trigger_keywords: string[] | null;
+  force_trigger_max_chunks: number;
 }
 
 export interface GPTCategory {

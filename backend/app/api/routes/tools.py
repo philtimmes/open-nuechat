@@ -219,6 +219,7 @@ async def get_tool(
 
 
 @router.patch("/{tool_id}", response_model=ToolResponse)
+@router.put("/{tool_id}", response_model=ToolResponse)
 async def update_tool(
     tool_id: str,
     data: ToolUpdate,

@@ -132,6 +132,10 @@ export interface Message {
   artifacts?: Artifact[];
   input_tokens?: number;
   output_tokens?: number;
+  // NC-0.8.0.9: Timing stats
+  duration_ms?: number;
+  ttft_ms?: number;  // Time to first token
+  tokens_per_second?: number;
   created_at: string;
   // Tree structure for conversation branching
   parent_id?: string | null;
@@ -334,6 +338,9 @@ export interface StreamChunk {
   usage?: {
     input_tokens: number;
     output_tokens: number;
+    duration_ms?: number;
+    ttft_ms?: number;
+    tokens_per_second?: number;
   };
 }
 
