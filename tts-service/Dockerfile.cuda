@@ -35,9 +35,9 @@ WORKDIR /app
 # Copy requirements
 COPY requirements.txt .
 
-# Install PyTorch nightly with CUDA support (for Blackwell/CUDA 13)
+# Install PyTorch nightly with CUDA 12.8 support (for Blackwell sm_120)
 RUN pip install --upgrade pip && \
-    pip install --pre torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126 && \
+    pip install --pre torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 && \
     pip install -r requirements.txt
 
 # Copy application code
