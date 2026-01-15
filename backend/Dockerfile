@@ -40,7 +40,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --fix-missing \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install pre-built FAISS wheel
-# This file MUST exist: run `cd backend && ./build-faiss.sh` first
+# This file MUST exist: run `./control.sh faiss-build --profile rocm` first
 COPY backend/wheels/faiss*.whl /tmp/
 RUN pip install /tmp/faiss*.whl && rm /tmp/faiss*.whl
 

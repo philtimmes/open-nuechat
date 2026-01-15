@@ -54,8 +54,10 @@ RUN python -m pip install --upgrade pip
 # Install PyTorch with CUDA support
 RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# Install FAISS with CUDA support
-RUN pip install faiss-gpu
+# Copy and install pre-built FAISS wheel with CUDA support
+# This file MUST exist: run `./control.sh faiss-build --profile cuda` first
+COPY backend/wheels/faiss*.whl /tmp/
+RUN pip install /tmp/faiss*.whl && rm /tmp/faiss*.whl
 
 # Copy and install Python dependencies
 COPY backend/requirements.txt .

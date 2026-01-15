@@ -261,20 +261,12 @@ cmd_faiss_status() {
     echo -e "${BLUE}FAISS Wheel Status:${NC}"
     echo ""
     
-    echo -e "${CYAN}ROCm wheel:${NC}"
-    if ls backend/wheels/faiss*rocm*.whl 1>/dev/null 2>&1; then
+    if ls backend/wheels/faiss*.whl 1>/dev/null 2>&1; then
         log_success "Found:"
-        ls -la backend/wheels/faiss*rocm*.whl
-    elif ls backend/wheels/faiss*.whl 1>/dev/null 2>&1; then
-        log_success "Found (generic):"
         ls -la backend/wheels/faiss*.whl
     else
-        log_warning "Not found - run: ./control.sh faiss-build --profile rocm"
+        log_warning "Not found - run: ./control.sh faiss-build --profile <rocm|cuda>"
     fi
-    echo ""
-    
-    echo -e "${CYAN}CUDA:${NC}"
-    echo "  No wheel needed - uses pip install faiss-gpu"
     echo ""
     
     echo -e "${CYAN}CPU:${NC}"
@@ -315,14 +307,7 @@ cmd_faiss_build() {
             cmd_faiss_build_rocm "$force"
             ;;
         cuda)
-            echo ""
-            log_info "CUDA profile does not require a pre-built wheel."
-            echo ""
-            echo "The Dockerfile.cuda uses:"
-            echo "  pip install faiss-gpu"
-            echo ""
-            echo "This installs the official NVIDIA CUDA-enabled FAISS from PyPI."
-            log_success "No action needed for CUDA profile."
+            cmd_faiss_build_cuda "$force"
             ;;
         cpu)
             echo ""
@@ -417,6 +402,91 @@ cmd_faiss_build_rocm() {
         ls -la "$wheels_dir"/faiss*.whl
         echo ""
         echo "This wheel will be used for all ROCm builds."
+    else
+        log_error "Wheel file not created!"
+        exit 1
+    fi
+}
+
+# Build FAISS wheel for CUDA
+cmd_faiss_build_cuda() {
+    local force="$1"
+    local wheels_dir="backend/wheels"
+    
+    # Check if wheel already exists
+    if ls "$wheels_dir"/faiss*.whl 1>/dev/null 2>&1; then
+        if [ "$force" != "true" ]; then
+            echo ""
+            log_success "FAISS wheel already exists:"
+            ls -la "$wheels_dir"/faiss*.whl
+            echo ""
+            echo "FAISS will NOT be rebuilt."
+            echo "Use --force to rebuild anyway."
+            return 0
+        else
+            log_warning "Force rebuild requested. Removing existing wheel..."
+            rm -f "$wheels_dir"/faiss*.whl
+        fi
+    fi
+    
+    # Extract base image from Dockerfile.cuda
+    local dockerfile="backend/Dockerfile.cuda"
+    local base_image=$(grep -E "^FROM.*nvidia" "$dockerfile" | head -1 | awk '{print $2}')
+    
+    if [ -z "$base_image" ]; then
+        log_error "Could not extract CUDA base image from $dockerfile"
+        exit 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                   Building FAISS CUDA Wheel                        ║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    log_info "Base image: $base_image"
+    log_info "This takes ~12 minutes but only happens ONCE."
+    echo ""
+    
+    mkdir -p "$wheels_dir"
+    
+    # Build in a temporary container with GPU access
+    docker run --rm --gpus all \
+        -v "$(pwd)/$wheels_dir:/output" \
+        "$base_image" \
+        bash -c '
+            set -e
+            echo "Python version: $(python --version)"
+            
+            echo "Installing build dependencies..."
+            apt-get update && apt-get install -y build-essential cmake git libopenblas-dev swig python3-pip
+            
+            echo "Upgrading pip..."
+            pip install --upgrade pip
+            
+            echo "Installing faiss-cpu for dependencies..."
+            pip install faiss-cpu && pip uninstall -y faiss-cpu
+            
+            echo "Cloning faiss-wheels..."
+            git clone --recursive https://github.com/faiss-wheels/faiss-wheels.git /tmp/faiss-wheels
+            cd /tmp/faiss-wheels
+            
+            echo "Building FAISS with CUDA support..."
+            pip install pipx
+            FAISS_GPU_SUPPORT=CUDA FAISS_OPT_LEVELS=avx2 pipx run build --wheel
+            
+            echo "Copying wheel to output..."
+            cp dist/faiss*.whl /output/
+            
+            echo "Done!"
+        '
+    
+    # Verify wheel was created
+    if ls "$wheels_dir"/faiss*.whl 1>/dev/null 2>&1; then
+        echo ""
+        log_success "FAISS CUDA wheel built successfully!"
+        ls -la "$wheels_dir"/faiss*.whl
+        echo ""
+        echo "This wheel will be used for all CUDA builds."
     else
         log_error "Wheel file not created!"
         exit 1
