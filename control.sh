@@ -429,9 +429,11 @@ cmd_faiss_build_cuda() {
         fi
     fi
     
-    # Extract base image from Dockerfile.cuda
+    # Extract base image from Dockerfile.cuda and convert to devel for nvcc
     local dockerfile="backend/Dockerfile.cuda"
-    local base_image=$(grep -E "^FROM.*nvidia" "$dockerfile" | head -1 | awk '{print $2}')
+    local runtime_image=$(grep -E "^FROM.*nvidia" "$dockerfile" | head -1 | awk '{print $2}')
+    # Replace runtime with devel for build (need nvcc compiler)
+    local base_image=$(echo "$runtime_image" | sed 's/-runtime-/-devel-/')
     
     if [ -z "$base_image" ]; then
         log_error "Could not extract CUDA base image from $dockerfile"

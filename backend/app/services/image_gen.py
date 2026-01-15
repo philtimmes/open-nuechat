@@ -285,7 +285,8 @@ def extract_aspect_ratio_from_text(text: str) -> Tuple[Optional[int], Optional[i
     """
     for ratio, (width, height) in ASPECT_RATIO_SIZES.items():
         # Pattern like "16:9", "16:9 aspect", "in 16:9"
-        pattern = rf'\b{ratio.replace(":", r"[:\s]*")}\b'
+        ratio_pattern = ratio.replace(":", r"[:\s]*")
+        pattern = rf'\b{ratio_pattern}\b'
         if re.search(pattern, text, re.IGNORECASE):
             logger.info(f"Extracted aspect ratio {ratio} -> {width}x{height}")
             return width, height
