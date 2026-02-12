@@ -69,11 +69,13 @@ print_help() {
     echo -e "  ${GREEN}build${NC}              Build Docker images (or install deps in native mode)"
     echo -e "    --no-cache       Build without using cache"
     echo -e "    --profile NAME   Build specific profile (rocm, cuda, cpu)"
+    echo -e "    --faiss-cpu      Use faiss-cpu from PyPI (skip ROCm/CUDA wheel)"
     echo ""
     echo -e "  ${GREEN}start${NC}              Build and start containers/services"
     echo -e "    -d, --detach     Run in detached mode"
     echo -e "    --build          Force rebuild before starting"
     echo -e "    --profile NAME   Use specific profile (rocm, cuda, cpu)"
+    echo -e "    --no-image-gen   Start without image generation service"
     echo ""
     echo -e "  ${GREEN}stop${NC}               Stop running containers/services"
     echo ""
@@ -133,10 +135,11 @@ print_help() {
     echo -e "${BLUE}Docker Examples:${NC}"
     echo "  ./control.sh build --profile cuda       # Build for NVIDIA GPU"
     echo "  ./control.sh build --profile cpu        # Build for CPU only"
+    echo "  ./control.sh build --profile rocm --faiss-cpu  # ROCm + CPU FAISS (skip wheel build)"
     echo "  ./control.sh start -d --profile rocm    # Start with AMD GPU"
     echo "  ./control.sh start -d --profile cuda    # Start with NVIDIA GPU"
     echo "  ./control.sh start -d --profile cpu     # Start CPU-only"
-    echo "  ./control.sh faiss-build --profile rocm # Build FAISS for ROCm"
+    echo "  ./control.sh faiss-build --profile rocm # Build FAISS for ROCm (GPU acceleration)"
     echo "  ./control.sh logs -f                    # Follow logs"
     echo "  ./control.sh shell                      # Shell into container"
     echo "  ./control.sh build --no-cache --profile rocm  # Full rebuild"
@@ -150,7 +153,12 @@ print_help() {
     echo "  ./control.sh --native status            # Check service status"
     echo "  ./control.sh --native shell             # Activate virtualenv"
     echo ""
-    echo -e "${BLUE}First-time Setup (Docker ROCm):${NC}"
+    echo -e "${BLUE}First-time Setup (Docker ROCm - Quick):${NC}"
+    echo "  1. Copy .env.example to .env and configure"
+    echo "  2. ./control.sh build --profile rocm --faiss-cpu  # Uses CPU FAISS"
+    echo "  3. ./control.sh start -d --profile rocm"
+    echo ""
+    echo -e "${BLUE}First-time Setup (Docker ROCm - GPU FAISS):${NC}"
     echo "  1. Copy .env.example to .env and configure"
     echo "  2. ./control.sh faiss-build --profile rocm  # ~12 min, once only"
     echo "  3. ./control.sh build --profile rocm"
@@ -222,6 +230,7 @@ check_env() {
 cmd_build() {
     local no_cache=""
     local profile="rocm"  # Default profile
+    local faiss_cpu=""
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -232,6 +241,10 @@ cmd_build() {
             --profile)
                 profile="$2"
                 shift 2
+                ;;
+            --faiss-cpu)
+                faiss_cpu="1"
+                shift
                 ;;
             *)
                 log_error "Unknown option: $1"
@@ -251,7 +264,14 @@ cmd_build() {
     esac
     
     log_info "Building Docker images with profile: $profile"
-    $COMPOSE_CMD --profile $profile build $no_cache
+    
+    # Build with FAISS_CPU if requested
+    if [ -n "$faiss_cpu" ]; then
+        log_info "Using faiss-cpu from PyPI (skipping ROCm wheel)"
+        FAISS_CPU=1 $COMPOSE_CMD --profile $profile build $no_cache
+    else
+        $COMPOSE_CMD --profile $profile build $no_cache
+    fi
     
     log_success "Build completed successfully!"
 }
@@ -499,6 +519,7 @@ cmd_start() {
     local detach=""
     local build=""
     local profile="rocm"  # Default profile
+    local no_image_gen=""
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -513,6 +534,10 @@ cmd_start() {
             --profile)
                 profile="$2"
                 shift 2
+                ;;
+            --no-image-gen)
+                no_image_gen="1"
+                shift
                 ;;
             *)
                 log_error "Unknown option: $1"
@@ -534,7 +559,24 @@ cmd_start() {
     check_env
     
     log_info "Starting Open-NueChat with profile: $profile"
-    $COMPOSE_CMD --profile $profile up $detach $build
+    
+    if [ -n "$no_image_gen" ]; then
+        # Start only main app and TTS, exclude image service
+        log_info "Image generation service disabled"
+        case $profile in
+            rocm)
+                $COMPOSE_CMD --profile $profile up $detach $build open-nuechat tts-service-rocm
+                ;;
+            cuda)
+                $COMPOSE_CMD --profile $profile up $detach $build open-nuechat-cuda tts-service-cuda
+                ;;
+            cpu)
+                $COMPOSE_CMD --profile $profile up $detach $build open-nuechat-cpu tts-service-cpu
+                ;;
+        esac
+    else
+        $COMPOSE_CMD --profile $profile up $detach $build
+    fi
     
     if [ -n "$detach" ]; then
         log_success "Open-NueChat started in background"

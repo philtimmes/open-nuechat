@@ -6,6 +6,9 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        # Set FAISS_CPU=1 to use faiss-cpu instead of ROCm wheel (avoids build step)
+        FAISS_CPU: ${FAISS_CPU:-0}
     container_name: open-nuechat
     restart: unless-stopped
     network_mode: host

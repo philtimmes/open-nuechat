@@ -1425,6 +1425,45 @@ async def save_uploaded_file(
     return {"success": True, "filename": filename}
 
 
+@router.put("/{chat_id}/revert-file")
+async def revert_file(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    filename: str = Body(...),
+    content: str = Body(...),
+):
+    """
+    NC-0.8.0.12: Revert a file to a previous version.
+    Updates session storage and DB with the reverted content.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    await _get_user_chat(db, user, chat_id)
+    
+    # Update DB
+    result = await db.execute(
+        select(UploadedFile)
+        .where(UploadedFile.chat_id == chat_id)
+        .where(UploadedFile.filepath == filename)
+    )
+    existing = result.scalar_one_or_none()
+    
+    if existing:
+        existing.content = content
+        existing.size = len(content)
+        await db.commit()
+        logger.info(f"[REVERT_FILE] Updated DB: {filename}")
+    
+    # Update session storage
+    from app.tools.registry import store_session_file
+    store_session_file(chat_id, filename, content)
+    logger.info(f"[REVERT_FILE] Updated session: {filename}")
+    
+    return {"success": True, "filename": filename}
+
+
 @router.post("/{chat_id}/upload-zip")
 async def upload_zip(
     chat_id: str,
@@ -1520,6 +1559,11 @@ async def upload_zip(
         
         zip_logger.debug(f"Processed zip '{file.filename}': {manifest.total_files} files, {manifest.total_size} bytes, {stored_count} stored in DB")
         
+        # NC-0.8.0.12: Extract associations and call graph at upload time
+        from app.services.zip_processor import extract_associations, extract_call_graph
+        associations = extract_associations(manifest)
+        call_graph = extract_call_graph(manifest)
+        
         return {
             "filename": file.filename,
             "total_files": manifest.total_files,
@@ -1527,9 +1571,11 @@ async def upload_zip(
             "languages": manifest.languages,
             "file_tree": manifest.file_tree,
             "signature_index": manifest.signature_index,
+            "associations": associations,
+            "call_graph": call_graph,
             "artifacts": artifacts,
-            "summary": summary,  # Human-readable summary
-            "llm_manifest": llm_manifest,  # LLM context injection format
+            "summary": summary,
+            "llm_manifest": llm_manifest,
         }
     
     except ZipSecurityError as e:

@@ -203,8 +203,10 @@ export function formatDate(date: Date | string, options?: Intl.DateTimeFormatOpt
 /**
  * Format a timestamp for chat messages
  */
-export function formatMessageTime(date: Date | string): string {
+export function formatMessageTime(date: Date | string | undefined | null): string {
+  if (!date) return '';
   const d = typeof date === 'string' ? new Date(date) : date;
+  if (isNaN(d.getTime())) return '';
   const now = new Date();
   const isToday = d.toDateString() === now.toDateString();
   

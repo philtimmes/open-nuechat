@@ -1647,6 +1647,10 @@ class DebugSettingsResponse(BaseModel):
     debug_tool_calls: bool  # NC-0.8.0.8: Log tool call data exchanged with LLM
     last_token_reset_timestamp: Optional[str] = None
     token_refill_interval_hours: int
+    # NC-0.8.0.12: Web Search (Google CSE)
+    web_search_google_api_key: str = ""
+    web_search_google_cx_id: str = ""
+    web_search_enabled: bool = True
 
 
 class DebugSettingsUpdate(BaseModel):
@@ -1658,6 +1662,10 @@ class DebugSettingsUpdate(BaseModel):
     disable_image_request_filter: Optional[bool] = None  # NC-0.8.0.7
     debug_tool_advertisements: Optional[bool] = None  # NC-0.8.0.8
     debug_tool_calls: Optional[bool] = None  # NC-0.8.0.8
+    # NC-0.8.0.12: Web Search (Google CSE)
+    web_search_google_api_key: Optional[str] = None
+    web_search_google_cx_id: Optional[str] = None
+    web_search_enabled: Optional[bool] = None
 
 
 @router.get("/debug-settings", response_model=DebugSettingsResponse)
@@ -1680,6 +1688,11 @@ async def get_debug_settings(
     debug_tool_calls = await get_system_setting(db, "debug_tool_calls") == "true"
     last_token_reset = await get_system_setting(db, "last_token_reset_timestamp")
     refill_hours = await get_system_setting_int(db, "token_refill_interval_hours")
+    # NC-0.8.0.12: Web Search (Google CSE)
+    web_search_google_api_key = await get_system_setting(db, "web_search_google_api_key") or ""
+    web_search_google_cx_id = await get_system_setting(db, "web_search_google_cx_id") or ""
+    web_search_enabled_val = await get_system_setting(db, "web_search_enabled")
+    web_search_enabled = web_search_enabled_val != "false"  # Default true
     
     return DebugSettingsResponse(
         debug_token_resets=debug_token_resets,
@@ -1692,6 +1705,9 @@ async def get_debug_settings(
         debug_tool_calls=debug_tool_calls,
         last_token_reset_timestamp=last_token_reset if last_token_reset else None,
         token_refill_interval_hours=refill_hours,
+        web_search_google_api_key=web_search_google_api_key,
+        web_search_google_cx_id=web_search_google_cx_id,
+        web_search_enabled=web_search_enabled,
     )
 
 
@@ -1721,6 +1737,13 @@ async def update_debug_settings(
         await set_setting(db, "debug_tool_advertisements", "true" if data.debug_tool_advertisements else "false")
     if data.debug_tool_calls is not None:
         await set_setting(db, "debug_tool_calls", "true" if data.debug_tool_calls else "false")
+    # NC-0.8.0.12: Web Search (Google CSE)
+    if data.web_search_google_api_key is not None:
+        await set_setting(db, "web_search_google_api_key", data.web_search_google_api_key)
+    if data.web_search_google_cx_id is not None:
+        await set_setting(db, "web_search_google_cx_id", data.web_search_google_cx_id)
+    if data.web_search_enabled is not None:
+        await set_setting(db, "web_search_enabled", "true" if data.web_search_enabled else "false")
     
     await db.commit()
     

@@ -105,6 +105,7 @@ export interface ArtifactSlice {
   setPendingImageContext: (image: GeneratedImage | null) => void;
   setArtifacts: (artifacts: Artifact[]) => void;
   updateArtifact: (key: string, artifact: Artifact) => void;
+  revertArtifact: (artifactId: string) => void;  // NC-0.8.0.12: Touch old version to make it latest
 }
 
 /**

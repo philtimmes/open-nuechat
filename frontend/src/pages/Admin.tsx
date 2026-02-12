@@ -65,6 +65,10 @@ export default function Admin() {
   const [disableImageRequestFilter, setDisableImageRequestFilter] = useState(false);  // NC-0.8.0.7
   const [debugToolAdvertisements, setDebugToolAdvertisements] = useState(false);  // NC-0.8.0.8
   const [debugToolCalls, setDebugToolCalls] = useState(false);  // NC-0.8.0.8
+  // NC-0.8.0.12: Web Search (Google CSE)
+  const [webSearchGoogleApiKey, setWebSearchGoogleApiKey] = useState('');
+  const [webSearchGoogleCxId, setWebSearchGoogleCxId] = useState('');
+  const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   const [lastTokenReset, setLastTokenReset] = useState<string | null>(null);
   const [tokenRefillHours, setTokenRefillHours] = useState(720);
   const [debugSettingsLoading, setDebugSettingsLoading] = useState(false);
@@ -547,6 +551,10 @@ export default function Admin() {
       setDisableImageRequestFilter(res.data.disable_image_request_filter ?? false);  // NC-0.8.0.7
       setDebugToolAdvertisements(res.data.debug_tool_advertisements ?? false);  // NC-0.8.0.8
       setDebugToolCalls(res.data.debug_tool_calls ?? false);  // NC-0.8.0.8
+      // NC-0.8.0.12: Web Search (Google CSE)
+      setWebSearchGoogleApiKey(res.data.web_search_google_api_key ?? '');
+      setWebSearchGoogleCxId(res.data.web_search_google_cx_id ?? '');
+      setWebSearchEnabled(res.data.web_search_enabled ?? true);
       setLastTokenReset(res.data.last_token_reset_timestamp);
       setTokenRefillHours(res.data.token_refill_interval_hours);
     } catch (err: any) {
@@ -642,6 +650,17 @@ export default function Admin() {
       await api.put('/admin/debug-settings', { debug_tool_calls: value });
       setDebugToolCalls(value);
       setSuccess('Tool calls debug setting saved');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save setting');
+    }
+  };
+  
+  // NC-0.8.0.12: Web Search (Google CSE)
+  const saveWebSearchSettings = async (updates: Record<string, any>) => {
+    try {
+      await api.put('/admin/debug-settings', updates);
+      setSuccess('Web search settings saved');
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to save setting');
@@ -5454,6 +5473,82 @@ export default function Admin() {
                 </div>
                 
                 {/* Token Reset Info */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Web Search Configuration</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    Configure Google Custom Search Engine for the <code className="text-xs bg-[var(--color-background)] px-1.5 py-0.5 rounded">web_search</code> tool. Falls back to DuckDuckGo if not configured.
+                  </p>
+                  
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={webSearchEnabled}
+                        onChange={(e) => {
+                          const value = e.target.checked;
+                          setWebSearchEnabled(value);
+                          saveWebSearchSettings({ web_search_enabled: value });
+                        }}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                      />
+                      <div>
+                        <div className="text-[var(--color-text)] font-medium">Enable Web Search Tool</div>
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                          Allow the LLM to search the web when the web tool category is active
+                        </div>
+                      </div>
+                    </label>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">Google API Key</label>
+                      <input
+                        type="password"
+                        value={webSearchGoogleApiKey}
+                        onChange={(e) => setWebSearchGoogleApiKey(e.target.value)}
+                        placeholder="AIza..."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                        Google Cloud Console → APIs & Services → Credentials
+                      </p>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--color-text)] mb-1">Search Engine ID (CX)</label>
+                      <input
+                        type="text"
+                        value={webSearchGoogleCxId}
+                        onChange={(e) => setWebSearchGoogleCxId(e.target.value)}
+                        placeholder="e.g. 017576662512468239146:omuauf_gy1o"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] text-sm"
+                      />
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                        Programmable Search Engine → cse.google.com → Settings → Search engine ID
+                      </p>
+                    </div>
+                    
+                    <button
+                      onClick={() => saveWebSearchSettings({
+                        web_search_google_api_key: webSearchGoogleApiKey,
+                        web_search_google_cx_id: webSearchGoogleCxId,
+                      })}
+                      className="px-4 py-2 rounded-lg bg-[var(--color-primary)] text-white text-sm font-medium hover:opacity-90 transition-opacity"
+                    >
+                      Save
+                    </button>
+                    
+                    <div className="text-xs text-[var(--color-text-secondary)] bg-[var(--color-background)] rounded-lg p-3">
+                      <strong>Status:</strong>{' '}
+                      {webSearchGoogleApiKey && webSearchGoogleCxId ? (
+                        <span className="text-green-500">✓ Google CSE configured — will use Google search</span>
+                      ) : (
+                        <span className="text-yellow-500">⚠ No API key/CX — falling back to DuckDuckGo</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Token Reset Info (original) */}
                 <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
                   <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Token Reset Status</h3>
                   <div className="space-y-1 text-sm text-[var(--color-text-secondary)]">

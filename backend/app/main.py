@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.8.0.10"
+SCHEMA_VERSION = "NC-0.8.0.12"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -1244,6 +1244,9 @@ async def get_shared_chat(share_id: str):
                 "input_tokens": selected.input_tokens,
                 "output_tokens": selected.output_tokens,
                 "sibling_count": len(children),
+                # NC-0.8.0.11: Include metadata for generated images and artifacts
+                "metadata": selected.message_metadata,
+                "artifacts": selected.artifacts,
             })
             
             current_parent = selected.id
@@ -1257,6 +1260,9 @@ async def get_shared_chat(share_id: str):
             "created_at": msg.created_at.isoformat(),
             "input_tokens": msg.input_tokens,
             "output_tokens": msg.output_tokens,
+            # NC-0.8.0.11: Include metadata for generated images and artifacts
+            "metadata": msg.message_metadata,
+            "artifacts": msg.artifacts,
         } for msg in sorted_messages]
         
         # Log final result

@@ -66,6 +66,7 @@ export interface Artifact {
   content: string;  // For images, this is the URL or base64
   filename?: string;
   created_at: string;
+  version?: number;  // NC-0.8.0.12: Version tracking for file modifications
   // For zip-extracted files
   size?: number;
   signatures?: CodeSignature[];

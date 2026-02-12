@@ -1111,6 +1111,143 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       case 'tool_call_end':
         setStreamingToolCall(null);
         break;
+      
+      // NC-0.8.0.12: Handle tool_call events with file modifications
+      case 'tool_call': {
+        const payload = message.payload as {
+          chat_id: string;
+          message_id: string;
+          tool_name: string;
+          arguments: Record<string, unknown>;
+          result: string;
+          modified_files?: Record<string, string>;
+        };
+        
+        const { currentChat } = useChatStore.getState();
+        if (payload.chat_id && currentChat?.id && payload.chat_id !== currentChat.id) {
+          break;
+        }
+        
+        // Update artifacts with modified file content
+        if (payload.modified_files) {
+          const { updateArtifact } = useChatStore.getState();
+          for (const [filename, content] of Object.entries(payload.modified_files)) {
+            const artifact: Artifact = {
+              id: `file_${Date.now()}_${filename}`,
+              type: 'code',
+              title: filename.split('/').pop() || filename,
+              filename: filename,
+              content: content,
+              source: 'upload',
+              created_at: new Date().toISOString(),
+            };
+            updateArtifact(filename, artifact);
+            console.log(`[tool_call] Updated artifact: ${filename} (${content.length} chars)`);
+          }
+        }
+        break;
+      }
+      
+      // NC-0.8.0.11: Handle direct image output from execute_python
+      case 'direct_image': {
+        const payload = message.payload as {
+          chat_id: string;
+          message_id: string;
+          tool_name: string;
+          image_base64: string;
+          mime_type: string;
+          filename?: string;
+        };
+        console.log('[direct_image] Received image from tool:', payload.tool_name, 'filename:', payload.filename);
+        
+        const { currentChat } = useChatStore.getState();
+        if (payload.chat_id && currentChat?.id && payload.chat_id !== currentChat.id) {
+          console.warn('[direct_image] Ignoring image for different chat');
+          break;
+        }
+        
+        // Create artifact for the image
+        if (payload.image_base64) {
+          const filename = payload.filename || `chart_${Date.now()}.png`;
+          const dataUrl = `data:${payload.mime_type || 'image/png'};base64,${payload.image_base64}`;
+          
+          const artifact: Artifact = {
+            id: `img_${Date.now()}`,
+            type: 'image',
+            title: filename,
+            filename: filename,
+            content: dataUrl,
+            source: 'generated',
+            created_at: new Date().toISOString(),
+          };
+          
+          // Add to artifacts list
+          useChatStore.getState().updateArtifact(filename, artifact);
+          console.log('[direct_image] Image artifact created:', filename);
+          
+          // Also store as generated image for message display
+          useChatStore.getState().setGeneratedImage(
+            payload.message_id || 'direct_image',
+            {
+              url: dataUrl,
+              prompt: filename,
+              width: 0,  // Unknown for charts
+              height: 0,
+              seed: 0,
+            }
+          );
+        }
+        break;
+      }
+      
+      // NC-0.8.0.11: Handle direct text output from execute_python
+      case 'direct_text': {
+        const payload = message.payload as {
+          chat_id: string;
+          message_id: string;
+          tool_name: string;
+          text: string;
+          filename?: string;
+        };
+        console.log('[direct_text] Received text from tool:', payload.tool_name, 'length:', payload.text?.length);
+        
+        const { currentChat } = useChatStore.getState();
+        if (payload.chat_id && currentChat?.id && payload.chat_id !== currentChat.id) {
+          console.warn('[direct_text] Ignoring text for different chat');
+          break;
+        }
+        
+        // Create artifact for the text output
+        if (payload.text) {
+          const filename = payload.filename || `output_${Date.now()}.txt`;
+          
+          // Determine type based on filename
+          let artifactType: Artifact['type'] = 'document';
+          if (filename.endsWith('.csv')) artifactType = 'csv';
+          else if (filename.endsWith('.json')) artifactType = 'json';
+          else if (filename.endsWith('.md')) artifactType = 'markdown';
+          else if (filename.endsWith('.html')) artifactType = 'html';
+          
+          const artifact: Artifact = {
+            id: `txt_${Date.now()}`,
+            type: artifactType,
+            title: filename,
+            filename: filename,
+            content: payload.text,
+            source: 'generated',
+            created_at: new Date().toISOString(),
+          };
+          
+          // Add to artifacts list
+          useChatStore.getState().updateArtifact(filename, artifact);
+          console.log('[direct_text] Text artifact created:', filename);
+          
+          // Also append as code block to streaming content for inline display
+          const formatted = `\n\n\`\`\`\n${payload.text}\n\`\`\`\n`;
+          streamingBufferRef.current?.append(formatted);
+        }
+        break;
+      }
         
       case 'stream_end': {
         // Flush any remaining buffered content

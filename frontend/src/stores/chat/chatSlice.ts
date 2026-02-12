@@ -174,8 +174,7 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         isAssistant: modelToUse?.startsWith('gpt:'),
       });
       
-      // Preserve uploaded artifacts - they were uploaded before the chat was created
-      const { uploadedArtifacts: preservedArtifacts, zipUploadResult: preservedZipResult, zipContext: preservedZipContext } = get();
+      // NC-0.8.0.12: Clear artifacts when creating new chat - no cross-chat contamination
       
       // Check if this is an assistant model (gpt: prefix)
       if (modelToUse && modelToUse.startsWith('gpt:')) {
@@ -201,9 +200,9 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
           selectedArtifact: null,
           showArtifacts: false,
           generatedImages: {},
-          uploadedArtifacts: preservedArtifacts,
-          zipUploadResult: preservedZipResult,
-          zipContext: preservedZipContext,
+          uploadedArtifacts: [],
+          zipUploadResult: null,
+          zipContext: null,
           codeSummary: null,
           showSummary: false,
           chatGroupCounts: state.chatGroupCounts ? {
@@ -235,9 +234,9 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         selectedArtifact: null,
         showArtifacts: false,
         generatedImages: {},
-        uploadedArtifacts: preservedArtifacts,
-        zipUploadResult: preservedZipResult,
-        zipContext: preservedZipContext,
+        uploadedArtifacts: [],
+        zipUploadResult: null,
+        zipContext: null,
         codeSummary: null,
         showSummary: false,
         chatGroupCounts: state.chatGroupCounts ? {

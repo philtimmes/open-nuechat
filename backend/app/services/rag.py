@@ -600,12 +600,17 @@ class RAGService:
         Check if text appears to be binary data or base64-encoded content.
         These should not be sent to the embedding model as they can cause crashes.
         """
-        if not text or len(text) < 100:
+        if not text or len(text) < 200:
             return False
         
         # Check for base64 image data URLs
         if 'data:image' in text or 'data:application' in text:
             return True
+        
+        # If text contains common natural language patterns, it's not binary
+        # This prevents false positives on enhanced queries with mixed content
+        if text.count(' ') > 15 or text.count('\n') > 10:
+            return False
         
         # Check for very long base64-like strings (high ratio of alphanumeric + /+=)
         # Base64 uses A-Za-z0-9+/= characters
@@ -646,7 +651,7 @@ class RAGService:
         
         # Sanitize text to remove binary/base64 content that could crash the model
         if self._is_binary_or_base64(text):
-            logger.warning(f"[EMBED] Skipping binary/base64 content (len={len(text)})")
+            logger.warning(f"[EMBED] Skipping binary/base64 content (len={len(text)}, preview='{text[:80]}...')")
             return None
         
         # Also sanitize inline base64 within otherwise normal text
@@ -1879,6 +1884,7 @@ class RAGService:
         
         # Generate query embedding for semantic search
         embed_start = time.time()
+        logger.debug(f"[GLOBAL_RAG] Embedding query (len={len(query)}): '{query[:100]}...'")
         query_embedding = await asyncio.get_event_loop().run_in_executor(
             _executor, self.embed_text, query
         )

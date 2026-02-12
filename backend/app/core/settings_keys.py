@@ -123,6 +123,13 @@ class SK:
     DEBUG_FILTER_CHAINS = "debug_filter_chains"
     DEBUG_TOOL_ADVERTISEMENTS = "debug_tool_advertisements"
     DEBUG_TOOL_CALLS = "debug_tool_calls"
+    
+    # =========================================================================
+    # WEB SEARCH (Google Custom Search Engine)
+    # =========================================================================
+    WEB_SEARCH_GOOGLE_API_KEY = "web_search_google_api_key"
+    WEB_SEARCH_GOOGLE_CX_ID = "web_search_google_cx_id"
+    WEB_SEARCH_ENABLED = "web_search_enabled"
 
 
 # Alias for convenience
@@ -249,6 +256,11 @@ def _get_setting_defaults():
         SK.DEBUG_FILTER_CHAINS: "false",
         SK.DEBUG_TOOL_ADVERTISEMENTS: "false",
         SK.DEBUG_TOOL_CALLS: "false",
+        
+        # Web Search (Google Custom Search Engine)
+        SK.WEB_SEARCH_GOOGLE_API_KEY: "",
+        SK.WEB_SEARCH_GOOGLE_CX_ID: "",
+        SK.WEB_SEARCH_ENABLED: "true",
     }
 
 

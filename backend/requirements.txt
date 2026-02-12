@@ -71,3 +71,4 @@ transformers>=4.36.0
 accelerate>=0.25.0
 scipy>=1.11.0
 soundfile>=0.12.1
+matplotlib>=3.8.0

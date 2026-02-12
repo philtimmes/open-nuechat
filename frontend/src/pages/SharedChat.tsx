@@ -16,6 +16,22 @@ interface SharedMessage {
   input_tokens?: number;
   output_tokens?: number;
   sibling_count?: number;
+  // NC-0.8.0.11: Support for generated images and artifacts
+  metadata?: {
+    generated_image?: {
+      url?: string;
+      job_id?: string;
+      prompt?: string;
+    };
+    [key: string]: unknown;
+  };
+  artifacts?: Array<{
+    id?: string;
+    type?: string;
+    title?: string;
+    filename?: string;
+    content?: string;
+  }>;
 }
 
 interface SharedChatData {
@@ -227,6 +243,23 @@ export default function SharedChat() {
                   </div>
                   
                   <div className="text-[var(--color-text)] prose prose-invert max-w-none">
+                    {/* NC-0.8.0.11: Display generated images from metadata */}
+                    {message.metadata?.generated_image && (
+                      <div className="mb-4">
+                        <img 
+                          src={message.metadata.generated_image.url || `/api/images/generated/${message.metadata.generated_image.job_id}.png`}
+                          alt={message.metadata.generated_image.prompt || 'Generated image'}
+                          className="max-w-full h-auto rounded-lg border border-[var(--color-border)]"
+                          style={{ maxHeight: '500px' }}
+                        />
+                        {message.metadata.generated_image.prompt && (
+                          <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                            {message.metadata.generated_image.prompt}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={{
@@ -293,6 +326,34 @@ export default function SharedChat() {
                     >
                       {message.content}
                     </ReactMarkdown>
+                    
+                    {/* NC-0.8.0.11: Display artifacts */}
+                    {message.artifacts && message.artifacts.length > 0 && (
+                      <div className="mt-4 space-y-2">
+                        {message.artifacts.map((artifact: { id?: string; type?: string; title?: string; filename?: string; content?: string }, idx: number) => (
+                          <div key={artifact.id || idx} className="border border-[var(--color-border)] rounded-lg overflow-hidden">
+                            <div className="px-3 py-2 bg-[var(--color-surface)] border-b border-[var(--color-border)] flex items-center justify-between">
+                              <span className="text-sm font-medium text-[var(--color-text)]">
+                                {artifact.title || artifact.filename || 'Artifact'}
+                              </span>
+                              <span className="text-xs text-[var(--color-text-secondary)]">
+                                {artifact.type}
+                              </span>
+                            </div>
+                            {artifact.type === 'image' && artifact.content && (
+                              <div className="p-2">
+                                <img 
+                                  src={artifact.content}
+                                  alt={artifact.title || 'Generated chart'}
+                                  className="max-w-full h-auto rounded"
+                                  style={{ maxHeight: '400px' }}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

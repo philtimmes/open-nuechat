@@ -120,12 +120,63 @@ class ToolRegistry:
         # Code execution tool (sandboxed)
         self.register(
             name="execute_python",
-            description="Execute Python code in a sandboxed environment. Limited to basic operations, no file system or network access.",
+            description="""Execute Python code in a sandboxed environment with file access and direct output to chat.
+
+FILE ACCESS:
+- Working directory is set to the artifacts folder
+- Can read files created by create_file tool: open('filename.csv')
+- Can use pandas: pd.read_csv('data.csv')
+- Use os.listdir('.') to see available files
+
+OUTPUT OPTIONS:
+- output_image=True: Captures matplotlib figure and sends to chat
+- output_text=True: Sends printed output directly to chat
+- output_filename: Name for the output file (e.g., 'chart.png', 'report.txt')
+
+AVAILABLE MODULES (always loaded):
+- math, statistics, datetime, random, json, re, csv, os
+- numpy (as np), pandas (as pd)
+- matplotlib.pyplot (as plt), PIL/Pillow
+- collections, itertools, functools
+
+IMPORTANT FOR CHARTS:
+- matplotlib is ALWAYS available - just use plt.figure(), plt.bar(), etc.
+- Set output_image=True to send the chart to chat
+- DO NOT call plt.savefig() or plt.show()
+
+EXAMPLES:
+Create chart:
+```
+plt.figure(figsize=(10, 6))
+plt.bar(['A', 'B', 'C'], [10, 20, 15])
+plt.title('My Chart')
+```
+
+Read CSV and plot:
+```
+df = pd.read_csv('data.csv')
+plt.bar(df['name'], df['value'])
+```""",
             parameters={
                 "code": {
                     "type": "string",
-                    "description": "Python code to execute",
+                    "description": "Python code to execute. Working directory is artifacts folder.",
                     "required": True,
+                },
+                "output_image": {
+                    "type": "boolean",
+                    "description": "Captures matplotlib figure and sends to chat as image.",
+                    "required": False,
+                },
+                "output_text": {
+                    "type": "boolean",
+                    "description": "Sends printed output directly to chat.",
+                    "required": False,
+                },
+                "output_filename": {
+                    "type": "string",
+                    "description": "Filename for the output (e.g., 'chart.png', 'data.csv').",
+                    "required": False,
                 }
             },
             handler=self._python_executor_handler,
@@ -236,7 +287,7 @@ class ToolRegistry:
         # File viewing tools for uploaded files
         self.register(
             name="view_file_lines",
-            description="View specific lines from an uploaded file. Use this to examine portions of large files without loading the entire content.",
+            description="View specific lines from an uploaded file. Request large ranges (100-500 lines) to minimize round trips. You can request the entire file if needed.",
             parameters={
                 "filename": {
                     "type": "string",
@@ -250,7 +301,7 @@ class ToolRegistry:
                 },
                 "end_line": {
                     "type": "integer",
-                    "description": "Last line to view (inclusive). Default: end of file",
+                    "description": "Last line to view (inclusive). Default: end of file. Use large ranges (100-500+ lines) to read efficiently.",
                     "required": False,
                 }
             },
@@ -360,6 +411,173 @@ The file will be saved and made available for download. Supports any text-based 
                 }
             },
             handler=self._create_file_handler,
+        )
+        
+        # =============================================================
+        # NC-0.8.0.12: search_replace - Find and replace text in files
+        # =============================================================
+        self.register(
+            name="search_replace",
+            description="""Find and replace text in an uploaded file. The search text must match EXACTLY (including whitespace and indentation).
+
+USAGE: When you need to modify specific sections of an existing file without rewriting the whole thing.
+
+The search string must be unique in the file. If multiple matches are found, the operation fails and shows all match locations so you can provide a more specific search string.
+
+IMPORTANT: Include enough surrounding context in your search string to make it unique.""",
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "Name of the file to modify",
+                    "required": True,
+                },
+                "search": {
+                    "type": "string",
+                    "description": "Exact text to find (must be unique in the file)",
+                    "required": True,
+                },
+                "replace": {
+                    "type": "string",
+                    "description": "Text to replace with (empty string to delete)",
+                    "required": True,
+                },
+            },
+            handler=self._search_replace_handler,
+        )
+        
+        # =============================================================
+        # NC-0.8.0.12: web_search - Search the web via DuckDuckGo
+        # =============================================================
+        self.register(
+            name="web_search",
+            description="""Search the web using DuckDuckGo and return results with titles, URLs, and snippets.
+
+USAGE: When you need to find information on the web - current events, documentation, references, etc.
+
+Returns up to 10 results with title, URL, and snippet for each. Use fetch_webpage to read full page content from any result URL.""",
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "Search query",
+                    "required": True,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results to return (1-10, default: 5)",
+                    "required": False,
+                },
+            },
+            handler=self._web_search_handler,
+        )
+        
+        # =============================================================
+        # NC-0.8.0.12: web_extract - Extract structured content from URL
+        # =============================================================
+        self.register(
+            name="web_extract",
+            description="""Fetch a webpage and extract structured content including title, headings, links, images, and clean text.
+
+USAGE: When you need more than just the text from a page - get metadata, links, headings structure, etc. For simple text extraction, use fetch_webpage instead.
+
+Returns structured data: title, meta description, headings hierarchy, links, images, and clean body text.""",
+            parameters={
+                "url": {
+                    "type": "string",
+                    "description": "URL to extract content from",
+                    "required": True,
+                },
+                "include_links": {
+                    "type": "boolean",
+                    "description": "Include extracted links (default: true)",
+                    "required": False,
+                },
+                "include_images": {
+                    "type": "boolean",
+                    "description": "Include image URLs and alt text (default: false)",
+                    "required": False,
+                },
+                "max_links": {
+                    "type": "integer",
+                    "description": "Max links to return (default: 25)",
+                    "required": False,
+                },
+            },
+            handler=self._web_extract_handler,
+        )
+        
+        # =============================================================
+        # NC-0.8.0.12: grep_files - Search across all session files
+        # =============================================================
+        self.register(
+            name="grep_files",
+            description="""Search for a pattern across ALL uploaded files in the current session. Like grep but searches every file.
+
+USAGE: When you need to find something but don't know which file it's in, or need to find all occurrences across the entire codebase.
+
+Returns matches grouped by file with line numbers and context.""",
+            parameters={
+                "pattern": {
+                    "type": "string",
+                    "description": "Search pattern (supports regex or literal text)",
+                    "required": True,
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Lines of context before and after each match (default: 2)",
+                    "required": False,
+                },
+                "file_pattern": {
+                    "type": "string",
+                    "description": "Optional glob pattern to filter files (e.g., '*.py', '*.ts')",
+                    "required": False,
+                },
+                "max_matches_per_file": {
+                    "type": "integer",
+                    "description": "Max matches per file (default: 10)",
+                    "required": False,
+                },
+            },
+            handler=self._grep_files_handler,
+        )
+        
+        # =============================================================
+        # NC-0.8.0.12: sed_files - Batch find/replace across files
+        # =============================================================
+        self.register(
+            name="sed_files",
+            description="""Batch find and replace across multiple files. Like sed but works on all uploaded session files.
+
+USAGE: When you need to rename a variable, update an import path, or make the same change across many files at once.
+
+Supports regex patterns with capture groups. Shows a preview of changes before applying unless force=true.""",
+            parameters={
+                "pattern": {
+                    "type": "string",
+                    "description": "Search pattern (regex supported)",
+                    "required": True,
+                },
+                "replacement": {
+                    "type": "string",
+                    "description": "Replacement string (supports \\1, \\2 for capture groups)",
+                    "required": True,
+                },
+                "file_pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to filter which files to modify (e.g., '*.py'). Default: all files",
+                    "required": False,
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Apply changes immediately without preview (default: false - shows preview first)",
+                    "required": False,
+                },
+                "max_replacements_per_file": {
+                    "type": "integer",
+                    "description": "Max replacements per file (default: 100, safety limit)",
+                    "required": False,
+                },
+            },
+            handler=self._sed_files_handler,
         )
         
         # =============================================================
@@ -898,10 +1116,13 @@ Example:
         }
     
     async def _python_executor_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
-        """Execute Python code in a restricted environment"""
+        """Execute Python code in a restricted environment with optional direct output"""
         code = args.get("code", "")
+        output_image = args.get("output_image", False)
+        output_text = args.get("output_text", False)
+        output_filename = args.get("output_filename", None)
         
-        # Restricted builtins
+        # Extended safe builtins
         safe_builtins = {
             "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
             "chr": chr, "dict": dict, "divmod": divmod, "enumerate": enumerate,
@@ -911,43 +1132,248 @@ Example:
             "ord": ord, "pow": pow, "print": print, "range": range, "repr": repr,
             "reversed": reversed, "round": round, "set": set, "slice": slice,
             "sorted": sorted, "str": str, "sum": sum, "tuple": tuple, "type": type,
-            "zip": zip,
+            "zip": zip, "hasattr": hasattr, "getattr": getattr, "setattr": setattr,
+            "callable": callable, "bytes": bytes, "bytearray": bytearray,
+            "open": sandboxed_open,  # NC-0.8.0.12: Jailed to session sandbox
         }
         
+        # Create a controlled __import__ that only allows safe modules
+        allowed_modules = {
+            "matplotlib", "matplotlib.pyplot", "matplotlib.ticker",
+            "pandas", "numpy", "math", "statistics", "datetime", "random",
+            "json", "re", "csv", "collections", "itertools", "functools",
+            "PIL", "PIL.Image", "io", "os",
+        }
+        
+        def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+            # Check if module is allowed
+            if name not in allowed_modules and not any(name.startswith(m + ".") for m in allowed_modules):
+                raise ImportError(f"Import of '{name}' is not allowed. Available: matplotlib, pandas, numpy, etc.")
+            return __import__(name, globals, locals, fromlist, level)
+        
+        safe_builtins["__import__"] = safe_import
+        
         # Check for dangerous patterns
-        dangerous = ["import", "exec", "eval", "__", "open", "file", "os", "sys", "subprocess"]
-        if any(d in code.lower() for d in dangerous):
+        dangerous = ["exec(", "eval(", "subprocess", "os.system", "os.popen", "os.remove", "shutil.rmtree", "compile("]
+        code_lower = code.lower()
+        if any(d in code_lower for d in dangerous):
             return {"error": "Code contains restricted operations"}
         
         # Capture output
         import io
         import sys
+        import base64
+        import os
         
         output_capture = io.StringIO()
         old_stdout = sys.stdout
+        old_cwd = os.getcwd()
+        
+        # NC-0.8.0.12: Per-session sandbox directory (GUID-based isolation)
+        chat_id = context.get("chat_id") if context else None
+        if chat_id:
+            sandbox_dir = get_session_sandbox(chat_id)
+        else:
+            sandbox_dir = os.environ.get("ARTIFACTS_DIR", "/app/data/artifacts")
+            os.makedirs(sandbox_dir, exist_ok=True)
+        
+        os.chdir(sandbox_dir)
+        
+        # NC-0.8.0.12: Materialize session files into sandbox so execute_python can access them
+        _materialized_files = []
+        if chat_id:
+            try:
+                session_files = get_session_files(chat_id)
+                for fname, fcontent in session_files.items():
+                    file_path = os.path.join(sandbox_dir, fname)
+                    file_dir = os.path.dirname(file_path)
+                    if file_dir and not os.path.exists(file_dir):
+                        os.makedirs(file_dir, exist_ok=True)
+                    if not os.path.exists(file_path):
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write(fcontent)
+                        _materialized_files.append(fname)
+                if _materialized_files:
+                    logger.debug(f"[EXECUTE_PYTHON] Materialized {len(_materialized_files)} session files to sandbox {chat_id[:8]}...")
+            except Exception as e:
+                logger.warning(f"[EXECUTE_PYTHON] Failed to materialize session files: {e}")
+        
+        # NC-0.8.0.12: Create sandboxed open() and os that prevent traversal above sandbox
+        sandboxed_open = make_sandboxed_open(sandbox_dir)
+        sandboxed_os = make_sandboxed_os(sandbox_dir)
         
         try:
             sys.stdout = output_capture
             
+            # Build safe globals with allowed modules
+            import statistics
+            import datetime
+            import random
+            import collections
+            import itertools
+            import functools
+            import numpy as np
+            import csv
+            
+            # Try to import pandas
+            try:
+                import pandas as pd
+                has_pandas = True
+            except ImportError:
+                pd = None
+                has_pandas = False
+            
+            safe_globals = {
+                "__builtins__": safe_builtins,
+                "math": math,
+                "statistics": statistics,
+                "datetime": datetime,
+                "random": random,
+                "json": json,
+                "re": re,
+                "collections": collections,
+                "itertools": itertools,
+                "functools": functools,
+                "np": np,
+                "numpy": np,
+                "csv": csv,
+                "os": sandboxed_os,  # NC-0.8.0.12: Jailed to session sandbox
+            }
+            
+            if has_pandas:
+                safe_globals["pd"] = pd
+                safe_globals["pandas"] = pd
+            
+            # Always try to add matplotlib and PIL (needed for charts)
+            try:
+                import matplotlib
+                matplotlib.use('Agg')  # Non-interactive backend
+                import matplotlib.pyplot as plt
+                # Clear any existing figures
+                plt.close('all')
+                safe_globals["plt"] = plt
+                safe_globals["matplotlib"] = matplotlib
+            except ImportError:
+                pass  # matplotlib not available
+            
+            try:
+                from PIL import Image
+                safe_globals["Image"] = Image
+                safe_globals["PIL"] = __import__("PIL")
+            except ImportError:
+                pass  # PIL not available
+            
             local_vars = {}
-            exec(code, {"__builtins__": safe_builtins, "math": math}, local_vars)
+            exec(code, safe_globals, local_vars)
             
             sys.stdout = old_stdout
             output = output_capture.getvalue()
             
+            # NC-0.8.0.12: Sync back any modified files to session storage
+            if chat_id and _materialized_files:
+                for fname in _materialized_files:
+                    file_path = os.path.join(sandbox_dir, fname)
+                    if os.path.exists(file_path):
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                new_content = f.read()
+                            old_content = get_session_file(chat_id, fname)
+                            if old_content != new_content:
+                                store_session_file(chat_id, fname, new_content)
+                                logger.info(f"[EXECUTE_PYTHON] Synced modified file back to session: {fname}")
+                        except Exception:
+                            pass  # Binary file or encoding issue
+            
+            # Restore working directory
+            os.chdir(old_cwd)
+            
             # Get returned value if any
             result = local_vars.get("result", None)
             
-            return {
+            response = {
                 "success": True,
                 "output": output if output else None,
                 "result": result,
             }
+            
+            # Handle image output
+            if output_image:
+                image_data = None
+                image_error = None
+                
+                # Check for matplotlib figure
+                try:
+                    import matplotlib.pyplot as plt
+                    fig = plt.gcf()
+                    logger.info(f"[EXECUTE_PYTHON] Checking matplotlib figure: axes={len(fig.get_axes())}")
+                    if fig.get_axes():  # Figure has content
+                        buf = io.BytesIO()
+                        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+                        buf.seek(0)
+                        image_data = base64.b64encode(buf.read()).decode('utf-8')
+                        logger.info(f"[EXECUTE_PYTHON] Captured matplotlib figure, base64 length: {len(image_data)}")
+                        plt.close(fig)
+                    else:
+                        logger.warning("[EXECUTE_PYTHON] Matplotlib figure has no axes/content")
+                except Exception as mpl_err:
+                    image_error = f"matplotlib error: {mpl_err}"
+                    logger.error(f"[EXECUTE_PYTHON] {image_error}")
+                
+                # Check for PIL Image in result or local_vars
+                if not image_data:
+                    try:
+                        from PIL import Image as PILImage
+                        img = local_vars.get("result") or local_vars.get("img") or local_vars.get("image")
+                        if isinstance(img, PILImage.Image):
+                            buf = io.BytesIO()
+                            img.save(buf, format='PNG')
+                            buf.seek(0)
+                            image_data = base64.b64encode(buf.read()).decode('utf-8')
+                            logger.info(f"[EXECUTE_PYTHON] Captured PIL image, base64 length: {len(image_data)}")
+                    except Exception as pil_err:
+                        if not image_error:
+                            image_error = f"PIL error: {pil_err}"
+                        logger.error(f"[EXECUTE_PYTHON] PIL error: {pil_err}")
+                
+                if image_data:
+                    response["image_base64"] = image_data
+                    response["image_mime_type"] = "image/png"
+                    response["filename"] = output_filename or "output.png"
+                    response["direct_to_chat"] = True
+                    # Tell the LLM the image was already shown to user
+                    response["image_displayed"] = True
+                    response["message"] = "Chart/image was generated and displayed to the user. Do not try to show or link to the image - it's already visible in the chat."
+                    logger.info(f"[EXECUTE_PYTHON] Image ready for direct_to_chat")
+                elif image_error:
+                    response["image_error"] = image_error
+                    response["message"] = f"Failed to generate image: {image_error}"
+                    logger.warning(f"[EXECUTE_PYTHON] No image captured, error: {image_error}")
+                else:
+                    response["message"] = "output_image=True was set but no matplotlib figure or PIL image was created by the code."
+                    logger.warning("[EXECUTE_PYTHON] output_image=True but no image was generated")
+            
+            # Handle direct text output
+            if output_text:
+                response["direct_to_chat"] = True
+                response["direct_text"] = output if output else str(result) if result is not None else ""
+                response["filename"] = output_filename or "output.txt"
+                response["text_displayed"] = True
+                response["message"] = "Output was displayed directly to the user. Do not repeat the output in your response."
+            
+            logger.info(f"[EXECUTE_PYTHON] Returning response: success={response.get('success')}, has_image={bool(response.get('image_base64'))}, direct_to_chat={response.get('direct_to_chat')}")
+            return response
+            
         except Exception as e:
             sys.stdout = old_stdout
+            os.chdir(old_cwd)  # Restore cwd on error
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"[EXECUTE_PYTHON] Execution failed: {e}")
+            logger.error(f"[EXECUTE_PYTHON] Traceback: {tb}")
             return {
                 "success": False,
                 "error": str(e),
+                "traceback": tb,
             }
     
     async def _json_formatter_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
@@ -1734,34 +2160,34 @@ Example:
         path = path.lstrip("/").lstrip("\\")
         path = path.replace("..", "").replace("~", "")
         
-        # Get safe filename
-        safe_path = Path(path).name if "/" not in path and "\\" not in path else path
-        
-        # Determine output directory
-        # Use /app/data/artifacts for container, fallback to temp
-        artifacts_dir = os.environ.get("ARTIFACTS_DIR", "/app/data/artifacts")
-        if not os.path.exists(artifacts_dir):
-            try:
-                os.makedirs(artifacts_dir, exist_ok=True)
-            except:
-                artifacts_dir = "/tmp/artifacts"
-                os.makedirs(artifacts_dir, exist_ok=True)
+        # NC-0.8.0.12: Use per-session sandbox directory
+        chat_id = context.get("chat_id") if context else None
+        if chat_id:
+            artifacts_dir = get_session_sandbox(chat_id)
+        else:
+            artifacts_dir = os.environ.get("ARTIFACTS_DIR", "/app/data/artifacts")
+            os.makedirs(artifacts_dir, exist_ok=True)
         
         # Handle subdirectories in path
         if "/" in path or "\\" in path:
-            # Create subdirectory structure
             subdir = os.path.dirname(path)
             full_dir = os.path.join(artifacts_dir, subdir)
             try:
                 os.makedirs(full_dir, exist_ok=True)
             except Exception as e:
                 logger.warning(f"Could not create subdirectory {subdir}: {e}")
-                # Fall back to flat structure
                 safe_path = path.replace("/", "_").replace("\\", "_")
                 full_dir = artifacts_dir
+                path = safe_path
             full_path = os.path.join(full_dir, os.path.basename(path))
         else:
-            full_path = os.path.join(artifacts_dir, safe_path)
+            full_path = os.path.join(artifacts_dir, path)
+        
+        # Verify resolved path is within sandbox
+        real_path = os.path.realpath(full_path)
+        real_sandbox = os.path.realpath(artifacts_dir)
+        if not real_path.startswith(real_sandbox + os.sep) and real_path != real_sandbox:
+            return {"error": "Path escapes sandbox boundary"}
         
         # Check if file exists
         if os.path.exists(full_path) and not overwrite:
@@ -1779,27 +2205,54 @@ Example:
             
             logger.info(f"[CREATE_FILE] Created: {full_path} ({file_size} bytes, {line_count} lines)")
             
-            # Store in context for artifact tracking if available
+            # NC-0.8.0.12: Store in session files so other tools can access it
+            if chat_id:
+                store_session_file(chat_id, path, content)
+            
+            # Persist to database (UploadedFile) for cross-turn access
             if context:
-                chat_id = context.get("chat_id")
-                message_id = context.get("message_id")
-                db = context.get("db")
-                
-                if chat_id and message_id and db:
+                _db = context.get("db")
+                _msg_id = context.get("message_id")
+                if chat_id and _db:
                     try:
-                        from sqlalchemy import text
-                        # Save artifact metadata to message
-                        artifact_data = {
-                            "type": "file",
-                            "path": path,
-                            "full_path": full_path,
-                            "size": file_size,
-                            "lines": line_count,
-                        }
-                        # This could be enhanced to save to message_metadata
-                        logger.debug(f"[CREATE_FILE] Artifact metadata: {artifact_data}")
+                        from sqlalchemy import select
+                        from app.models.upload import UploadedFile
+                        import os as _fos
+                        
+                        ext = _fos.path.splitext(path)[1].lower() if '.' in path else ''
+                        
+                        # Check if file already exists in DB
+                        existing = await _db.execute(
+                            select(UploadedFile)
+                            .where(UploadedFile.chat_id == chat_id)
+                            .where(UploadedFile.filepath == path)
+                        )
+                        existing_file = existing.scalar_one_or_none()
+                        
+                        if existing_file:
+                            # Update existing
+                            existing_file.content = content
+                            existing_file.size = file_size
+                        else:
+                            # Create new
+                            new_file = UploadedFile(
+                                chat_id=chat_id,
+                                archive_name=None,
+                                filepath=path,
+                                filename=_fos.path.basename(path),
+                                extension=ext,
+                                language=None,
+                                size=file_size,
+                                is_binary=False,
+                                content=content,
+                                signatures=None,
+                            )
+                            _db.add(new_file)
+                        
+                        await _db.commit()
+                        logger.info(f"[CREATE_FILE] Persisted to DB: {path}")
                     except Exception as e:
-                        logger.warning(f"Could not save artifact metadata: {e}")
+                        logger.warning(f"[CREATE_FILE] DB persist failed: {e}")
             
             return {
                 "success": True,
@@ -1813,6 +2266,668 @@ Example:
         except Exception as e:
             logger.error(f"[CREATE_FILE] Failed to create {path}: {e}")
             return {"error": f"Failed to create file: {str(e)}"}
+    
+    # =============================================================
+    # NC-0.8.0.12: New tool handlers
+    # =============================================================
+    
+    async def _search_replace_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Find and replace text in a session file"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        filename = args.get("filename", "").strip()
+        search = args.get("search", "")
+        replace = args.get("replace", "")
+        
+        if not filename:
+            return {"error": "filename is required"}
+        if not search:
+            return {"error": "search string is required"}
+        
+        chat_id = context.get("chat_id") if context else None
+        db = context.get("db") if context else None
+        if not chat_id:
+            return {"error": "No chat context available"}
+        
+        # Get file content
+        if db:
+            content = await get_session_file_with_db_fallback(chat_id, filename, db)
+        else:
+            content = get_session_file(chat_id, filename)
+        
+        if not content:
+            if db:
+                all_files = await get_session_files_with_db_fallback(chat_id, db)
+            else:
+                all_files = get_session_files(chat_id)
+            return {
+                "error": f"File '{filename}' not found",
+                "available_files": list(all_files.keys()) if all_files else "No files uploaded"
+            }
+        
+        # Count occurrences
+        count = content.count(search)
+        
+        if count == 0:
+            # Try to help - show similar lines
+            search_lines = search.strip().split('\n')
+            first_line = search_lines[0].strip()
+            lines = content.split('\n')
+            similar = []
+            for i, line in enumerate(lines):
+                if first_line and first_line in line:
+                    similar.append(f"  Line {i+1}: {line.rstrip()}")
+                    if len(similar) >= 5:
+                        break
+            
+            result = {"error": f"Search string not found in '{filename}'"}
+            if similar:
+                result["similar_lines"] = "\n".join(similar)
+                result["hint"] = "The search text must match EXACTLY including whitespace/indentation"
+            return result
+        
+        if count > 1:
+            # Show all match locations
+            positions = []
+            start = 0
+            lines = content.split('\n')
+            char_pos = 0
+            line_positions = []  # (line_num, char_offset) for each line start
+            for i, line in enumerate(lines):
+                line_positions.append(char_pos)
+                char_pos += len(line) + 1  # +1 for newline
+            
+            idx = 0
+            while True:
+                idx = content.find(search, idx)
+                if idx == -1:
+                    break
+                # Find which line this is on
+                line_num = 0
+                for ln, offset in enumerate(line_positions):
+                    if offset > idx:
+                        break
+                    line_num = ln
+                positions.append(f"  Match at line {line_num + 1}, char {idx}")
+                idx += 1
+            
+            return {
+                "error": f"Search string found {count} times - must be unique",
+                "match_count": count,
+                "locations": "\n".join(positions[:10]),
+                "hint": "Include more surrounding context to make the search string unique"
+            }
+        
+        # Exactly one match - do the replacement
+        new_content = content.replace(search, replace, 1)
+        
+        # Update session file
+        store_session_file(chat_id, filename, new_content)
+        
+        # Also update in database if available
+        if db:
+            try:
+                from sqlalchemy import update
+                from app.models.upload import UploadedFile
+                await db.execute(
+                    update(UploadedFile)
+                    .where(UploadedFile.chat_id == chat_id)
+                    .where(UploadedFile.filepath == filename)
+                    .values(content=new_content)
+                )
+                await db.commit()
+            except Exception as e:
+                logger.warning(f"[SEARCH_REPLACE] DB update failed: {e}")
+        
+        # Also update on disk if sandbox dir exists
+        import os
+        sandbox_dir = get_session_sandbox(chat_id) if chat_id else os.environ.get("ARTIFACTS_DIR", "/app/data/artifacts")
+        file_path = os.path.join(sandbox_dir, filename)
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+            except Exception as e:
+                logger.warning(f"[SEARCH_REPLACE] Disk update failed: {e}")
+        
+        # Calculate change stats
+        old_lines = content.count('\n') + 1
+        new_lines = new_content.count('\n') + 1
+        
+        logger.info(f"[SEARCH_REPLACE] {filename}: replaced {len(search)} chars with {len(replace)} chars")
+        
+        return {
+            "success": True,
+            "filename": filename,
+            "chars_removed": len(search),
+            "chars_inserted": len(replace),
+            "lines_before": old_lines,
+            "lines_after": new_lines,
+            "message": f"Replaced in {filename}"
+        }
+    
+    async def _web_search_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Search the web - Google Custom Search Engine if configured, DuckDuckGo fallback"""
+        import httpx
+        import logging
+        from urllib.parse import quote_plus
+        logger = logging.getLogger(__name__)
+        
+        query = args.get("query", "").strip()
+        max_results = min(args.get("max_results", 5), 10)
+        
+        if not query:
+            return {"error": "query is required"}
+        
+        # Check if Google CSE is configured via admin settings
+        google_api_key = ""
+        google_cx_id = ""
+        db = context.get("db") if context else None
+        
+        if db:
+            try:
+                from app.services.settings_service import SettingsService
+                google_api_key = (await SettingsService.get(db, "web_search_google_api_key") or "").strip()
+                google_cx_id = (await SettingsService.get(db, "web_search_google_cx_id") or "").strip()
+            except Exception as e:
+                logger.warning(f"[WEB_SEARCH] Could not load Google CSE settings: {e}")
+        
+        if google_api_key and google_cx_id:
+            # Use Google Custom Search Engine
+            result = await self._google_cse_search(query, max_results, google_api_key, google_cx_id)
+            if result.get("results"):
+                result["engine"] = "google"
+                return result
+            # Fall through to DDG if Google returned no results or errored
+            logger.warning(f"[WEB_SEARCH] Google CSE returned no results, falling back to DuckDuckGo")
+        
+        # DuckDuckGo fallback
+        return await self._ddg_search(query, max_results)
+    
+    async def _google_cse_search(self, query: str, max_results: int, api_key: str, cx_id: str) -> Dict[str, Any]:
+        """Search using Google Custom Search Engine API"""
+        import httpx
+        import logging
+        from urllib.parse import quote_plus
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Google CSE API: https://developers.google.com/custom-search/v1/reference/rest/v1/cse/list
+            params = {
+                "key": api_key,
+                "cx": cx_id,
+                "q": query,
+                "num": min(max_results, 10),  # Google CSE max is 10 per request
+            }
+            
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    "https://www.googleapis.com/customsearch/v1",
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+            
+            results = []
+            for item in data.get("items", [])[:max_results]:
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("link", ""),
+                    "snippet": item.get("snippet", ""),
+                    "display_url": item.get("displayLink", ""),
+                })
+            
+            search_info = data.get("searchInformation", {})
+            logger.info(f"[WEB_SEARCH] Google CSE: '{query}' → {len(results)} results ({search_info.get('formattedSearchTime', '?')}s)")
+            
+            return {
+                "query": query,
+                "result_count": len(results),
+                "total_results": search_info.get("formattedTotalResults", "?"),
+                "search_time": search_info.get("formattedSearchTime", "?"),
+                "results": results,
+                "engine": "google",
+            }
+        
+        except httpx.HTTPStatusError as e:
+            logger.error(f"[WEB_SEARCH] Google CSE HTTP error: {e.response.status_code} - {e.response.text[:200]}")
+            return {"error": f"Google search error: HTTP {e.response.status_code}", "query": query}
+        except Exception as e:
+            logger.error(f"[WEB_SEARCH] Google CSE error: {e}")
+            return {"error": f"Google search failed: {str(e)}", "query": query}
+    
+    async def _ddg_search(self, query: str, max_results: int) -> Dict[str, Any]:
+        """Fallback search using DuckDuckGo"""
+        import httpx
+        import logging
+        from urllib.parse import quote_plus
+        logger = logging.getLogger(__name__)
+        
+        try:
+            search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+            
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                follow_redirects=True,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; Open-NueChat/1.0; +https://nuechat.ai)",
+                }
+            ) as client:
+                response = await client.get(search_url)
+                response.raise_for_status()
+                html = response.text
+            
+            results = self._parse_ddg_results(html, max_results)
+            
+            if not results:
+                lite_url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
+                async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; Open-NueChat/1.0)",
+                }) as client:
+                    response = await client.get(lite_url)
+                    html = response.text
+                results = self._parse_ddg_lite_results(html, max_results)
+            
+            logger.info(f"[WEB_SEARCH] DuckDuckGo: '{query}' → {len(results)} results")
+            
+            return {
+                "query": query,
+                "result_count": len(results),
+                "results": results,
+                "engine": "duckduckgo",
+            }
+            
+        except httpx.TimeoutException:
+            return {"error": "Search request timed out", "query": query}
+        except Exception as e:
+            logger.error(f"[WEB_SEARCH] DuckDuckGo error: {e}")
+            return {"error": f"Search failed: {str(e)}", "query": query}
+    
+    def _parse_ddg_results(self, html: str, max_results: int) -> list:
+        """Parse DuckDuckGo HTML search results"""
+        import re
+        results = []
+        
+        # DuckDuckGo HTML results are in <a class="result__a" ...> tags
+        # with snippets in <a class="result__snippet" ...> tags
+        result_blocks = re.findall(
+            r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?'
+            r'(?:<a[^>]*class="result__snippet"[^>]*>(.*?)</a>)?',
+            html, re.DOTALL
+        )
+        
+        if not result_blocks:
+            # Alternative pattern
+            result_blocks = re.findall(
+                r'<a[^>]*rel="nofollow"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+                html, re.DOTALL
+            )
+        
+        for block in result_blocks[:max_results]:
+            url = block[0] if block[0] else ""
+            title = re.sub(r'<[^>]+>', '', block[1] if len(block) > 1 else "").strip()
+            snippet = re.sub(r'<[^>]+>', '', block[2] if len(block) > 2 else "").strip()
+            
+            # DuckDuckGo wraps URLs in a redirect
+            if "uddg=" in url:
+                from urllib.parse import unquote, parse_qs, urlparse
+                parsed = urlparse(url)
+                params = parse_qs(parsed.query)
+                if "uddg" in params:
+                    url = unquote(params["uddg"][0])
+            
+            if url and title and not url.startswith("//duckduckgo.com"):
+                results.append({
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet or "",
+                })
+        
+        return results
+    
+    def _parse_ddg_lite_results(self, html: str, max_results: int) -> list:
+        """Parse DuckDuckGo Lite results as fallback"""
+        import re
+        results = []
+        
+        # Lite format: links in table rows
+        links = re.findall(r'<a[^>]*rel="nofollow"[^>]*href="([^"]*)"[^>]*>(.*?)</a>', html, re.DOTALL)
+        
+        # Next <td> after link often contains snippet
+        snippets = re.findall(r'<td[^>]*class="result-snippet"[^>]*>(.*?)</td>', html, re.DOTALL)
+        
+        for i, (url, title) in enumerate(links[:max_results]):
+            title = re.sub(r'<[^>]+>', '', title).strip()
+            snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip() if i < len(snippets) else ""
+            
+            if url and title:
+                results.append({
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                })
+        
+        return results
+    
+    async def _web_extract_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Extract structured content from a webpage"""
+        import httpx
+        import re
+        import logging
+        from urllib.parse import urlparse, urljoin
+        logger = logging.getLogger(__name__)
+        
+        url = args.get("url", "").strip()
+        include_links = args.get("include_links", True)
+        include_images = args.get("include_images", False)
+        max_links = args.get("max_links", 25)
+        
+        if not url:
+            return {"error": "url is required"}
+        
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return {"error": "Invalid URL scheme. Must be http or https."}
+        except Exception:
+            return {"error": "Invalid URL format"}
+        
+        try:
+            async with httpx.AsyncClient(
+                timeout=30.0,
+                follow_redirects=True,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; Open-NueChat/1.0; +https://nuechat.ai)",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                }
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+            
+            html = response.text
+            final_url = str(response.url)
+            
+            result = {
+                "url": final_url,
+                "status_code": response.status_code,
+            }
+            
+            # Extract title
+            title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.IGNORECASE)
+            result["title"] = re.sub(r'<[^>]+>', '', title_match.group(1)).strip() if title_match else ""
+            
+            # Extract meta description
+            meta_match = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']*)', html, re.IGNORECASE)
+            if not meta_match:
+                meta_match = re.search(r'<meta[^>]*content=["\']([^"\']*)["\'][^>]*name=["\']description["\']', html, re.IGNORECASE)
+            result["meta_description"] = meta_match.group(1).strip() if meta_match else ""
+            
+            # Extract headings hierarchy
+            headings = []
+            for match in re.finditer(r'<(h[1-6])[^>]*>(.*?)</\1>', html, re.DOTALL | re.IGNORECASE):
+                level = int(match.group(1)[1])
+                text = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+                if text:
+                    headings.append({"level": level, "text": text})
+            result["headings"] = headings[:50]
+            
+            # Extract links
+            if include_links:
+                links = []
+                for match in re.finditer(r'<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', html, re.DOTALL | re.IGNORECASE):
+                    href = match.group(1).strip()
+                    text = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+                    if href and text and not href.startswith(('#', 'javascript:', 'mailto:')):
+                        full_url = urljoin(final_url, href)
+                        links.append({"text": text[:100], "url": full_url})
+                        if len(links) >= max_links:
+                            break
+                result["links"] = links
+            
+            # Extract images
+            if include_images:
+                images = []
+                for match in re.finditer(r'<img[^>]*src=["\']([^"\']*)["\'][^>]*>', html, re.IGNORECASE):
+                    src = urljoin(final_url, match.group(1).strip())
+                    alt_match = re.search(r'alt=["\']([^"\']*)', match.group(0), re.IGNORECASE)
+                    alt = alt_match.group(1) if alt_match else ""
+                    images.append({"src": src, "alt": alt})
+                    if len(images) >= 20:
+                        break
+                result["images"] = images
+            
+            # Extract clean body text
+            body_text = self._extract_text_from_html(html, True)
+            result["content"] = body_text[:50000]
+            result["content_length"] = len(body_text)
+            
+            logger.info(f"[WEB_EXTRACT] {url} → {len(headings)} headings, {result['content_length']} chars")
+            
+            return result
+            
+        except httpx.TimeoutException:
+            return {"url": url, "error": "Request timed out"}
+        except httpx.HTTPStatusError as e:
+            return {"url": url, "error": f"HTTP error {e.response.status_code}"}
+        except Exception as e:
+            return {"url": url, "error": f"Failed to extract: {str(e)}"}
+    
+    async def _grep_files_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Search for a pattern across all session files"""
+        import re
+        import fnmatch
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        pattern = args.get("pattern", "")
+        context_lines = args.get("context_lines", 2)
+        file_pattern = args.get("file_pattern", "")
+        max_per_file = args.get("max_matches_per_file", 10)
+        
+        if not pattern:
+            return {"error": "pattern is required"}
+        
+        chat_id = context.get("chat_id") if context else None
+        db = context.get("db") if context else None
+        if not chat_id:
+            return {"error": "No chat context available"}
+        
+        # Get all files
+        if db:
+            files = await get_session_files_with_db_fallback(chat_id, db)
+        else:
+            files = get_session_files(chat_id)
+        
+        if not files:
+            return {"error": "No files in session"}
+        
+        # Compile regex
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            regex = re.compile(re.escape(pattern), re.IGNORECASE)
+        
+        results = {}
+        total_matches = 0
+        files_searched = 0
+        files_matched = 0
+        
+        for filename, content in files.items():
+            # Apply file pattern filter
+            if file_pattern and not fnmatch.fnmatch(filename, file_pattern):
+                continue
+            
+            files_searched += 1
+            lines = content.split('\n')
+            file_matches = []
+            
+            for i, line in enumerate(lines):
+                if regex.search(line):
+                    start = max(0, i - context_lines)
+                    end = min(len(lines), i + context_lines + 1)
+                    
+                    ctx = []
+                    for j in range(start, end):
+                        marker = ">" if j == i else " "
+                        ctx.append(f"{j + 1}{marker} {lines[j]}")
+                    
+                    file_matches.append({
+                        "line": i + 1,
+                        "match": line.strip(),
+                        "context": "\n".join(ctx)
+                    })
+                    
+                    if len(file_matches) >= max_per_file:
+                        break
+            
+            if file_matches:
+                results[filename] = file_matches
+                total_matches += len(file_matches)
+                files_matched += 1
+        
+        logger.info(f"[GREP_FILES] '{pattern}' → {total_matches} matches in {files_matched}/{files_searched} files")
+        
+        return {
+            "pattern": pattern,
+            "files_searched": files_searched,
+            "files_matched": files_matched,
+            "total_matches": total_matches,
+            "results": results,
+        }
+    
+    async def _sed_files_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Batch find and replace across multiple files"""
+        import re
+        import fnmatch
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        pattern = args.get("pattern", "")
+        replacement = args.get("replacement", "")
+        file_pattern = args.get("file_pattern", "")
+        force = args.get("force", False)
+        max_per_file = args.get("max_replacements_per_file", 100)
+        
+        if not pattern:
+            return {"error": "pattern is required"}
+        
+        chat_id = context.get("chat_id") if context else None
+        db = context.get("db") if context else None
+        if not chat_id:
+            return {"error": "No chat context available"}
+        
+        # Get all files
+        if db:
+            files = await get_session_files_with_db_fallback(chat_id, db)
+        else:
+            files = get_session_files(chat_id)
+        
+        if not files:
+            return {"error": "No files in session"}
+        
+        # Compile regex
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            return {"error": f"Invalid regex pattern: {e}"}
+        
+        preview = {}
+        changes = {}
+        total_replacements = 0
+        
+        for filename, content in files.items():
+            if file_pattern and not fnmatch.fnmatch(filename, file_pattern):
+                continue
+            
+            # Find all matches
+            matches = list(regex.finditer(content))
+            if not matches:
+                continue
+            
+            match_count = min(len(matches), max_per_file)
+            
+            if not force:
+                # Preview mode - show what would change
+                lines = content.split('\n')
+                file_preview = []
+                seen_lines = set()
+                for m in matches[:max_per_file]:
+                    # Find line number
+                    line_num = content[:m.start()].count('\n')
+                    if line_num in seen_lines:
+                        continue
+                    seen_lines.add(line_num)
+                    original = lines[line_num] if line_num < len(lines) else ""
+                    replaced = regex.sub(replacement, original, count=1)
+                    if original != replaced:
+                        file_preview.append({
+                            "line": line_num + 1,
+                            "before": original.rstrip(),
+                            "after": replaced.rstrip(),
+                        })
+                preview[filename] = {
+                    "match_count": match_count,
+                    "changes": file_preview[:15],
+                }
+                total_replacements += match_count
+            else:
+                # Apply changes
+                new_content, count = regex.subn(replacement, content, count=max_per_file)
+                
+                if count > 0:
+                    store_session_file(chat_id, filename, new_content)
+                    
+                    # Update DB
+                    if db:
+                        try:
+                            from sqlalchemy import update as sql_update
+                            from app.models.upload import UploadedFile
+                            await db.execute(
+                                sql_update(UploadedFile)
+                                .where(UploadedFile.chat_id == chat_id)
+                                .where(UploadedFile.filepath == filename)
+                                .values(content=new_content)
+                            )
+                            await db.commit()
+                        except Exception as e:
+                            logger.warning(f"[SED_FILES] DB update failed for {filename}: {e}")
+                    
+                    # Update disk
+                    import os
+                    sandbox_dir = get_session_sandbox(chat_id) if chat_id else os.environ.get("ARTIFACTS_DIR", "/app/data/artifacts")
+                    file_path = os.path.join(sandbox_dir, filename)
+                    if os.path.exists(file_path):
+                        try:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(new_content)
+                        except Exception:
+                            pass
+                    
+                    changes[filename] = count
+                    total_replacements += count
+        
+        if not force:
+            logger.info(f"[SED_FILES] Preview: '{pattern}' → {total_replacements} matches across {len(preview)} files")
+            return {
+                "mode": "preview",
+                "pattern": pattern,
+                "replacement": replacement,
+                "files_affected": len(preview),
+                "total_matches": total_replacements,
+                "preview": preview,
+                "hint": "Set force=true to apply these changes"
+            }
+        else:
+            logger.info(f"[SED_FILES] Applied: '{pattern}' → {total_replacements} replacements across {len(changes)} files")
+            return {
+                "mode": "applied",
+                "pattern": pattern,
+                "replacement": replacement,
+                "files_modified": len(changes),
+                "total_replacements": total_replacements,
+                "changes": changes,
+            }
     
     async def _fetch_urls_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Fetch multiple URLs, with special handling for video platforms."""
@@ -2459,6 +3574,103 @@ Example:
 # Session-based file store for uploaded files
 # Key: chat_id, Value: Dict[filename, content]
 _session_files: Dict[str, Dict[str, str]] = {}
+
+
+def get_session_sandbox(chat_id: str) -> str:
+    """
+    Get the sandbox directory for a chat session.
+    Each session gets its own GUID-based folder under ARTIFACTS_DIR.
+    Creates the directory if it doesn't exist.
+    """
+    import os
+    artifacts_base = os.environ.get("ARTIFACTS_DIR", "/app/data/artifacts")
+    sandbox_dir = os.path.join(artifacts_base, chat_id)
+    os.makedirs(sandbox_dir, exist_ok=True)
+    return sandbox_dir
+
+
+def make_sandboxed_open(sandbox_dir: str):
+    """
+    Create a sandboxed open() that prevents path traversal above sandbox_dir.
+    All relative paths resolve within sandbox_dir.
+    Absolute paths must be within sandbox_dir.
+    """
+    import os
+    
+    _real_open = open
+    sandbox_real = os.path.realpath(sandbox_dir)
+    
+    def _sandboxed_open(file, mode='r', *args, **kwargs):
+        # Resolve the path
+        if isinstance(file, (str, bytes)):
+            file_str = file if isinstance(file, str) else file.decode()
+            # Resolve relative to sandbox
+            if not os.path.isabs(file_str):
+                resolved = os.path.realpath(os.path.join(sandbox_dir, file_str))
+            else:
+                resolved = os.path.realpath(file_str)
+            
+            # Check it's within sandbox
+            if not resolved.startswith(sandbox_real + os.sep) and resolved != sandbox_real:
+                raise PermissionError(f"Access denied: path escapes sandbox. Use relative paths within your project.")
+            
+            # Auto-create parent dirs for write modes
+            if any(m in mode for m in ('w', 'a', 'x')):
+                parent = os.path.dirname(resolved)
+                if parent and not os.path.exists(parent):
+                    os.makedirs(parent, exist_ok=True)
+            
+            return _real_open(resolved, mode, *args, **kwargs)
+        else:
+            return _real_open(file, mode, *args, **kwargs)
+    
+    return _sandboxed_open
+
+
+def make_sandboxed_os(sandbox_dir: str):
+    """
+    Create a restricted os module that jails path operations to sandbox_dir.
+    """
+    import os as _real_os
+    import types
+    
+    sandbox_real = _real_os.path.realpath(sandbox_dir)
+    
+    def _check_path(p):
+        if isinstance(p, (str, bytes)):
+            p_str = p if isinstance(p, str) else p.decode()
+            if not _real_os.path.isabs(p_str):
+                resolved = _real_os.path.realpath(_real_os.path.join(sandbox_dir, p_str))
+            else:
+                resolved = _real_os.path.realpath(p_str)
+            if not resolved.startswith(sandbox_real + _real_os.sep) and resolved != sandbox_real:
+                raise PermissionError(f"Access denied: path escapes sandbox.")
+            return resolved
+        return p
+    
+    # Create a module-like namespace with safe operations
+    safe_os = types.ModuleType("os")
+    safe_os.path = _real_os.path
+    safe_os.sep = _real_os.sep
+    safe_os.linesep = _real_os.linesep
+    safe_os.getcwd = lambda: sandbox_dir
+    safe_os.listdir = lambda p='.': _real_os.listdir(_check_path(p))
+    safe_os.walk = lambda top='.', **kw: _real_os.walk(_check_path(top), **kw)
+    safe_os.makedirs = lambda p, **kw: _real_os.makedirs(_check_path(p), **kw)
+    safe_os.path.exists = lambda p: _real_os.path.exists(_check_path(p) if isinstance(p, str) and not _real_os.path.isabs(p) else p)
+    safe_os.path.isfile = lambda p: _real_os.path.isfile(_check_path(p) if isinstance(p, str) and not _real_os.path.isabs(p) else p)
+    safe_os.path.isdir = lambda p: _real_os.path.isdir(_check_path(p) if isinstance(p, str) and not _real_os.path.isabs(p) else p)
+    safe_os.path.getsize = lambda p: _real_os.path.getsize(_check_path(p))
+    safe_os.path.join = _real_os.path.join
+    safe_os.path.dirname = _real_os.path.dirname
+    safe_os.path.basename = _real_os.path.basename
+    safe_os.path.splitext = _real_os.path.splitext
+    safe_os.path.abspath = lambda p: _real_os.path.realpath(_real_os.path.join(sandbox_dir, p)) if not _real_os.path.isabs(p) else p
+    safe_os.path.realpath = _real_os.path.realpath
+    safe_os.path.isabs = _real_os.path.isabs
+    safe_os.environ = _real_os.environ  # Read-only access to env is fine
+    
+    return safe_os
 
 
 def store_session_file(chat_id: str, filename: str, content: str):

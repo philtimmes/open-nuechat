@@ -10,7 +10,80 @@ Full-stack LLM chat application with:
 - FAISS GPU for vector search
 - OpenAI-compatible LLM API integration
 
-**Current Version:** NC-0.8.0.10
+**Current Version:** NC-0.8.0.12
+
+---
+
+## Recent Changes (NC-0.8.0.12)
+
+### New Tools: search_replace, web_search, web_extract, grep_files, sed_files
+
+Six new tools added to the tool registry:
+
+| Tool | Category | Description |
+|------|----------|-------------|
+| `search_replace` | file_manager | Find and replace exact text in a session file. Search must be unique. Updates memory, DB, and disk. |
+| `web_search` | web | Search the web via DuckDuckGo HTML. Returns titles, URLs, snippets. No API key needed. |
+| `web_extract` | web | Extract structured content from a URL: title, meta, headings, links, images, clean text. |
+| `grep_files` | file_manager | Search a pattern across ALL session files. Supports regex, file glob filter, context lines. |
+| `sed_files` | file_manager | Batch regex find/replace across multiple files. Preview mode by default, force=true to apply. |
+| `execute_python` | code_exec | (existing) - already present, listed for completeness |
+
+**Tool Category Updates:**
+- `web` category: added `web_search`, `web_extract`
+- `file_manager` category: added `search_replace`, `grep_files`, `sed_files`
+- Legacy `web_search` / `file_ops` categories updated accordingly
+
+**New Hallucinated Tool Delegates:**
+- `str_replace`, `find_replace`, `edit_file` → `search_replace`
+- `grep`, `find_in_files`, `search_files` → `grep_files`
+- `sed`, `replace_all`, `batch_replace` → `sed_files`
+- `scrape`, `scrape_url` → `web_extract`
+
+---
+
+## Recent Changes (NC-0.8.0.11)
+
+### Enhanced execute_python Tool
+
+The `execute_python` tool now supports direct output to chat:
+
+**New Parameters:**
+- `output_image` (boolean): Captures matplotlib figures or PIL images and sends directly to chat as base64
+- `output_text` (boolean): Sends result/output directly to chat without LLM reformatting
+
+**Available Modules:**
+- math, statistics, datetime, random, json, re, collections, itertools, functools
+- matplotlib.pyplot (as plt) - when output_image=True
+- PIL/Pillow - when output_image=True
+
+**WebSocket Events:**
+- `direct_image`: Sends base64 image directly to frontend
+- `direct_text`: Sends text directly to frontend
+
+**Example Usage (LLM):**
+```python
+# Generate a chart
+execute_python(
+    code='''
+import matplotlib.pyplot as plt
+plt.figure(figsize=(10, 6))
+plt.plot([1, 2, 3, 4], [1, 4, 2, 3])
+plt.title("Sample Chart")
+plt.savefig("chart.png")
+''',
+    output_image=True
+)
+
+# Output formatted data
+execute_python(
+    code='''
+result = "| Name | Value |\\n|------|-------|\\n| A | 100 |\\n| B | 200 |"
+print(result)
+''',
+    output_text=True
+)
+```
 
 ---
 
@@ -82,12 +155,18 @@ LLMs often hallucinate tools from their training data (like `create_artifact` fr
 | `math`, `calculate`, `compute` | `calculator` |
 | `get_time`, `current_time`, `now`, `date` | `get_current_time` |
 | `agent_search`, `agent_read` | `memory_search`, `memory_read` |
+| `str_replace`, `find_replace`, `replace_in_file`, `edit_file` | `search_replace` |
+| `grep`, `find_in_files`, `search_files`, `search_all` | `grep_files` |
+| `sed`, `replace_all`, `batch_replace` | `sed_files` |
+| `extract_webpage`, `scrape`, `scrape_url` | `web_extract` |
 
 **Argument Mapping:** Common argument name variations are mapped:
 - `data`, `text`, `body`, `source` → `content` (for create_file)
 - `filename`, `file_path`, `name` → `path` (for create_file)
 - `uri`, `link` → `url` (for fetch_webpage)
 - `description`, `text` → `prompt` (for generate_image)
+- `old_str`, `find`, `pattern` → `search` (for search_replace)
+- `new_str`, `replacement` → `replace` (for search_replace)
 
 **Rejection:** Unknown tools still get `TOOL_NOT_FOUND` error with available tools list.
 
@@ -1757,6 +1836,7 @@ The editor uses React Flow and supports all step types with intuitive configurat
 
 | Version | Date | Summary |
 |---------|------|---------|
+| NC-0.8.0.12 | 2026-02-11 | **New Tools** - `search_replace` (exact find/replace in files), `web_search` (DuckDuckGo search), `web_extract` (structured page extraction), `grep_files` (cross-file search), `sed_files` (batch regex replace). Updated tool categories and hallucinated tool delegates. |
 | NC-0.8.0.8 | 2026-01-10 | **Force Trigger Keywords for Global KB** - Bypass score threshold when keywords match. New DB columns: `force_trigger_enabled`, `force_trigger_keywords`, `force_trigger_max_chunks`. Enhanced Admin UI with relevance threshold slider. **Tool Debugging** - New DEBUG_Tool_Advertisements and DEBUG_Tool_Calls settings in Admin Site Dev. **Task Queue Auto-Execute** - Automatically feeds pending tasks to LLM when it stops responding without processing them. |
 | NC-0.8.0.7 | 2026-01-09 | Active Tools Filtering fix, Streaming Tool Calls fix, Pre-emptive RAG Toggle, API model names use cleaned assistant names, Performance indexes, Admin image gen settings, image persistence, image preview in artifacts, Download All includes images, image context hidden, generate_image tool, temporary MCP server installation (4h auto-cleanup) |
 | NC-0.8.0.6 | 2026-01-08 | Smart RAG Compression - subject re-ranking (keyword overlap boost), extractive summarization for large chunks, token budget support |

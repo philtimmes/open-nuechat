@@ -370,7 +370,7 @@ async def handle_chat_message(
         
         # Web - Web fetching and search tools
         "web": [
-            "fetch_webpage", "fetch_urls",
+            "fetch_webpage", "fetch_urls", "web_search", "web_extract",
         ],
         
         # KnowledgeBases - Document/RAG search tools
@@ -387,7 +387,8 @@ async def handle_chat_message(
         # FileManager - File operations tools
         "file_manager": [
             "view_file_lines", "search_in_file", "list_uploaded_files", 
-            "view_signature", "request_file",
+            "view_signature", "request_file", "search_replace",
+            "grep_files", "sed_files",
         ],
         
         # CodeExec - Code execution tools
@@ -414,9 +415,9 @@ async def handle_chat_message(
         "extern_tools_openapi": [],  # Populated at runtime from database
         
         # Legacy category mappings (for backward compatibility with existing UI)
-        "web_search": ["fetch_webpage", "fetch_urls"],
+        "web_search": ["fetch_webpage", "fetch_urls", "web_search", "web_extract"],
         "kb_search": ["search_documents"],
-        "file_ops": ["view_file_lines", "search_in_file", "list_uploaded_files", "view_signature", "request_file"],
+        "file_ops": ["view_file_lines", "search_in_file", "list_uploaded_files", "view_signature", "request_file", "search_replace", "grep_files", "sed_files"],
         "user_chats_kb": ["memory_search", "memory_read", "agent_search", "agent_read"],  # Legacy alias for chat_history
     }
     
@@ -1504,8 +1505,6 @@ The following is relevant information from your previous conversations:
             "eval": "execute_python",
             
             # Web/search patterns
-            "web_search": "fetch_webpage",
-            "search": "search_documents",
             "search_web": "fetch_webpage",
             "browse": "fetch_webpage",
             "browser": "fetch_webpage",
@@ -1546,6 +1545,28 @@ The following is relevant information from your previous conversations:
             # Memory patterns (legacy names)
             "agent_search": "memory_search",
             "agent_read": "memory_read",
+            
+            # Search/replace patterns (NC-0.8.0.12)
+            "str_replace": "search_replace",
+            "find_replace": "search_replace",
+            "replace_in_file": "search_replace",
+            "edit_file": "search_replace",
+            
+            # Grep patterns (NC-0.8.0.12)
+            "grep": "grep_files",
+            "find_in_files": "grep_files",
+            "search_files": "grep_files",
+            "search_all": "grep_files",
+            
+            # Sed patterns (NC-0.8.0.12)
+            "sed": "sed_files",
+            "replace_all": "sed_files",
+            "batch_replace": "sed_files",
+            
+            # Web extract patterns (NC-0.8.0.12)
+            "extract_webpage": "web_extract",
+            "scrape": "web_extract",
+            "scrape_url": "web_extract",
         }
         
         async def execute_tool(tool_name: str, arguments: dict):
@@ -1595,7 +1616,15 @@ The following is relevant information from your previous conversations:
                         arguments.get("program")
                     )
                     if code:
-                        arguments = {"code": code}
+                        new_args = {"code": code}
+                        # Preserve output options
+                        if arguments.get("output_image"):
+                            new_args["output_image"] = arguments["output_image"]
+                        if arguments.get("output_text"):
+                            new_args["output_text"] = arguments["output_text"]
+                        if arguments.get("output_filename"):
+                            new_args["output_filename"] = arguments["output_filename"]
+                        arguments = new_args
                     
                 elif delegated_to == "fetch_webpage":
                     # Handle various URL argument names
@@ -1635,6 +1664,50 @@ The following is relevant information from your previous conversations:
                         if "end_line" in arguments:
                             new_args["end_line"] = arguments.get("end_line")
                         arguments = new_args
+                
+                elif delegated_to == "search_replace":
+                    # Handle various search/replace argument names
+                    filename = (
+                        arguments.get("filename") or
+                        arguments.get("path") or
+                        arguments.get("file") or
+                        arguments.get("file_path")
+                    )
+                    search = (
+                        arguments.get("search") or
+                        arguments.get("old_str") or
+                        arguments.get("find") or
+                        arguments.get("pattern")
+                    )
+                    replace = (
+                        arguments.get("replace") or
+                        arguments.get("new_str") or
+                        arguments.get("replacement") or
+                        ""
+                    )
+                    if filename and search is not None:
+                        arguments = {"filename": filename, "search": search, "replace": replace}
+                
+                elif delegated_to == "grep_files":
+                    pattern = (
+                        arguments.get("pattern") or
+                        arguments.get("query") or
+                        arguments.get("search") or
+                        arguments.get("text")
+                    )
+                    if pattern:
+                        arguments = {"pattern": pattern}
+                        if arguments.get("file_pattern"):
+                            arguments["file_pattern"] = arguments["file_pattern"]
+                
+                elif delegated_to == "web_extract":
+                    url = (
+                        arguments.get("url") or
+                        arguments.get("uri") or
+                        arguments.get("link")
+                    )
+                    if url:
+                        arguments = {"url": url}
             
             # NC-0.8.0.9: Validate tool exists before execution
             # Prevents LLM from hallucinating tools that don't exist
@@ -1797,6 +1870,106 @@ The following is relevant information from your previous conversations:
                 elif event_type == "error":
                     logger.error(f"LLM error: {event['error']}")
                     await streaming_handler.send_error(event["error"])
+                
+                # NC-0.8.0.11: Handle direct output from execute_python
+                elif event_type == "direct_image":
+                    # Send image directly to chat
+                    logger.info(f"[DIRECT_OUTPUT] Sending image from {event.get('tool_name')}")
+                    await ws_manager.send_to_connection(connection, {
+                        "type": "direct_image",
+                        "payload": {
+                            "chat_id": chat_id,
+                            "message_id": streaming_handler._current_message_id,
+                            "tool_name": event.get("tool_name"),
+                            "image_base64": event.get("image_base64"),
+                            "mime_type": event.get("mime_type", "image/png"),
+                            "filename": event.get("filename", "output.png"),
+                        },
+                    })
+                
+                elif event_type == "direct_text":
+                    # Send text directly to chat
+                    logger.info(f"[DIRECT_OUTPUT] Sending text from {event.get('tool_name')}")
+                    await ws_manager.send_to_connection(connection, {
+                        "type": "direct_text",
+                        "payload": {
+                            "chat_id": chat_id,
+                            "message_id": streaming_handler._current_message_id,
+                            "tool_name": event.get("tool_name"),
+                            "text": event.get("text"),
+                            "filename": event.get("filename", "output.txt"),
+                        },
+                    })
+                
+                # NC-0.8.0.12: Forward tool_call events to frontend
+                # For file-modifying tools, include updated file content so browser stays in sync
+                elif event_type == "tool_call":
+                    tool_name = event.get("tool_name", "")
+                    tool_args = event.get("arguments", {})
+                    tool_result = event.get("result", "")
+                    
+                    payload = {
+                        "chat_id": chat_id,
+                        "message_id": streaming_handler._current_message_id,
+                        "tool_name": tool_name,
+                        "arguments": tool_args,
+                        "result": tool_result,
+                    }
+                    
+                    # For file-modifying tools, attach the updated file content
+                    FILE_MODIFY_TOOLS = {"create_file", "search_replace", "sed_files"}
+                    if tool_name in FILE_MODIFY_TOOLS:
+                        from app.tools.registry import get_session_file
+                        
+                        # Determine which file(s) were modified
+                        modified_files = {}
+                        if tool_name == "create_file":
+                            fname = tool_args.get("path", "")
+                            content = tool_args.get("content", "")
+                            if fname and content:
+                                modified_files[fname] = content
+                        elif tool_name == "search_replace":
+                            fname = tool_args.get("filename", "")
+                            if fname:
+                                fc = get_session_file(chat_id, fname)
+                                if fc:
+                                    modified_files[fname] = fc
+                        elif tool_name == "sed_files":
+                            # sed_files can modify multiple files — check result for which changed
+                            try:
+                                result_data = json.loads(tool_result) if isinstance(tool_result, str) else tool_result
+                                if isinstance(result_data, dict):
+                                    for fname in result_data.get("changes", {}).keys():
+                                        fc = get_session_file(chat_id, fname)
+                                        if fc:
+                                            modified_files[fname] = fc
+                            except Exception:
+                                pass
+                        
+                        if modified_files:
+                            payload["modified_files"] = modified_files
+                            logger.info(f"[TOOL_CALL] Sending file updates to frontend: {list(modified_files.keys())}")
+                            
+                            # NC-0.8.0.12: Rebuild and send associations + call graph
+                            try:
+                                from app.tools.registry import get_session_files
+                                from app.services.zip_processor import (
+                                    build_manifest_from_session_files, extract_associations,
+                                    extract_call_graph,
+                                )
+                                session_files = get_session_files(chat_id)
+                                if session_files:
+                                    mini = build_manifest_from_session_files(session_files)
+                                    payload["associations"] = extract_associations(mini)
+                                    payload["call_graph"] = extract_call_graph(mini)
+                                    payload["signature_index"] = mini.signature_index
+                            except Exception as e:
+                                logger.debug(f"[TOOL_CALL] Association rebuild skipped: {e}")
+                    
+                    await ws_manager.send_to_connection(connection, {
+                        "type": "tool_call",
+                        "payload": payload,
+                    })
         except asyncio.CancelledError:
             logger.debug(f"Streaming task cancelled for chat {chat_id}")
             await ws_manager.send_to_connection(connection, {

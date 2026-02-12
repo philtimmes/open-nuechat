@@ -11,10 +11,14 @@ import os
 
 
 # Create async engine for SQLite
+# NC-0.8.0.12: Add busy_timeout to handle concurrent access better
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
-    connect_args={"check_same_thread": False},
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30,  # Wait up to 30 seconds for locks
+    },
     poolclass=StaticPool,
 )
 
@@ -32,7 +36,10 @@ _sync_url = settings.DATABASE_URL.replace("sqlite+aiosqlite", "sqlite")
 sync_engine = create_engine(
     _sync_url,
     echo=settings.DEBUG,
-    connect_args={"check_same_thread": False},
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30,  # Wait up to 30 seconds for locks
+    },
     poolclass=StaticPool,
 )
 

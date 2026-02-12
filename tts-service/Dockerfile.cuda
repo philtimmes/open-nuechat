@@ -16,7 +16,6 @@ RUN apt-get update && apt-get install -y \
     python3.12 \
     python3.12-venv \
     python3.12-dev \
-    python3-pip \
     build-essential \
     curl \
     git \
@@ -25,9 +24,10 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Python 3.12 as default
+# Set Python 3.12 as default and install pip
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 
 # Set working directory
 WORKDIR /app
@@ -36,9 +36,9 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install PyTorch nightly with CUDA 12.8 support (for Blackwell sm_120)
-RUN pip install --upgrade pip && \
-    pip install --pre torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 && \
-    pip install -r requirements.txt
+RUN python3.12 -m pip install --upgrade pip && \
+    python3.12 -m pip install --pre torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 && \
+    python3.12 -m pip install -r requirements.txt
 
 # Copy application code
 COPY main.py .
@@ -61,4 +61,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8033/health || exit 1
 
 # Run the service
-CMD ["python", "main.py"]
+CMD ["python3.12", "main.py"]

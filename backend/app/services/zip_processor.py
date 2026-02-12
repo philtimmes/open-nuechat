@@ -114,15 +114,23 @@ EXT_TO_LANG = {
 def detect_language(filename: str) -> Optional[str]:
     """
     Detect programming language from filename extension.
-    
-    Args:
-        filename: The filename to detect language for
-        
-    Returns:
-        Language name string or None if not detected
+    Also handles special filenames like Dockerfile, Makefile, etc.
     """
     if not filename:
         return None
+    
+    basename = os.path.basename(filename).lower()
+    
+    # Special filename detection
+    if basename == 'dockerfile' or basename.startswith('dockerfile.'):
+        return 'dockerfile'
+    if basename == 'makefile' or basename.startswith('makefile.') or basename == 'gnumakefile':
+        return 'makefile'
+    if basename == 'docker-compose.yml' or basename == 'docker-compose.yaml' or basename.startswith('compose.'):
+        return 'docker-compose'
+    if basename == 'cmakelists.txt':
+        return 'cmake'
+    
     ext = os.path.splitext(filename)[1].lower()
     return EXT_TO_LANG.get(ext)
 
@@ -568,7 +576,7 @@ class SignatureExtractor:
         extractors = {
             'python': cls.extract_python,
             'javascript': cls.extract_javascript,
-            'typescript': cls.extract_javascript,  # Same patterns work
+            'typescript': cls.extract_javascript,
             'go': cls.extract_go,
             'rust': cls.extract_rust,
             'java': cls.extract_java,
@@ -584,8 +592,12 @@ class SignatureExtractor:
             'zsh': cls.extract_shell,
             'elixir': cls.extract_elixir,
             'haskell': cls.extract_haskell,
-            'vue': cls.extract_javascript,  # Vue files contain JS
-            'svelte': cls.extract_javascript,  # Svelte files contain JS
+            'vue': cls.extract_javascript,
+            'svelte': cls.extract_javascript,
+            'dockerfile': cls.extract_dockerfile,
+            'makefile': cls.extract_makefile,
+            'docker-compose': cls.extract_docker_compose,
+            'markdown': cls.extract_markdown_gist,
         }
         
         extractor = extractors.get(language)
@@ -596,6 +608,191 @@ class SignatureExtractor:
                 logger.warning(f"Error extracting signatures for {language}: {e}")
                 return []
         return []
+    
+    @staticmethod
+    def extract_dockerfile(content: str) -> List[CodeSignature]:
+        """Extract Dockerfile stages, exposed ports, base images, and key instructions"""
+        signatures = []
+        lines = content.split('\n')
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            
+            # FROM — base image, possibly named stage
+            m = re.match(r'^FROM\s+(\S+)(?:\s+[Aa][Ss]\s+(\w+))?', stripped, re.IGNORECASE)
+            if m:
+                image, stage = m.groups()
+                name = f"stage:{stage}" if stage else f"base:{image}"
+                signatures.append(CodeSignature(
+                    name=name, kind='stage' if stage else 'from',
+                    line=i, signature=stripped,
+                ))
+            
+            # EXPOSE
+            m = re.match(r'^EXPOSE\s+(.+)', stripped, re.IGNORECASE)
+            if m:
+                signatures.append(CodeSignature(name=m.group(1).strip(), kind='expose', line=i))
+            
+            # ENTRYPOINT / CMD
+            m = re.match(r'^(ENTRYPOINT|CMD)\s+(.+)', stripped, re.IGNORECASE)
+            if m:
+                signatures.append(CodeSignature(
+                    name=m.group(2).strip()[:80], kind=m.group(1).lower(), line=i,
+                ))
+            
+            # COPY --from (multi-stage reference)
+            m = re.match(r'^COPY\s+--from=(\S+)', stripped, re.IGNORECASE)
+            if m:
+                signatures.append(CodeSignature(
+                    name=f"from:{m.group(1)}", kind='copy_from', line=i, signature=stripped,
+                ))
+            
+            # ENV key=value (important config)
+            m = re.match(r'^ENV\s+(\w+)[=\s](.+)', stripped, re.IGNORECASE)
+            if m:
+                signatures.append(CodeSignature(name=m.group(1), kind='env', line=i))
+            
+            # WORKDIR
+            m = re.match(r'^WORKDIR\s+(\S+)', stripped, re.IGNORECASE)
+            if m:
+                signatures.append(CodeSignature(name=m.group(1), kind='workdir', line=i))
+        
+        return signatures
+    
+    @staticmethod
+    def extract_makefile(content: str) -> List[CodeSignature]:
+        """Extract Makefile targets, variables, and includes"""
+        signatures = []
+        lines = content.split('\n')
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.rstrip()
+            if not stripped or stripped.startswith('\t') or stripped.startswith('#'):
+                continue
+            
+            # Targets: name: [deps]
+            m = re.match(r'^([a-zA-Z_][\w.-]*)\s*:(?!=)', stripped)
+            if m:
+                target = m.group(1)
+                # Get deps
+                deps_part = stripped[stripped.index(':') + 1:].strip()
+                sig = f"{target}: {deps_part}" if deps_part else target
+                signatures.append(CodeSignature(
+                    name=target, kind='target', line=i, signature=sig,
+                ))
+            
+            # Variables: NAME = value or NAME := value
+            m = re.match(r'^([A-Z_][A-Z0-9_]*)\s*[:?]?=\s*(.+)', stripped)
+            if m:
+                val = m.group(2).strip()
+                if len(val) > 60:
+                    val = val[:60] + "..."
+                signatures.append(CodeSignature(
+                    name=m.group(1), kind='variable', line=i, signature=f"{m.group(1)} = {val}",
+                ))
+            
+            # Include
+            m = re.match(r'^-?include\s+(.+)', stripped)
+            if m:
+                signatures.append(CodeSignature(name=m.group(1).strip(), kind='include', line=i))
+        
+        return signatures
+    
+    @staticmethod
+    def extract_docker_compose(content: str) -> List[CodeSignature]:
+        """Extract docker-compose services, ports, volumes"""
+        signatures = []
+        lines = content.split('\n')
+        current_service = None
+        in_services = False
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.rstrip()
+            
+            # Top-level 'services:' key
+            if re.match(r'^services:\s*$', stripped):
+                in_services = True
+                continue
+            
+            if in_services:
+                # Service name (2-space indent, no further indent)
+                m = re.match(r'^  ([a-zA-Z_][\w-]*):\s*$', stripped)
+                if m:
+                    current_service = m.group(1)
+                    signatures.append(CodeSignature(name=current_service, kind='service', line=i))
+                    continue
+                
+                if current_service:
+                    # Image
+                    m = re.match(r'^\s+image:\s*(.+)', stripped)
+                    if m:
+                        signatures.append(CodeSignature(
+                            name=f"{current_service}→{m.group(1).strip()}", kind='image', line=i,
+                        ))
+                    # Build context
+                    m = re.match(r'^\s+build:\s*(.+)', stripped)
+                    if m and m.group(1).strip() != '':
+                        signatures.append(CodeSignature(
+                            name=f"{current_service}→build:{m.group(1).strip()}", kind='build', line=i,
+                        ))
+                    # Ports
+                    m = re.match(r'^\s+-\s*["\']?(\d+:\d+)', stripped)
+                    if m:
+                        signatures.append(CodeSignature(
+                            name=f"{current_service}:{m.group(1)}", kind='port', line=i,
+                        ))
+                    # Depends_on
+                    m = re.match(r'^\s+-\s*(\w[\w-]*)\s*$', stripped)
+                    if m and 'depends_on' in lines[max(0, i-3):i-1].__repr__():
+                        signatures.append(CodeSignature(
+                            name=f"{current_service}→{m.group(1)}", kind='depends_on', line=i,
+                        ))
+                
+                # End of services block
+                if re.match(r'^[a-z]', stripped) and not stripped.startswith(' '):
+                    in_services = False
+                    current_service = None
+        
+        return signatures
+    
+    @staticmethod
+    def extract_markdown_gist(content: str, max_chars: int = 500) -> List[CodeSignature]:
+        """Extract headings and first paragraph from markdown as a gist"""
+        signatures = []
+        lines = content.split('\n')
+        
+        # Extract headings
+        for i, line in enumerate(lines, 1):
+            m = re.match(r'^(#{1,3})\s+(.+)', line)
+            if m:
+                level = len(m.group(1))
+                signatures.append(CodeSignature(
+                    name=m.group(2).strip(), kind=f'h{level}', line=i,
+                ))
+        
+        # Extract first non-heading, non-empty paragraph as docstring on the first heading
+        first_para = []
+        in_para = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#') and not stripped.startswith('```'):
+                in_para = True
+                first_para.append(stripped)
+                if len(' '.join(first_para)) > max_chars:
+                    break
+            elif in_para and not stripped:
+                break
+        
+        if first_para and signatures:
+            gist = ' '.join(first_para)[:max_chars]
+            signatures[0] = CodeSignature(
+                name=signatures[0].name, kind=signatures[0].kind,
+                line=signatures[0].line, docstring=gist,
+            )
+        
+        return signatures
     
     @staticmethod
     def extract_c(content: str) -> List[CodeSignature]:
@@ -1388,7 +1585,7 @@ class ZipProcessor:
                 
                 filename = os.path.basename(info.filename)
                 ext = os.path.splitext(filename)[1].lower()
-                language = EXT_TO_LANG.get(ext)
+                language = detect_language(info.filename)  # Handles Dockerfile, Makefile, etc.
                 is_binary = ext in BINARY_EXTENSIONS
                 
                 file_info = FileInfo(
@@ -1554,6 +1751,317 @@ def format_signature_summary(manifest: ZipManifest) -> str:
     return "\n".join(lines)
 
 
+def extract_associations(manifest: ZipManifest) -> Dict[str, Any]:
+    """
+    Extract cross-file associations and flows from a processed manifest.
+    Builds: import graph, class hierarchies, service topology, entry points.
+    """
+    imports = {}  # file -> [imported modules/files]
+    class_hierarchy = {}  # class -> parent(s)
+    entry_points = []  # files that are likely entry points
+    services = {}  # from docker-compose
+    dockerfile_info = []  # from Dockerfiles
+    
+    project_files = {f.path for f in manifest.files}
+    # Map basenames for local import resolution
+    basename_to_path = {}
+    for f in manifest.files:
+        stem = os.path.splitext(f.filename)[0]
+        basename_to_path[stem] = f.path
+        basename_to_path[f.filename] = f.path
+    
+    for f in manifest.files:
+        if not f.content or not f.language:
+            continue
+        
+        file_imports = []
+        
+        # Python imports
+        if f.language == 'python':
+            for m in re.finditer(r'^(?:from\s+([\w.]+)\s+)?import\s+([\w., ]+)', f.content, re.MULTILINE):
+                module = m.group(1) or m.group(2).split(',')[0].strip()
+                # Check if it's a local import
+                top_module = module.split('.')[0]
+                if top_module in basename_to_path:
+                    file_imports.append(basename_to_path[top_module])
+                else:
+                    file_imports.append(module)
+            
+            # Entry point detection
+            if '__main__' in f.content or 'if __name__' in f.content:
+                entry_points.append(f.path)
+            if f.filename in ('main.py', 'app.py', 'server.py', 'manage.py', 'wsgi.py', 'asgi.py'):
+                entry_points.append(f.path)
+        
+        # JS/TS imports
+        elif f.language in ('javascript', 'typescript'):
+            for m in re.finditer(r'(?:import|require)\s*(?:\(?\s*[\'"]([^\'"]+)[\'"]|.+from\s+[\'"]([^\'"]+)[\'"])', f.content):
+                target = m.group(1) or m.group(2)
+                if target.startswith('.'):
+                    # Resolve relative import
+                    base_dir = os.path.dirname(f.path)
+                    resolved = os.path.normpath(os.path.join(base_dir, target))
+                    # Try common extensions
+                    for ext in ['', '.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.js']:
+                        if resolved + ext in project_files:
+                            file_imports.append(resolved + ext)
+                            break
+                    else:
+                        file_imports.append(target)
+                else:
+                    file_imports.append(target)  # npm package
+            
+            if f.filename in ('index.js', 'index.ts', 'main.ts', 'main.js', 'app.ts', 'app.js', 'server.ts', 'server.js'):
+                entry_points.append(f.path)
+        
+        # Go imports
+        elif f.language == 'go':
+            for m in re.finditer(r'"([^"]+)"', f.content[:2000]):
+                file_imports.append(m.group(1))
+            if f.filename == 'main.go':
+                entry_points.append(f.path)
+        
+        if file_imports:
+            imports[f.path] = file_imports
+        
+        # Class hierarchy from signatures
+        if f.signatures:
+            for sig in f.signatures:
+                if sig.kind == 'class' and sig.signature:
+                    # Extract parent from signature like "class Foo(Bar, Baz)"
+                    m = re.search(r'\(([^)]+)\)', sig.signature)
+                    if m:
+                        parents = [p.strip() for p in m.group(1).split(',') if p.strip()]
+                        if parents and parents != ['']:
+                            class_hierarchy[f"{f.path}:{sig.name}"] = parents
+        
+        # Docker-compose services
+        if f.language == 'docker-compose' and f.signatures:
+            for sig in f.signatures:
+                if sig.kind == 'service':
+                    services[sig.name] = {'file': f.path, 'line': sig.line}
+                elif sig.kind in ('image', 'build', 'port', 'depends_on'):
+                    svc_name = sig.name.split('→')[0] if '→' in sig.name else sig.name.split(':')[0]
+                    if svc_name in services:
+                        services[svc_name][sig.kind] = sig.name
+        
+        # Dockerfile info
+        if f.language == 'dockerfile' and f.signatures:
+            info = {'file': f.path, 'stages': [], 'ports': [], 'cmd': None}
+            for sig in f.signatures:
+                if sig.kind in ('from', 'stage'):
+                    info['stages'].append(sig.name)
+                elif sig.kind == 'expose':
+                    info['ports'].append(sig.name)
+                elif sig.kind in ('cmd', 'entrypoint'):
+                    info['cmd'] = sig.name
+            dockerfile_info.append(info)
+    
+    return {
+        'imports': imports,
+        'class_hierarchy': class_hierarchy,
+        'entry_points': list(set(entry_points)),
+        'services': services,
+        'dockerfile_info': dockerfile_info,
+    }
+
+
+def extract_call_graph(manifest: ZipManifest) -> Dict[str, List[str]]:
+    """
+    Extract function-level call graph from source files.
+    Returns dict of 'file:function' -> ['file:called_function', ...].
+    Static analysis — best effort, not perfect.
+    """
+    # Build lookup: function_name -> [(file, full_key)]
+    func_index = {}  # name -> [(file_path, "file:name")]
+    method_owners = {}  # (file, method_name) -> class_name
+    
+    for f in manifest.files:
+        if not f.signatures:
+            continue
+        current_class = None
+        for sig in f.signatures:
+            if sig.kind == 'class':
+                current_class = sig.name
+            elif sig.kind in ('function', 'method'):
+                key = f"{f.path}:{sig.name}"
+                if sig.name not in func_index:
+                    func_index[sig.name] = []
+                func_index[sig.name].append((f.path, key))
+                if sig.kind == 'method' and current_class:
+                    method_owners[(f.path, sig.name)] = current_class
+    
+    call_graph = {}  # "file:func" -> ["file:called_func", ...]
+    
+    for f in manifest.files:
+        if not f.content or not f.signatures or not f.language:
+            continue
+        
+        lines = f.content.split('\n')
+        
+        # Build line ranges for each function/method in this file
+        func_ranges = []  # [(start_line, end_line, key)]
+        sorted_sigs = sorted(
+            [s for s in f.signatures if s.kind in ('function', 'method')],
+            key=lambda s: s.line
+        )
+        for i, sig in enumerate(sorted_sigs):
+            start = sig.line - 1  # 0-indexed
+            end = sorted_sigs[i + 1].line - 2 if i + 1 < len(sorted_sigs) else len(lines) - 1
+            key = f"{f.path}:{sig.name}"
+            func_ranges.append((start, end, key))
+        
+        if not func_ranges:
+            continue
+        
+        # For each function body, find calls to known functions
+        # Pattern matches: word( — function call syntax
+        call_pattern = re.compile(r'(?<![.\w])(\w+)\s*\(')
+        # self.method() or obj.method()
+        method_call_pattern = re.compile(r'(?:self|this|cls)\s*\.\s*(\w+)\s*\(')
+        
+        for start, end, caller_key in func_ranges:
+            calls = set()
+            body = '\n'.join(lines[start:end + 1])
+            
+            # Direct function calls
+            for m in call_pattern.finditer(body):
+                called_name = m.group(1)
+                # Skip built-ins and common non-functions
+                if called_name in ('if', 'for', 'while', 'return', 'print', 'len', 'str',
+                                   'int', 'float', 'list', 'dict', 'set', 'tuple', 'range',
+                                   'isinstance', 'hasattr', 'getattr', 'setattr', 'super',
+                                   'type', 'map', 'filter', 'sorted', 'enumerate', 'zip',
+                                   'True', 'False', 'None', 'self', 'cls', 'this'):
+                    continue
+                if called_name in func_index:
+                    for target_file, target_key in func_index[called_name]:
+                        if target_key != caller_key:  # Skip self-recursion noise
+                            calls.add(target_key)
+            
+            # Method calls (self.method, this.method)
+            for m in method_call_pattern.finditer(body):
+                called_name = m.group(1)
+                if called_name in func_index:
+                    # Prefer same-file match
+                    for target_file, target_key in func_index[called_name]:
+                        if target_file == f.path and target_key != caller_key:
+                            calls.add(target_key)
+                            break
+                    else:
+                        # Cross-file
+                        for target_file, target_key in func_index[called_name]:
+                            if target_key != caller_key:
+                                calls.add(target_key)
+            
+            if calls:
+                call_graph[caller_key] = sorted(calls)
+    
+    return call_graph
+
+
+def build_manifest_from_session_files(session_files: Dict[str, str]) -> ZipManifest:
+    """
+    Build a lightweight ZipManifest from session files (for refresh after tool edits).
+    Used by the in-loop signature/association refresh.
+    """
+    files = []
+    signature_index = {}
+    languages = {}
+    total_size = 0
+    
+    for filepath, content in session_files.items():
+        if not content:
+            continue
+        
+        filename = os.path.basename(filepath)
+        ext = os.path.splitext(filename)[1].lower()
+        language = detect_language(filepath)
+        size = len(content.encode('utf-8', errors='replace'))
+        total_size += size
+        
+        if language:
+            languages[language] = languages.get(language, 0) + 1
+        
+        sigs = []
+        if language:
+            sigs = SignatureExtractor.extract(content, language)
+        
+        fi = FileInfo(
+            path=filepath,
+            filename=filename,
+            extension=ext,
+            size=size,
+            language=language,
+            is_binary=False,
+            signatures=sigs,
+            content=content,
+        )
+        files.append(fi)
+        
+        if sigs:
+            from dataclasses import asdict
+            signature_index[filepath] = [asdict(s) for s in sigs]
+    
+    return ZipManifest(
+        total_files=len(files),
+        total_size=total_size,
+        files=files,
+        signature_index=signature_index,
+        file_tree={},  # Not needed for refresh
+        languages=languages,
+    )
+
+
+def extract_markdown_gists(manifest: ZipManifest, max_per_file: int = 300) -> Dict[str, str]:
+    """
+    Extract gists from README and .md files (excluding agent/memory files).
+    Returns dict of filepath -> gist string.
+    """
+    gists = {}
+    
+    for f in manifest.files:
+        if not f.content or f.language != 'markdown':
+            continue
+        basename = f.filename.lower()
+        # Skip agent memory files
+        if basename.startswith('agent') and basename.endswith('.md'):
+            continue
+        if 'learnedsummary' in basename:
+            continue
+        
+        lines = f.content.split('\n')
+        # Get title (first heading)
+        title = None
+        gist_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            if not title and stripped.startswith('#'):
+                title = re.sub(r'^#+\s*', '', stripped)
+                continue
+            # Get headings as outline
+            if stripped.startswith('#'):
+                heading = re.sub(r'^#+\s*', '', stripped)
+                level = len(stripped) - len(stripped.lstrip('#'))
+                gist_lines.append(f"{'  ' * (level - 1)}• {heading}")
+            # Get first paragraph
+            elif not gist_lines and stripped and not stripped.startswith('```'):
+                gist_lines.append(stripped)
+                if len(' '.join(gist_lines)) > max_per_file:
+                    break
+        
+        if title or gist_lines:
+            parts = []
+            if title:
+                parts.append(title)
+            if gist_lines:
+                parts.append('\n'.join(gist_lines[:10]))
+            gists[f.path] = '\n'.join(parts)[:max_per_file]
+    
+    return gists
+
+
 def format_llm_manifest(manifest: ZipManifest, filename: str, upload_timestamp: str, include_small_files: bool = True, small_file_threshold: int = 4000) -> str:
     """
     Format a manifest specifically for LLM context injection.
@@ -1632,6 +2140,122 @@ def format_llm_manifest(manifest: ZipManifest, filename: str, upload_timestamp: 
                 
                 if len(sigs) > 20:
                     lines.append(f"  ... and {len(sigs) - 20} more")
+        lines.append("")
+    
+    # NC-0.8.0.12: Associations and flows
+    assoc = extract_associations(manifest)
+    
+    has_assoc = any([assoc['entry_points'], assoc['imports'], assoc['class_hierarchy'],
+                     assoc['services'], assoc['dockerfile_info']])
+    if has_assoc:
+        lines.append("=" * 60)
+        lines.append("PROJECT ARCHITECTURE & FLOWS:")
+        lines.append("=" * 60)
+        
+        # Entry points
+        if assoc['entry_points']:
+            lines.append("\nENTRY POINTS:")
+            for ep in assoc['entry_points']:
+                lines.append(f"  → {ep}")
+        
+        # Service topology (docker-compose)
+        if assoc['services']:
+            lines.append("\nSERVICES (docker-compose):")
+            for svc_name, info in assoc['services'].items():
+                parts = [f"  {svc_name}"]
+                if 'image' in info:
+                    parts.append(f"image={info['image'].split('→', 1)[-1]}")
+                if 'build' in info:
+                    parts.append(f"build={info['build'].split('→', 1)[-1]}")
+                if 'port' in info:
+                    parts.append(f"port={info['port'].split(':', 1)[-1]}")
+                if 'depends_on' in info:
+                    parts.append(f"depends_on={info['depends_on'].split('→', 1)[-1]}")
+                lines.append(' | '.join(parts))
+        
+        # Dockerfile info
+        if assoc['dockerfile_info']:
+            lines.append("\nDOCKER BUILDS:")
+            for d in assoc['dockerfile_info']:
+                parts = [f"  {d['file']}"]
+                if d['stages']:
+                    parts.append(f"stages=[{', '.join(d['stages'])}]")
+                if d['ports']:
+                    parts.append(f"ports=[{', '.join(d['ports'])}]")
+                if d['cmd']:
+                    parts.append(f"cmd={d['cmd'][:60]}")
+                lines.append(' | '.join(parts))
+        
+        # Import graph (local files only, limit to top importers)
+        local_imports = {}
+        for src, targets in assoc['imports'].items():
+            local = [t for t in targets if t in {f.path for f in manifest.files}]
+            if local:
+                local_imports[src] = local
+        
+        if local_imports:
+            lines.append("\nIMPORT GRAPH (local files):")
+            # Sort by number of imports descending
+            for src, targets in sorted(local_imports.items(), key=lambda x: -len(x[1]))[:20]:
+                lines.append(f"  {src} → {', '.join(targets)}")
+        
+        # Class hierarchy
+        if assoc['class_hierarchy']:
+            lines.append("\nCLASS HIERARCHY:")
+            for cls, parents in sorted(assoc['class_hierarchy'].items()):
+                lines.append(f"  {cls.split(':')[-1]} extends {', '.join(parents)}")
+        
+        lines.append("")
+    
+    # NC-0.8.0.12: Call graph
+    call_graph = extract_call_graph(manifest)
+    if call_graph:
+        lines.append("=" * 60)
+        lines.append("CALL GRAPH (function → functions it calls):")
+        lines.append("=" * 60)
+        
+        # Build reverse graph for "called by" info
+        called_by = {}  # target -> [callers]
+        for caller, callees in call_graph.items():
+            for callee in callees:
+                if callee not in called_by:
+                    called_by[callee] = []
+                called_by[callee].append(caller)
+        
+        # Output: group by file, show calls and callers
+        by_file = {}
+        all_keys = set(call_graph.keys()) | set(called_by.keys())
+        for key in all_keys:
+            file_path = key.split(':')[0]
+            func_name = key.split(':')[1] if ':' in key else key
+            if file_path not in by_file:
+                by_file[file_path] = []
+            by_file[file_path].append((func_name, key))
+        
+        for file_path in sorted(by_file.keys()):
+            lines.append(f"\n  {file_path}:")
+            for func_name, key in sorted(by_file[file_path]):
+                parts = []
+                if key in call_graph:
+                    callees = [c.split(':')[-1] for c in call_graph[key][:5]]
+                    parts.append(f"calls: {', '.join(callees)}")
+                if key in called_by:
+                    callers = [c.split(':')[-1] for c in called_by[key][:5]]
+                    parts.append(f"called_by: {', '.join(callers)}")
+                if parts:
+                    lines.append(f"    {func_name} | {' | '.join(parts)}")
+        
+        lines.append("")
+    
+    # NC-0.8.0.12: Markdown/README gists
+    gists = extract_markdown_gists(manifest)
+    if gists:
+        lines.append("=" * 60)
+        lines.append("DOCUMENTATION OVERVIEW:")
+        lines.append("=" * 60)
+        for path, gist in sorted(gists.items()):
+            lines.append(f"\n### {path}")
+            lines.append(gist)
         lines.append("")
     
     # Include small files directly in the manifest

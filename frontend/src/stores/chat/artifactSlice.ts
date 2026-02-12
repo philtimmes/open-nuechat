@@ -128,35 +128,80 @@ export const createArtifactSlice: SliceCreator<ArtifactSlice> = (set, get) => ({
         return artKey === normalizedKey || artKey.split('/').pop() === normalizedKey.split('/').pop();
       };
       
-      // First check if it's in artifacts
-      let foundInArtifacts = state.artifacts.some(matches);
-      let foundInUploaded = state.uploadedArtifacts.some(matches);
+      // NC-0.8.0.12: Version tracking - find highest existing version for this file
+      const allMatching = [
+        ...state.artifacts.filter(matches),
+        ...state.uploadedArtifacts.filter(matches),
+      ];
+      const maxVersion = allMatching.reduce((max, a) => Math.max(max, a.version || 1), 0);
+      const newVersion = maxVersion + 1;
       
-      // Update artifacts array
+      // Create versioned artifact
+      const versionedArtifact: Artifact = {
+        ...artifact,
+        version: newVersion,
+        id: `${artifact.id || key}_v${newVersion}`,
+        title: artifact.title || normalizedKey.split('/').pop() || normalizedKey,
+      };
+      
+      // Mark old versions in uploadedArtifacts (don't remove - keep history)
+      // Add the new version to the list
+      const newUploadedArtifacts = [...state.uploadedArtifacts, versionedArtifact];
+      
+      // For artifacts (message-extracted), replace in-place to avoid clutter
+      let foundInArtifacts = state.artifacts.some(matches);
       const newArtifacts = state.artifacts.map((a) => {
         if (matches(a)) {
-          return { ...a, ...artifact };
+          return { ...a, ...versionedArtifact };
         }
         return a;
       });
       
-      // Update uploadedArtifacts array
-      const newUploadedArtifacts = state.uploadedArtifacts.map((a) => {
-        if (matches(a)) {
-          return { ...a, ...artifact };
-        }
-        return a;
-      });
-      
-      // If not found in either, add to artifacts
-      if (!foundInArtifacts && !foundInUploaded) {
-        newArtifacts.push(artifact);
+      // If not found in artifacts at all, add it there too
+      if (!foundInArtifacts && !allMatching.length) {
+        newArtifacts.push(versionedArtifact);
       }
       
       return { 
         artifacts: newArtifacts,
         uploadedArtifacts: newUploadedArtifacts,
+        // Auto-select the updated file
+        selectedArtifact: versionedArtifact,
+        showArtifacts: true,
       };
     });
+  },
+
+  // NC-0.8.0.12: Revert to an older version by "touching" it (updating created_at to now)
+  revertArtifact: (artifactId: string) => {
+    const now = new Date().toISOString();
+    set((state) => {
+      const newUploaded = state.uploadedArtifacts.map((a) =>
+        a.id === artifactId ? { ...a, created_at: now } : a
+      );
+      const newArtifacts = state.artifacts.map((a) =>
+        a.id === artifactId ? { ...a, created_at: now } : a
+      );
+      
+      // Find the touched artifact to auto-select it
+      const reverted = newUploaded.find(a => a.id === artifactId)
+        || newArtifacts.find(a => a.id === artifactId);
+      
+      return {
+        uploadedArtifacts: newUploaded,
+        artifacts: newArtifacts,
+        selectedArtifact: reverted || state.selectedArtifact,
+      };
+    });
+    
+    // Also update backend session storage with the reverted content
+    const state = get();
+    const reverted = [...state.uploadedArtifacts, ...state.artifacts].find(a => a.id === artifactId);
+    if (reverted?.filename && state.currentChat?.id) {
+      api.put(`/chats/${state.currentChat.id}/revert-file`, {
+        filename: reverted.filename,
+        content: reverted.content,
+      }).catch(err => console.warn('[revertArtifact] Backend sync failed:', err));
+    }
   },
 });

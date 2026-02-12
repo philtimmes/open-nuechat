@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type { Artifact } from '../types';
 import { groupArtifactsByFilename, type ArtifactGroup } from '../lib/artifacts';
 import { formatFileSize, formatMessageTime } from '../lib/formatters';
+import { useChatStore } from '../stores/chat';
 import api from '../lib/api';
 
 interface ArtifactsPanelProps {
@@ -30,6 +31,7 @@ export default function ArtifactsPanel({
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [isExportingPng, setIsExportingPng] = useState(false);
   const [currentPath, setCurrentPath] = useState<string[]>([]);  // NC-0.8.0.7: Folder navigation
+  const [revertConfirm, setRevertConfirm] = useState<Artifact | null>(null);  // NC-0.8.0.12: Revert confirmation
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const fullscreenIframeRef = useRef<HTMLIFrameElement>(null);
   const mermaidRef = useRef<HTMLDivElement>(null);
@@ -828,29 +830,77 @@ export default function ArtifactsPanel({
               const isLatest = idx === 0;
               
               return (
-                <button
+                <div
                   key={version.id}
-                  onClick={() => handleVersionClick(version)}
-                  className="w-full p-3 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)] text-left transition-colors"
+                  className="p-3 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)] transition-colors"
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm font-mono text-[var(--color-primary)] w-8">v{versionNum}</span>
-                    <div className="flex-1">
-                      <p className="text-sm text-[var(--color-text)]">{formatMessageTime(version.created_at)}</p>
+                  <button
+                    onClick={() => handleVersionClick(version)}
+                    className="w-full text-left"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm font-mono text-[var(--color-primary)] w-8">v{versionNum}</span>
+                      <div className="flex-1">
+                        <p className="text-sm text-[var(--color-text)]">{formatMessageTime(version.created_at)}</p>
+                      </div>
+                      {isLatest && (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--color-success)]/10 text-[var(--color-success)]">
+                          Latest
+                        </span>
+                      )}
+                      {!isLatest && (
+                        <span
+                          role="button"
+                          onClick={(e) => { e.stopPropagation(); setRevertConfirm(version); }}
+                          className="text-xs px-1.5 py-0.5 rounded text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10 cursor-pointer"
+                        >
+                          Revert
+                        </span>
+                      )}
+                      <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
                     </div>
-                    {isLatest && (
-                      <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--color-success)]/10 text-[var(--color-success)]">
-                        Latest
-                      </span>
-                    )}
-                    <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
-                  </div>
-                </button>
+                  </button>
+                </div>
               );
             })}
           </div>
+          
+          {/* NC-0.8.0.12: Revert confirmation dialog */}
+          {revertConfirm && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setRevertConfirm(null)}>
+              <div className="bg-[var(--color-surface)] rounded-lg p-6 max-w-md mx-4 shadow-xl border border-[var(--color-border)]" onClick={e => e.stopPropagation()}>
+                <h3 className="text-lg font-semibold text-[var(--color-text)] mb-2">Revert File?</h3>
+                <p className="text-sm text-[var(--color-text-secondary)] mb-1">
+                  Revert <strong>{selectedGroup.displayName}</strong> to the version from{' '}
+                  <strong>{formatMessageTime(revertConfirm.created_at)}</strong>?
+                </p>
+                <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+                  This will make the older version the current one. No versions are deleted.
+                </p>
+                <div className="flex gap-3 justify-end">
+                  <button
+                    onClick={() => setRevertConfirm(null)}
+                    className="px-4 py-2 text-sm rounded-lg border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-hover)]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      useChatStore.getState().revertArtifact(revertConfirm.id);
+                      setRevertConfirm(null);
+                      // Refresh the group view
+                      setView('list');
+                    }}
+                    className="px-4 py-2 text-sm rounded-lg bg-[var(--color-primary)] text-white hover:opacity-90"
+                  >
+                    Revert
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );

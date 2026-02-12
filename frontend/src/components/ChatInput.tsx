@@ -230,7 +230,78 @@ export default function ChatInput({
     handleFileSelect(e.dataTransfer.files);
   }, []);
   
-  // Paste handler for files
+  // NC-0.8.0.12: Detect content type from pasted text
+  const detectPastedContentType = useCallback((text: string): { ext: string; language: string; type: Artifact['type'] } => {
+    const trimmed = text.trimStart();
+    
+    // JSON
+    if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && (trimmed.endsWith('}') || trimmed.endsWith(']'))) {
+      try { JSON.parse(trimmed); return { ext: '.json', language: 'json', type: 'json' }; } catch {}
+    }
+    
+    // HTML/XML
+    if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html') || /<[a-z][\s\S]*>/i.test(trimmed.slice(0, 500))) {
+      if (trimmed.includes('<html') || trimmed.includes('<!DOCTYPE')) return { ext: '.html', language: 'html', type: 'html' };
+      if (trimmed.startsWith('<?xml')) return { ext: '.xml', language: 'xml', type: 'code' };
+    }
+    
+    // CSS
+    if (/^[.#@:][a-zA-Z]/.test(trimmed) && trimmed.includes('{') && /[a-z-]+\s*:/.test(trimmed)) {
+      return { ext: '.css', language: 'css', type: 'code' };
+    }
+    
+    // Python
+    if (/^(import |from |def |class |#!.*python)/.test(trimmed)) {
+      return { ext: '.py', language: 'python', type: 'code' };
+    }
+    
+    // JavaScript/TypeScript
+    if (/^(import |export |const |let |var |function |\/\/ |'use strict')/.test(trimmed)) {
+      if (trimmed.includes(': string') || trimmed.includes(': number') || trimmed.includes('interface ') || trimmed.includes('<T>')) {
+        return { ext: '.ts', language: 'typescript', type: 'code' };
+      }
+      return { ext: '.js', language: 'javascript', type: 'code' };
+    }
+    
+    // C#
+    if (/^(using |namespace |public class |private |protected )/.test(trimmed) && trimmed.includes('{')) {
+      return { ext: '.cs', language: 'csharp', type: 'code' };
+    }
+    
+    // SQL
+    if (/^(SELECT |INSERT |UPDATE |DELETE |CREATE |ALTER |DROP |WITH )/i.test(trimmed)) {
+      return { ext: '.sql', language: 'sql', type: 'code' };
+    }
+    
+    // Markdown
+    if (/^#{1,3}\s/.test(trimmed) || (trimmed.includes('\n## ') && trimmed.includes('\n- '))) {
+      return { ext: '.md', language: 'markdown', type: 'markdown' };
+    }
+    
+    // CSV
+    if (trimmed.split('\n').length > 2) {
+      const lines = trimmed.split('\n').slice(0, 5);
+      const commas = lines.map(l => (l.match(/,/g) || []).length);
+      if (commas[0] > 1 && commas.every(c => c === commas[0])) {
+        return { ext: '.csv', language: 'csv', type: 'csv' };
+      }
+    }
+    
+    // YAML
+    if (/^[a-z_]+:/im.test(trimmed) && !trimmed.includes('{') && trimmed.includes('\n  ')) {
+      return { ext: '.yaml', language: 'yaml', type: 'code' };
+    }
+    
+    // Shell
+    if (/^(#!\/bin\/(ba)?sh|set -|echo |export )/.test(trimmed)) {
+      return { ext: '.sh', language: 'bash', type: 'code' };
+    }
+    
+    // Default: plain text
+    return { ext: '.txt', language: 'text', type: 'document' };
+  }, []);
+
+  // Paste handler for files AND large text pastes
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = e.clipboardData.items;
     const files: File[] = [];
@@ -246,12 +317,60 @@ export default function ChatInput({
     
     if (files.length > 0) {
       e.preventDefault();
-      // Create a FileList-like object
       const dt = new DataTransfer();
       files.forEach(f => dt.items.add(f));
       handleFileSelect(dt.files);
+      return;
     }
-  }, []);
+    
+    // NC-0.8.0.12: Check for large text paste (>60KB)
+    const LARGE_PASTE_THRESHOLD = 60 * 1024; // 60KB
+    const pastedText = e.clipboardData.getData('text/plain');
+    
+    if (pastedText && pastedText.length > LARGE_PASTE_THRESHOLD) {
+      e.preventDefault();
+      
+      // Detect content type
+      const detected = detectPastedContentType(pastedText);
+      const timestamp = Date.now();
+      const filename = `pasted_content_${timestamp}${detected.ext}`;
+      
+      // Create artifact
+      const artifact: Artifact = {
+        id: `paste_${timestamp}`,
+        type: detected.type,
+        title: filename,
+        filename: filename,
+        content: pastedText,
+        language: detected.language,
+        source: 'upload',
+        created_at: new Date().toISOString(),
+        size: pastedText.length,
+      };
+      
+      // Add to artifacts list
+      if (onFilesUploaded) {
+        onFilesUploaded([artifact]);
+      }
+      
+      // Add as attachment so LLM gets notified
+      setProcessedAttachments((prev) => [...prev, {
+        type: 'file',
+        filename: filename,
+        mime_type: `text/${detected.language}`,
+        content: pastedText,
+      }]);
+      
+      // Add a visual attachment indicator
+      const pseudoFile = new File([pastedText], filename, { type: `text/${detected.language}` });
+      setAttachments((prev) => [...prev, pseudoFile]);
+      
+      // Put a short reference in the message box
+      setMessage((prev) => prev + (prev ? '\n' : '') + `[Pasted ${(pastedText.length / 1024).toFixed(0)}KB of ${detected.language} content as ${filename}]`);
+      
+      console.log(`[ChatInput] Large paste detected: ${pastedText.length} bytes → ${filename} (${detected.language})`);
+    }
+  }, [onFilesUploaded, detectPastedContentType]);
   
   return (
     <div

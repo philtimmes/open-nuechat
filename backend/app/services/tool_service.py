@@ -180,6 +180,14 @@ class OpenAPIClient:
                 scheme = self._spec.get('schemes', ['https'])[0]
                 self._base_url = f"{scheme}://{self._spec['host']}{self._spec.get('basePath', '')}"
             
+            # NC-0.8.0.12: If no base URL in spec, derive from spec URL
+            if not self._base_url:
+                # Extract base URL from spec_url (e.g., http://localhost:8000/openapi.json -> http://localhost:8000)
+                from urllib.parse import urlparse
+                parsed = urlparse(self.spec_url)
+                self._base_url = f"{parsed.scheme}://{parsed.netloc}"
+                logger.info(f"Derived base URL from spec URL: {self._base_url}")
+            
             return self._spec
     
     async def discover_tools(self) -> List[Dict[str, Any]]:
@@ -211,14 +219,60 @@ class OpenAPIClient:
                     content = operation['requestBody'].get('content', {})
                     json_schema = content.get('application/json', {}).get('schema', {})
                     if json_schema:
-                        parameters.append({
-                            "name": "body",
-                            "type": "object",
-                            "required": operation['requestBody'].get('required', False),
-                            "description": "Request body",
-                            "in": "body",
-                            "schema": json_schema,
-                        })
+                        # NC-0.8.0.12: Resolve $ref if present
+                        if '$ref' in json_schema:
+                            ref_path = json_schema['$ref']
+                            # Parse reference like "#/components/schemas/RetrievalQueryInput"
+                            if ref_path.startswith('#/'):
+                                parts = ref_path[2:].split('/')
+                                resolved = spec
+                                for part in parts:
+                                    resolved = resolved.get(part, {})
+                                json_schema = resolved
+                        
+                        # NC-0.8.0.12: Expose body properties directly instead of wrapping in 'body'
+                        # This makes it clearer to the LLM what parameters to send
+                        body_props = json_schema.get('properties', {})
+                        body_required = json_schema.get('required', [])
+                        
+                        if body_props:
+                            for prop_name, prop_schema in body_props.items():
+                                # Resolve nested $ref in property schema
+                                if '$ref' in prop_schema:
+                                    ref_path = prop_schema['$ref']
+                                    if ref_path.startswith('#/'):
+                                        parts = ref_path[2:].split('/')
+                                        resolved = spec
+                                        for part in parts:
+                                            resolved = resolved.get(part, {})
+                                        prop_schema = resolved
+                                
+                                param_type = prop_schema.get('type', 'string')
+                                # Handle array types
+                                if param_type == 'array':
+                                    items = prop_schema.get('items', {})
+                                    item_type = items.get('type', 'string')
+                                    param_desc = prop_schema.get('description', f'Array of {item_type}')
+                                else:
+                                    param_desc = prop_schema.get('description', '')
+                                
+                                parameters.append({
+                                    "name": prop_name,
+                                    "type": param_type,
+                                    "required": prop_name in body_required,
+                                    "description": param_desc,
+                                    "in": "body",
+                                })
+                        else:
+                            # Fallback: wrap entire schema as 'body' param
+                            parameters.append({
+                                "name": "body",
+                                "type": "object",
+                                "required": operation['requestBody'].get('required', False),
+                                "description": "Request body",
+                                "in": "body",
+                                "schema": json_schema,
+                            })
                 
                 tools.append({
                     "name": op_id,
@@ -296,9 +350,38 @@ class OpenAPIClient:
                 elif param.get('in') == 'header':
                     pass  # Handle separately
         
-        # Handle body parameter
+        # Handle body parameter - NC-0.8.0.12: Better request body handling
         if 'body' in params:
             body = params['body']
+        elif 'requestBody' in operation:
+            # If operation has a requestBody but no 'body' param was passed,
+            # assume all non-path/query params are meant for the body
+            body_schema = operation['requestBody'].get('content', {}).get('application/json', {}).get('schema', {})
+            if body_schema:
+                # Resolve $ref if present
+                if '$ref' in body_schema:
+                    ref_path = body_schema['$ref']
+                    if ref_path.startswith('#/'):
+                        parts = ref_path[2:].split('/')
+                        resolved = spec
+                        for part in parts:
+                            resolved = resolved.get(part, {})
+                        body_schema = resolved
+                
+                # Get properties from the resolved schema
+                schema_props = body_schema.get('properties', {})
+                if schema_props:
+                    # Build body from schema properties
+                    body = {}
+                    for prop_name in schema_props:
+                        if prop_name in params:
+                            body[prop_name] = params[prop_name]
+                    # If no matching props found, pass all remaining params
+                    if not body:
+                        body = {k: v for k, v in params.items() if k not in path_params and k not in query_params}
+                else:
+                    # No properties defined, pass all remaining params
+                    body = {k: v for k, v in params.items() if k not in path_params and k not in query_params}
         
         # Substitute path parameters
         for name, value in path_params.items():
@@ -505,6 +588,9 @@ class ToolService:
                     "name": llm_tool_name,
                     "description": f"[{tool.name}] {schema.get('description', '')}",
                     "input_schema": input_schema,
+                    "_tool_type": tool.tool_type.value,  # NC-0.8.0.12: Add tool type for filtering
+                    "_tool_id": tool.id,
+                    "_tool_name": tool.name,
                 }
                 
                 tool_definitions.append(tool_def)

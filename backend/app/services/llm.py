@@ -726,6 +726,7 @@ class LLMService:
             filtered_content = ""
             tool_results = []
             tool_call_history = []  # NC-0.8.0.8: Track tool calls for history
+            generated_artifacts = []  # NC-0.8.0.11: Track generated charts/images from execute_python
             
             # Automatic search disabled - use filter chains for web search orchestration
             # search_tools = [t for t in (tools or []) if 'search' in t.get('name', '').lower() or 'fetch' in t.get('name', '').lower()]
@@ -919,12 +920,19 @@ class LLMService:
             
             # NC-0.8.0.7: Track tool calls for multi-turn tool use
             streaming_tool_calls = {}
-            max_tool_rounds = 5  # Prevent infinite tool loops
+            # NC-0.8.0.12: No artificial tool round limit - let LLM use as many tools as needed
+            # Context overflow is handled by archiving old tool messages to agent memory
             tool_round = 0
-            hit_max_tool_rounds = False
+            consecutive_dedup_hits = 0  # NC-0.8.0.12: Track repeated tool calls
+            
+            # Get context size for overflow detection
+            from app.services.settings_service import SettingsService as _SS
+            _tool_context_limit = await _SS.get_int(db, "llm_context_size") or 200000
+            # Archive when messages exceed 70% of context to leave room for response
+            _tool_overflow_threshold = int(_tool_context_limit * 0.7)
             
             try:
-                while tool_round < max_tool_rounds:
+                while True:
                     tool_round += 1
                     pending_tool_calls = False
                     
@@ -1044,15 +1052,138 @@ class LLMService:
                             tool_name = tc_data["name"]
                             try:
                                 tool_args = json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
-                            except json.JSONDecodeError:
+                            except json.JSONDecodeError as je:
+                                logger.warning(f"[LLM_TOOLS] Failed to parse tool arguments: {je}")
+                                logger.warning(f"[LLM_TOOLS] Raw arguments string: {tc_data['arguments'][:500] if tc_data['arguments'] else 'None'}")
                                 tool_args = {}
+                            
+                            # NC-0.8.0.12: Dedup - check if exact same tool+args was already called
+                            dedup_key = f"{tool_name}:{json.dumps(tool_args, sort_keys=True)}"
+                            cached_result = None
+                            for prev in tool_call_history:
+                                if prev.get("success") and prev.get("_dedup_key") == dedup_key:
+                                    cached_result = prev.get("_result_str")
+                                    break
+                            
+                            if cached_result is not None:
+                                consecutive_dedup_hits += 1
+                                logger.info(f"[LLM_TOOLS] DEDUP: {tool_name} already called with same args (consecutive={consecutive_dedup_hits})")
+                                
+                                # Remove ALL previous tool call/result pairs for this exact dedup_key
+                                cleaned_messages = []
+                                i = 0
+                                removed = 0
+                                while i < len(messages):
+                                    msg = messages[i]
+                                    if (msg.get("role") == "assistant" and msg.get("tool_calls") and
+                                        i + 1 < len(messages) and messages[i + 1].get("role") == "tool"):
+                                        tc_list = msg.get("tool_calls", [])
+                                        if len(tc_list) == 1:
+                                            fn = tc_list[0].get("function", {})
+                                            try:
+                                                prev_args = json.loads(fn.get("arguments", "{}"))
+                                                prev_key = f"{fn.get('name', '')}:{json.dumps(prev_args, sort_keys=True)}"
+                                            except:
+                                                prev_key = None
+                                            if prev_key == dedup_key:
+                                                removed += 1
+                                                i += 2
+                                                continue
+                                    cleaned_messages.append(msg)
+                                    i += 1
+                                
+                                if removed > 0:
+                                    messages = cleaned_messages
+                                    logger.info(f"[LLM_TOOLS] DEDUP: Removed {removed} old pairs for {tool_name}")
+                                
+                                # Add back ONE pair — but NO result content, just a pointer
+                                validated_args = json.dumps(tool_args)
+                                messages.append({
+                                    "role": "assistant",
+                                    "content": None,
+                                    "tool_calls": [{
+                                        "id": tc_data["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_name,
+                                            "arguments": validated_args,
+                                        }
+                                    }]
+                                })
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc_data["id"],
+                                    "content": f"DUPLICATE: You already called {tool_name} with these exact arguments. The result is in TOOL_RESPONSE_HISTORY above. Use that instead of re-requesting.",
+                                })
+                                
+                                yield {
+                                    "type": "tool_call",
+                                    "tool_name": tool_name,
+                                    "arguments": tool_args,
+                                    "result": "DUPLICATE - see context",
+                                }
+                                continue
                             
                             logger.info(f"[LLM_TOOLS] Executing tool: {tool_name} with args: {tool_args}")
                             tool_calls_count += 1
+                            consecutive_dedup_hits = 0  # Fresh call resets the counter
                             
                             try:
                                 result = await tool_executor(tool_name, tool_args)
-                                result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                                
+                                # NC-0.8.0.11: Handle direct_to_chat results (images and text)
+                                # Send to frontend BEFORE stripping for LLM
+                                if isinstance(result, dict) and result.get("direct_to_chat"):
+                                    # Send image directly to chat
+                                    if result.get("image_base64"):
+                                        filename = result.get("filename", "output.png")
+                                        yield {
+                                            "type": "direct_image",
+                                            "tool_name": tool_name,
+                                            "image_base64": result["image_base64"],
+                                            "mime_type": result.get("image_mime_type", "image/png"),
+                                            "filename": filename,
+                                        }
+                                        # NC-0.8.0.11: Collect artifact for persistence
+                                        generated_artifacts.append({
+                                            "id": f"img_{len(generated_artifacts)}",
+                                            "type": "image",
+                                            "title": filename,
+                                            "filename": filename,
+                                            "content": f"data:{result.get('image_mime_type', 'image/png')};base64,{result['image_base64']}",
+                                            "source": "generated",
+                                            "created_at": datetime.now(timezone.utc).isoformat(),
+                                        })
+                                    # Send text directly to chat
+                                    if result.get("direct_text"):
+                                        filename = result.get("filename", "output.txt")
+                                        yield {
+                                            "type": "direct_text",
+                                            "tool_name": tool_name,
+                                            "text": result["direct_text"],
+                                            "filename": filename,
+                                        }
+                                        # NC-0.8.0.11: Collect artifact for persistence
+                                        artifact_type = "document"
+                                        if filename.endswith(".csv"): artifact_type = "csv"
+                                        elif filename.endswith(".json"): artifact_type = "json"
+                                        elif filename.endswith(".md"): artifact_type = "markdown"
+                                        generated_artifacts.append({
+                                            "id": f"txt_{len(generated_artifacts)}",
+                                            "type": artifact_type,
+                                            "title": filename,
+                                            "filename": filename,
+                                            "content": result["direct_text"],
+                                            "source": "generated",
+                                            "created_at": datetime.now(timezone.utc).isoformat(),
+                                        })
+                                    
+                                    # Strip large data from result before sending to LLM
+                                    result_for_llm = {k: v for k, v in result.items() 
+                                                      if k not in ("image_base64", "direct_text")}
+                                    result_str = json.dumps(result_for_llm)
+                                else:
+                                    result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
                                 
                                 # Truncate very long results
                                 if len(result_str) > 15000:
@@ -1062,8 +1193,10 @@ class LLMService:
                                 tool_call_history.append({
                                     "tool": tool_name,
                                     "args": tool_args,
-                                    "result": result_str[:5000] if len(result_str) > 5000 else result_str,  # Limit history size
+                                    "result_preview": result_str[:5000] if len(result_str) > 5000 else result_str,
                                     "success": True,
+                                    "_dedup_key": dedup_key,
+                                    "_result_str": result_str,
                                 })
                                 
                                 # Yield tool call event for frontend
@@ -1075,6 +1208,8 @@ class LLMService:
                                 }
                                 
                                 # Add tool result to messages for continuation
+                                # Use validated tool_args (not raw string) to ensure valid JSON
+                                validated_args = json.dumps(tool_args)
                                 messages.append({
                                     "role": "assistant",
                                     "content": None,
@@ -1083,7 +1218,7 @@ class LLMService:
                                         "type": "function",
                                         "function": {
                                             "name": tool_name,
-                                            "arguments": tc_data["arguments"],
+                                            "arguments": validated_args,
                                         }
                                     }]
                                 })
@@ -1103,6 +1238,8 @@ class LLMService:
                                     "success": False,
                                 })
                                 
+                                # Use validated tool_args to ensure valid JSON
+                                validated_args = json.dumps(tool_args)
                                 messages.append({
                                     "role": "assistant", 
                                     "content": None,
@@ -1111,7 +1248,7 @@ class LLMService:
                                         "type": "function",
                                         "function": {
                                             "name": tool_name,
-                                            "arguments": tc_data["arguments"],
+                                            "arguments": validated_args,
                                         }
                                     }]
                                 })
@@ -1124,8 +1261,290 @@ class LLMService:
                         # Clear accumulated tool calls for next round
                         streaming_tool_calls = {}
                         
+                        # NC-0.8.0.12: After 5 rounds, inject round awareness into system prompt
+                        # This gives the LLM context about how long it's been running
+                        if tool_round >= 5 and messages and messages[0].get("role") == "system":
+                            sys_content = messages[0]["content"]
+                            import re as _re_rounds
+                            
+                            # Build status block
+                            tool_summary_lines = [f"tool_call round {tool_round}"]
+                            for tc in tool_call_history[-5:]:  # Last 5 calls
+                                status = "✓" if tc.get("success") else "✗"
+                                tool_summary_lines.append(f"  {status} {tc.get('tool')}({list(tc.get('args', {}).keys())})")
+                            
+                            round_block = f"\n[TOOL_ROUND_STATUS]\nYou are on tool call round {tool_round}. Consider whether you have enough information to respond to the user.\nRecent tool history:\n" + "\n".join(tool_summary_lines) + "\n[END_TOOL_ROUND_STATUS]"
+                            
+                            # Replace existing block or append
+                            if "[TOOL_ROUND_STATUS]" in sys_content:
+                                sys_content = _re_rounds.sub(
+                                    r'\[TOOL_ROUND_STATUS\].*?\[END_TOOL_ROUND_STATUS\]',
+                                    round_block.strip(),
+                                    sys_content,
+                                    flags=_re_rounds.DOTALL,
+                                )
+                            else:
+                                sys_content = f"{sys_content}\n\n{round_block}"
+                            messages[0]["content"] = sys_content
+                        
+                        # NC-0.8.0.12: Compress older tool call/result pairs into a summary
+                        # Only compress when messages exceed a size threshold — not every round
+                        COMPRESS_TOKEN_THRESHOLD = 40_000  # ~160K chars / 4
+                        KEEP_RECENT_PAIRS = 6  # Keep last 3 tool call/result pairs
+                        MAX_HISTORY_SIZE = 20_000
+                        current_tokens = estimate_message_tokens(messages)
+                        
+                        if current_tokens > COMPRESS_TOKEN_THRESHOLD and len(messages) > KEEP_RECENT_PAIRS + 4:
+                            logger.info(f"[LLM_TOOLS] Compression triggered: {current_tokens} tokens > {COMPRESS_TOKEN_THRESHOLD} threshold")
+                            
+                            # Find existing history
+                            existing_history_idx = None
+                            existing_history_content = ""
+                            for i, msg in enumerate(messages):
+                                if msg.get("role") == "user" and "[TOOL_RESPONSE_HISTORY" in msg.get("content", ""):
+                                    existing_history_idx = i
+                                    c = msg["content"]
+                                    start_marker = c.find("]", c.find("[TOOL_RESPONSE_HISTORY"))
+                                    end_marker = c.find("[END_TOOL_RESPONSE_HISTORY]")
+                                    if start_marker >= 0 and end_marker >= 0:
+                                        existing_history_content = c[start_marker + 1:end_marker].strip()
+                                    break
+                            
+                            # Find NEW tool messages to compress (skip system, user, existing history, and recent tail)
+                            compressible = []
+                            skip_until = (existing_history_idx + 1) if existing_history_idx is not None else 1
+                            
+                            for i in range(skip_until, len(messages) - KEEP_RECENT_PAIRS):
+                                msg = messages[i]
+                                is_tool_msg = (
+                                    msg.get("role") == "tool" or
+                                    (msg.get("role") == "assistant" and msg.get("tool_calls"))
+                                )
+                                # Also skip user messages that aren't history (original query, archive notices)
+                                is_history_msg = msg.get("role") == "user" and "[TOOL_RESPONSE_HISTORY" in msg.get("content", "")
+                                if is_tool_msg:
+                                    compressible.append((i, msg))
+                                elif is_history_msg:
+                                    pass  # Skip, already captured above
+                            
+                            if compressible:
+                                # Build summary of new tool messages
+                                new_parts = []
+                                indices_to_remove = set()
+                                
+                                for idx, msg in compressible:
+                                    indices_to_remove.add(idx)
+                                    if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                                        for tc in msg["tool_calls"]:
+                                            fn = tc.get("function", {})
+                                            name = fn.get("name", "?")
+                                            args_str = fn.get("arguments", "{}")
+                                            try:
+                                                args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                                                brief_args = {k: (str(v)[:80] + "..." if len(str(v)) > 80 else v) for k, v in args.items()}
+                                            except:
+                                                brief_args = args_str[:100] if isinstance(args_str, str) else str(args_str)[:100]
+                                            new_parts.append(f"Called: {name}({json.dumps(brief_args)})")
+                                    elif msg.get("role") == "tool":
+                                        content = msg.get("content", "")
+                                        # Allow substantial results — 2K per tool result
+                                        if len(content) > 2000:
+                                            content = content[:2000] + f"... [{len(content)} chars total]"
+                                        new_parts.append(f"Result: {content}")
+                                
+                                if new_parts:
+                                    # Append to existing history
+                                    combined = existing_history_content
+                                    if combined:
+                                        combined += "\n"
+                                    combined += "\n".join(new_parts)
+                                    
+                                    # Trim from the front if over budget
+                                    if len(combined) > MAX_HISTORY_SIZE:
+                                        trimmed = combined[len(combined) - MAX_HISTORY_SIZE:]
+                                        # Find first clean line break
+                                        nl = trimmed.find("\n")
+                                        if nl > 0:
+                                            trimmed = trimmed[nl + 1:]
+                                        combined = f"[...earlier history trimmed...]\n{trimmed}"
+                                    
+                                    history_msg = {
+                                        "role": "user",
+                                        "content": f"[TOOL_RESPONSE_HISTORY - Through round {tool_round}]\n{combined}\n[END_TOOL_RESPONSE_HISTORY]"
+                                    }
+                                    
+                                    # Rebuild messages: remove compressed ones, update/insert history
+                                    new_messages = []
+                                    history_placed = False
+                                    for i, msg in enumerate(messages):
+                                        if i in indices_to_remove:
+                                            continue
+                                        if i == existing_history_idx:
+                                            new_messages.append(history_msg)
+                                            history_placed = True
+                                        else:
+                                            new_messages.append(msg)
+                                    
+                                    # If no existing history, insert after system+user
+                                    if not history_placed:
+                                        insert_at = min(2, len(new_messages))
+                                        new_messages.insert(insert_at, history_msg)
+                                    
+                                    logger.info(f"[LLM_TOOLS] Compressed {len(compressible)} tool messages, history now {len(history_msg['content'])} chars")
+                                    messages = new_messages
+                        
+                        # NC-0.8.0.12: Refresh signatures, associations, and call graph if file-modifying tools ran
+                        FILE_MODIFYING_TOOLS = {"create_file", "search_replace", "sed_files"}
+                        modified_tools = {tc.get("tool") for tc in tool_call_history if tc.get("success")} & FILE_MODIFYING_TOOLS
+                        if modified_tools and messages and messages[0].get("role") == "system":
+                            try:
+                                from app.services.zip_processor import (
+                                    build_manifest_from_session_files, extract_associations,
+                                    extract_call_graph, extract_markdown_gists,
+                                )
+                                from app.tools.registry import get_session_files
+                                
+                                session_files = get_session_files(str(chat.id))
+                                if session_files:
+                                    mini_manifest = build_manifest_from_session_files(session_files)
+                                    
+                                    # --- Signatures block ---
+                                    if mini_manifest.signature_index:
+                                        sig_lines = ["[PROJECT_CODE_SUMMARY]", "\nFiles with signatures:"]
+                                        for fpath, sigs in sorted(mini_manifest.signature_index.items())[:20]:
+                                            sig_lines.append(f"\n  {fpath}:")
+                                            for sig in sigs[:10]:
+                                                sig_lines.append(f"    - {sig['kind']} {sig['name']} (line {sig['line']})")
+                                            if len(sigs) > 10:
+                                                sig_lines.append(f"    ... and {len(sigs) - 10} more")
+                                        sig_lines.append("\n[END_PROJECT_CODE_SUMMARY]")
+                                        sig_block = "\n".join(sig_lines)
+                                        
+                                        sys_content = messages[0]["content"]
+                                        import re as _re
+                                        if "[PROJECT_CODE_SUMMARY]" in sys_content:
+                                            sys_content = _re.sub(
+                                                r'\[PROJECT_CODE_SUMMARY\].*?\[END_PROJECT_CODE_SUMMARY\]',
+                                                sig_block, sys_content, flags=_re.DOTALL,
+                                            )
+                                        else:
+                                            sys_content += f"\n\n{sig_block}"
+                                        messages[0]["content"] = sys_content
+                                    
+                                    # --- Architecture & call graph block ---
+                                    assoc = extract_associations(mini_manifest)
+                                    call_graph = extract_call_graph(mini_manifest)
+                                    
+                                    arch_lines = ["[PROJECT_ARCHITECTURE]"]
+                                    
+                                    if assoc['entry_points']:
+                                        arch_lines.append("Entry points: " + ", ".join(assoc['entry_points']))
+                                    
+                                    # Local import graph
+                                    project_paths = {f.path for f in mini_manifest.files}
+                                    for src, targets in sorted(assoc['imports'].items()):
+                                        local = [t for t in targets if t in project_paths]
+                                        if local:
+                                            arch_lines.append(f"  {src} → {', '.join(local)}")
+                                    
+                                    if assoc['class_hierarchy']:
+                                        arch_lines.append("Class hierarchy:")
+                                        for cls, parents in sorted(assoc['class_hierarchy'].items()):
+                                            arch_lines.append(f"  {cls.split(':')[-1]} extends {', '.join(parents)}")
+                                    
+                                    # Call graph — compact form
+                                    if call_graph:
+                                        arch_lines.append("Call graph:")
+                                        # Build reverse
+                                        called_by = {}
+                                        for caller, callees in call_graph.items():
+                                            for callee in callees:
+                                                called_by.setdefault(callee, []).append(caller)
+                                        
+                                        all_funcs = set(call_graph.keys()) | set(called_by.keys())
+                                        for key in sorted(all_funcs):
+                                            parts = []
+                                            if key in call_graph:
+                                                parts.append(f"calls:{','.join(c.split(':')[-1] for c in call_graph[key][:4])}")
+                                            if key in called_by:
+                                                parts.append(f"by:{','.join(c.split(':')[-1] for c in called_by[key][:4])}")
+                                            if parts:
+                                                arch_lines.append(f"  {key.split(':')[-1]} | {' | '.join(parts)}")
+                                    
+                                    arch_lines.append("[END_PROJECT_ARCHITECTURE]")
+                                    arch_block = "\n".join(arch_lines)
+                                    
+                                    sys_content = messages[0]["content"]
+                                    if "[PROJECT_ARCHITECTURE]" in sys_content:
+                                        sys_content = _re.sub(
+                                            r'\[PROJECT_ARCHITECTURE\].*?\[END_PROJECT_ARCHITECTURE\]',
+                                            arch_block, sys_content, flags=_re.DOTALL,
+                                        )
+                                    else:
+                                        sys_content += f"\n\n{arch_block}"
+                                    messages[0]["content"] = sys_content
+                                    
+                                    # Update chat.code_summary in DB
+                                    try:
+                                        await db.execute(
+                                            update(Chat)
+                                            .where(Chat.id == str(chat.id))
+                                            .values(code_summary={
+                                                "files": [{"filename": k, "signatures": v} for k, v in mini_manifest.signature_index.items()],
+                                                "associations": assoc,
+                                            })
+                                        )
+                                        await db.commit()
+                                    except Exception:
+                                        pass
+                                    
+                                    logger.info(f"[LLM_TOOLS] Refreshed project context: {len(mini_manifest.signature_index)} files, {len(call_graph)} call edges after {modified_tools}")
+                            except Exception as e:
+                                logger.debug(f"[LLM_TOOLS] Project context refresh skipped: {e}")
+                        
+                        # NC-0.8.0.12: Check if messages have grown too large from tool use
+                        # If so, archive older tool call/result pairs to agent memory
+                        current_tokens = estimate_message_tokens(messages)
+                        if current_tokens > _tool_overflow_threshold:
+                            logger.info(f"[LLM_TOOLS] Context overflow during tool loop: {current_tokens} tokens > {_tool_overflow_threshold} threshold, archiving...")
+                            try:
+                                from app.services.agent_memory import AgentMemoryService
+                                _agent_mem = AgentMemoryService(model_context_size=_tool_context_limit)
+                                
+                                # Keep: system prompt (idx 0), original user messages, and recent tool pairs
+                                # Find the boundary: keep system + first user message + last N messages
+                                keep_tail = 20  # Keep last ~10 tool call/result pairs
+                                if len(messages) > keep_tail + 2:
+                                    to_archive = messages[1:-(keep_tail)]  # Skip system, keep tail
+                                    
+                                    if to_archive:
+                                        await _agent_mem.compress_to_agent_file(
+                                            db=db,
+                                            chat_id=str(chat.id),
+                                            messages_to_compress=to_archive,
+                                            llm_client=self.client,
+                                            model=effective_model,
+                                            api_base=self.base_url,
+                                            api_key=self.api_key,
+                                        )
+                                        
+                                        # Rebuild messages: system + archived notice + recent
+                                        archived_count = len(to_archive)
+                                        messages = [messages[0]] + messages[-(keep_tail):]
+                                        
+                                        # Inject notice so LLM knows history was archived
+                                        messages.insert(1, {
+                                            "role": "user",
+                                            "content": f"[SYSTEM: {archived_count} earlier messages (including tool calls and results) have been archived to agent memory. Use agent_search to retrieve them if needed. Continue with your current task.]"
+                                        })
+                                        
+                                        new_tokens = estimate_message_tokens(messages)
+                                        logger.info(f"[LLM_TOOLS] Archived {archived_count} messages: {current_tokens} → {new_tokens} tokens")
+                            except Exception as e:
+                                logger.warning(f"[LLM_TOOLS] Context overflow archiving failed: {e}, continuing anyway")
+                        
                         # Continue conversation with tool results
-                        logger.info(f"[LLM_TOOLS] Continuing with tool results...")
+                        logger.info(f"[LLM_TOOLS] Continuing with tool results (round {tool_round})...")
                         continue_params = {
                             "model": effective_model,
                             "messages": messages,
@@ -1133,6 +1552,24 @@ class LLMService:
                             "temperature": self.temperature,
                             "stream": True,
                         }
+                        
+                        # NC-0.8.0.12: After consecutive dedup hits, warn in system prompt
+                        if consecutive_dedup_hits >= 2 and messages and messages[0].get("role") == "system":
+                            loop_warning = "\n\n[TOOL_LOOP_WARNING]\nYou are looping your queries to tools, the results will not change and results are already in the context. Use the context, instead of wasting tool calls.\n[END_TOOL_LOOP_WARNING]"
+                            sys_content = messages[0]["content"]
+                            import re as _re_loop
+                            if "[TOOL_LOOP_WARNING]" in sys_content:
+                                sys_content = _re_loop.sub(
+                                    r'\[TOOL_LOOP_WARNING\].*?\[END_TOOL_LOOP_WARNING\]',
+                                    loop_warning.strip(),
+                                    sys_content,
+                                    flags=_re_loop.DOTALL,
+                                )
+                            else:
+                                sys_content += loop_warning
+                            messages[0]["content"] = sys_content
+                            logger.info(f"[LLM_TOOLS] Injected loop warning into system prompt (consecutive_dedup={consecutive_dedup_hits})")
+                        
                         if tools:
                             continue_params["tools"] = self._convert_tools_to_openai_format(tools)
                             continue_params["tool_choice"] = "auto"
@@ -1144,11 +1581,6 @@ class LLMService:
                     else:
                         # No tool executor or no tool calls, exit
                         break
-                
-                # NC-0.8.0.8: Check if we hit max tool rounds without generating content
-                if tool_round >= max_tool_rounds and not filtered_content.strip():
-                    hit_max_tool_rounds = True
-                    logger.warning(f"[LLM_TOOLS] Hit max tool rounds ({max_tool_rounds}) without generating content, forcing final response...")
                     
             except asyncio.CancelledError:
                 # Task was cancelled - this is expected when stop is requested
@@ -1185,50 +1617,6 @@ class LLMService:
                 }
                 return
             
-            # NC-0.8.0.8: Force a final response if we hit max tool rounds without content
-            if hit_max_tool_rounds and not filtered_content.strip():
-                logger.info("[LLM_TOOLS] Forcing final response without tools...")
-                
-                # Add instruction to summarize tool results
-                messages.append({
-                    "role": "user",
-                    "content": "[SYSTEM: You have completed your tool calls. Now please provide your final response to the user based on the information you gathered. Do not make any more tool calls.]"
-                })
-                
-                # Make one more API call WITHOUT tools to force text generation
-                final_params = {
-                    "model": effective_model,
-                    "messages": messages,
-                    "max_tokens": effective_max_output_tokens,
-                    "temperature": self.temperature,
-                    "stream": True,
-                    # NO tools parameter - force text output
-                }
-                
-                try:
-                    final_stream = await self.client.chat.completions.create(**final_params)
-                    async for chunk in final_stream:
-                        if not chunk.choices:
-                            continue
-                        delta = chunk.choices[0].delta
-                        if delta.content:
-                            content_chunk = delta.content
-                            filtered_content += content_chunk
-                            yield {
-                                "type": "content",
-                                "content": content_chunk,
-                            }
-                    logger.info(f"[LLM_TOOLS] Forced response generated: {len(filtered_content)} chars")
-                except Exception as e:
-                    logger.error(f"[LLM_TOOLS] Failed to generate forced response: {e}")
-                    # Generate a fallback message
-                    fallback = "\n\n*[I completed several tool calls but encountered an issue generating my final response. Here's a summary of what I found:]*\n\n"
-                    for tc in tool_call_history[-3:]:  # Last 3 tool calls
-                        if tc.get("success"):
-                            fallback += f"- **{tc['tool']}**: {tc['result'][:500]}...\n"
-                    filtered_content = fallback
-                    yield {"type": "content", "content": filtered_content}
-            
             # Estimate tokens if not provided
             if total_input_tokens == 0:
                 total_input_tokens = self._estimate_tokens(messages)
@@ -1248,16 +1636,24 @@ class LLMService:
             chat_id = str(chat.id)
             
             try:
+                # NC-0.8.0.11: Build update values including artifacts if any
+                update_values = {
+                    "content": content_to_save,
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "is_streaming": False,
+                }
+                
+                # Add generated artifacts if any
+                if generated_artifacts:
+                    logger.info(f"[LLM_ARTIFACTS] Saving {len(generated_artifacts)} generated artifacts to message")
+                    update_values["artifacts"] = generated_artifacts
+                
                 # Update message with final content using direct SQL
                 await db.execute(
                     update(Message)
                     .where(Message.id == message_id)
-                    .values(
-                        content=content_to_save,
-                        input_tokens=total_input_tokens,
-                        output_tokens=total_output_tokens,
-                        is_streaming=False,
-                    )
+                    .values(**update_values)
                 )
                 
                 # Update chat stats using direct SQL
