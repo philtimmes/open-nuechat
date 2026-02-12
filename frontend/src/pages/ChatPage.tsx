@@ -487,8 +487,10 @@ const MessageList = memo(function MessageList({
         const isLastAssistant = isLastInPath && message.role === 'assistant';
         
         // For retry, we need the user message ID (parent of assistant)
+        // Search path first, then fall back to all messages (parent may be on inactive branch)
         const parentUserMessage = message.role === 'assistant' ? 
-          path.find(n => n.message.id === message.parent_id)?.message : null;
+          (path.find(n => n.message.id === message.parent_id)?.message ??
+           messages.find(m => m.id === message.parent_id)) : null;
         
         // Build version info for messages with siblings (both user and assistant)
         // For root messages (no parent_id), use 'root' as the parent key
