@@ -1074,6 +1074,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         processedToolTagsRef.current.clear();
         savedArtifactsDuringStreamRef.current = [];
         
+        // NC-0.8.0.13: Reset tool group tracking
+        (window as any).__toolGroups = {};
+        (window as any).__activeToolGroup = -1;
+        useChatStore.getState().clearToolTimeline();
+        
         // Verify state wasn't accidentally cleared
         const { messages: afterMsgs, artifacts: afterArts } = useChatStore.getState();
         console.log(`[stream_start] State after clear: ${afterMsgs.length} messages, ${afterArts.length} artifacts`);
@@ -1091,6 +1096,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         
         if (chunk.content) {
+          // NC-0.8.0.13: Close active tool group when text resumes
+          if ((window as any).__activeToolGroup !== undefined && (window as any).__activeToolGroup !== -1) {
+            (window as any).__activeToolGroup = -1;
+          }
+          
           // Use buffered append for performance
           streamingBufferRef.current?.append(chunk.content);
         }
@@ -1112,7 +1122,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setStreamingToolCall(null);
         break;
       
-      // NC-0.8.0.12: Tool activity timeline events
+      // NC-0.8.0.13: Tool activity timeline events — inline markers in content
       case 'tool_start': {
         const tsPayload = message.payload as {
           chat_id: string;
@@ -1123,7 +1133,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           args_summary: string;
         };
         
-        // Accumulate live tool events for the current stream
         const startEvent = {
           ts: tsPayload.ts,
           type: 'tool_start' as const,
@@ -1132,12 +1141,23 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           args_summary: tsPayload.args_summary,
         };
         
-        // Store in a ref-accessible array
-        const currentEvents = (window as any).__toolTimelineEvents || [];
-        currentEvents.push(startEvent);
-        (window as any).__toolTimelineEvents = currentEvents;
+        // Determine current tool group — new group if no active one
+        const groups: Record<number, any[]> = (window as any).__toolGroups || {};
+        const activeGroup: number = (window as any).__activeToolGroup ?? -1;
+        let groupId = activeGroup;
         
-        // Notify UI of live update
+        if (activeGroup === -1) {
+          // Start a new group — inject marker into streamed content
+          groupId = Object.keys(groups).length;
+          (window as any).__activeToolGroup = groupId;
+          groups[groupId] = [];
+          streamingBufferRef.current?.append(`\n<!--tools:${groupId}-->\n`);
+        }
+        
+        groups[groupId].push(startEvent);
+        (window as any).__toolGroups = groups;
+        
+        // Update store for live rendering
         useChatStore.getState().setToolTimelineEvent(startEvent);
         break;
       }
@@ -1164,9 +1184,12 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           result_summary: tePayload.result_summary,
         };
         
-        const currentEvts = (window as any).__toolTimelineEvents || [];
-        currentEvts.push(endEvent);
-        (window as any).__toolTimelineEvents = currentEvts;
+        const grps: Record<number, any[]> = (window as any).__toolGroups || {};
+        const activeGrp: number = (window as any).__activeToolGroup ?? 0;
+        if (grps[activeGrp]) {
+          grps[activeGrp].push(endEvent);
+        }
+        (window as any).__toolGroups = grps;
         
         useChatStore.getState().setToolTimelineEvent(endEvent);
         break;
@@ -1352,15 +1375,20 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               'No image found yet for message:', chunk.message_id);
           }
           
-          // NC-0.8.0.12: Collect tool timeline events
-          const toolTimelineEvents = (window as any).__toolTimelineEvents || [];
+          // NC-0.8.0.13: Collect tool groups (indexed by group ID, matching <!--tools:N--> markers)
+          const toolGroups: Record<number, any[]> = (window as any).__toolGroups || {};
           const uiEventsFromPayload = (chunk as any).ui_events;
-          const finalUiEvents = uiEventsFromPayload || (toolTimelineEvents.length > 0 ? toolTimelineEvents : undefined);
           
           // Build metadata
           const msgMetadata: Record<string, any> = {};
           if (generatedImage) msgMetadata.generated_image = generatedImage;
-          if (finalUiEvents) msgMetadata.ui_events = finalUiEvents;
+          // Store tool groups keyed by group index for inline rendering
+          if (Object.keys(toolGroups).length > 0) {
+            msgMetadata.tool_groups = toolGroups;
+          } else if (uiEventsFromPayload) {
+            // Fallback: flat events from payload (single group)
+            msgMetadata.tool_groups = { 0: uiEventsFromPayload };
+          }
           
           const assistantMessage: Message = {
             id: chunk.message_id,
@@ -1380,7 +1408,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           addMessage(assistantMessage);
           
           // Reset tool timeline accumulator
-          (window as any).__toolTimelineEvents = [];
+          (window as any).__toolGroups = {};
+          (window as any).__activeToolGroup = -1;
           useChatStore.getState().clearToolTimeline();
           
           console.log('Added assistant message with', extractedArtifacts.length, 'artifacts');

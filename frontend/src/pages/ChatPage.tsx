@@ -416,40 +416,52 @@ const MessageList = memo(function MessageList({
     }
   }, [messages]);
   
-  // Auto-select ONLY for messages created during this session (retry/edit)
-  // This should NOT run during initial load
+  // NC-0.8.0.13: Auto-select new messages ONLY at the leaf of the active path.
+  // Switching branches at level N never affects selections at other levels.
+  // New messages on inactive branches don't change navigation until user switches there.
   useEffect(() => {
-    // Don't run until initial messages have loaded
     if (!messagesLoadedRef.current || !isInitialized.current) return;
     
-    // Find messages we haven't seen before
     const newMessages = messages.filter(m => !knownMessageIds.current.has(m.id));
-    
-    // Update known messages
     for (const msg of messages) {
       knownMessageIds.current.add(msg.id);
     }
+    if (newMessages.length === 0) return;
     
-    // Auto-select new messages that are siblings (from retry/edit)
-    for (const msg of newMessages) {
-      // Use 'root' for messages without parent_id
-      const parentKey = msg.parent_id || 'root';
-      const siblings = messages.filter(m => (m.parent_id || 'root') === parentKey);
+    // Get the current leaf of the active path
+    const currentPath = buildConversationPath(messages, selectedVersions);
+    const leafMessage = currentPath.length > 0 ? currentPath[currentPath.length - 1].message : null;
+    const leafId = leafMessage?.id;
+    // The leaf's parent is the second-to-last node (covers retry on last assistant)
+    const leafParent = leafMessage?.parent_id || 'root';
+    
+    setSelectedVersions(prev => {
+      let updated = { ...prev };
+      let changed = false;
       
-      // Only auto-select if this creates a branch (multiple siblings)
-      if (siblings.length > 1) {
-        setSelectedVersions(prev => {
-          const updated = { ...prev, [parentKey]: msg.id };
-          // Persist to backend
+      for (const msg of newMessages) {
+        const parentKey = msg.parent_id || 'root';
+        const siblings = messages.filter(m => (m.parent_id || 'root') === parentKey);
+        if (siblings.length <= 1) continue;
+        
+        // Only auto-select if parent is:
+        //  - The current leaf message (new child of the leaf = extending the conversation)
+        //  - The leaf's parent (retry on the leaf itself = sibling of the leaf)
+        //  - 'root' when conversation is empty
+        const isAtLeaf = parentKey === leafId || 
+                         parentKey === leafParent ||
+                         (currentPath.length === 0 && parentKey === 'root');
+        
+        if (isAtLeaf) {
+          updated[parentKey] = msg.id;
+          changed = true;
           if (chatId) {
-            chatApi.updateSelectedVersion(chatId, parentKey, msg.id).catch(err => {
-              console.error('Failed to save selected version:', err);
-            });
+            chatApi.updateSelectedVersion(chatId, parentKey, msg.id).catch(() => {});
           }
-          return updated;
-        });
+        }
       }
-    }
+      return changed ? updated : prev;
+    });
   }, [messages, chatId]);
   
   const handleVersionChange = useCallback((parentId: string, newChildId: string) => {

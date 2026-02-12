@@ -727,7 +727,8 @@ class LLMService:
             tool_results = []
             tool_call_history = []  # NC-0.8.0.8: Track tool calls for history
             generated_artifacts = []  # NC-0.8.0.11: Track generated charts/images from execute_python
-            ui_events = []  # NC-0.8.0.12: Tool activity timeline for frontend
+            tool_groups = {}  # NC-0.8.0.13: Tool groups indexed by group ID
+            current_tool_group = -1  # NC-0.8.0.13: Current active tool group (-1 = none)
             
             # Automatic search disabled - use filter chains for web search orchestration
             # search_tools = [t for t in (tools or []) if 'search' in t.get('name', '').lower() or 'fetch' in t.get('name', '').lower()]
@@ -968,6 +969,10 @@ class LLMService:
                                 log_tool_debug(f"Stream chunk finish_reason: {finish_reason}")
                         
                         if delta.content:
+                            # NC-0.8.0.13: Close active tool group when text resumes
+                            if current_tool_group != -1:
+                                current_tool_group = -1
+                            
                             # NC-0.8.0.9: Record time to first token
                             if first_token_time is None:
                                 first_token_time = time.time()
@@ -1129,7 +1134,7 @@ class LLMService:
                             tool_calls_count += 1
                             consecutive_dedup_hits = 0  # Fresh call resets the counter
                             
-                            # NC-0.8.0.12: Emit tool_start for UI timeline
+                            # NC-0.8.0.13: Emit tool_start for UI timeline with group tracking
                             import time as _time
                             tool_start_ts = _time.time()
                             # Build compact args summary for display
@@ -1141,14 +1146,20 @@ class LLMService:
                                 _args_parts.append(f"{_k}={_vs}")
                             _args_summary = ", ".join(_args_parts)[:120]
                             
+                            # Start new tool group if none active
+                            if current_tool_group == -1:
+                                current_tool_group = len(tool_groups)
+                                tool_groups[current_tool_group] = []
+                            
                             ui_event_start = {
                                 "ts": tool_start_ts,
                                 "type": "tool_start",
                                 "tool": tool_name,
                                 "round": tool_round,
                                 "args_summary": _args_summary,
+                                "group": current_tool_group,
                             }
-                            ui_events.append(ui_event_start)
+                            tool_groups[current_tool_group].append(ui_event_start)
                             yield {"type": "tool_start", **ui_event_start}
                             
                             try:
@@ -1251,7 +1262,8 @@ class LLMService:
                                     "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
                                     "result_summary": _result_summary,
                                 }
-                                ui_events.append(ui_event_end)
+                                if current_tool_group in tool_groups:
+                                    tool_groups[current_tool_group].append(ui_event_end)
                                 yield {"type": "tool_end", **ui_event_end}
                                 
                                 # Add tool result to messages for continuation
@@ -1288,7 +1300,8 @@ class LLMService:
                                     "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
                                     "result_summary": str(e)[:80],
                                 }
-                                ui_events.append(ui_event_end)
+                                if current_tool_group in tool_groups:
+                                    tool_groups[current_tool_group].append(ui_event_end)
                                 yield {"type": "tool_end", **ui_event_end}
                                 
                                 # NC-0.8.0.8: Track failed tool call
@@ -1769,7 +1782,7 @@ class LLMService:
                 "duration_ms": duration_ms,
                 "ttft_ms": ttft_ms,
                 "tokens_per_second": round(tokens_per_second, 1) if tokens_per_second else None,
-                "ui_events": ui_events if ui_events else None,
+                "tool_groups": tool_groups if tool_groups else None,
                 "generated_artifacts": generated_artifacts if generated_artifacts else None,
             }
             

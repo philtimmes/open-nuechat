@@ -179,6 +179,17 @@ export interface Message {
       duration_ms?: number;
       result_summary?: string;
     }>;
+    // NC-0.8.0.13: Tool groups indexed by group ID (matches <!--tools:N--> markers in content)
+    tool_groups?: Record<string | number, Array<{
+      ts: number;
+      type: 'tool_start' | 'tool_end';
+      tool: string;
+      round: number;
+      args_summary?: string;
+      status?: string;
+      duration_ms?: number;
+      result_summary?: string;
+    }>>;
   };
 }
 

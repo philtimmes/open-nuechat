@@ -844,6 +844,73 @@ function MessageBubbleInner({
   // Preprocess content: fix nested code fences and extract filenames
   const processedContent = preprocessContent(contentWithoutArtifacts);
   
+  // NC-0.8.0.13: Extract markdown components for reuse across split segments
+  const markdownComponents = useMemo(() => ({
+    code({ node, inline, className, children, ...props }: any) {
+      const match = /language-(\w+)/.exec(className || '');
+      const code = String(children).replace(/\n$/, '');
+      let filename: string | null = null;
+      const metaMatch = className?.match(/language-\w+::(.+)/);
+      if (metaMatch) filename = metaMatch[1];
+      
+      if (!inline && match) {
+        const language = match[1];
+        const handleMermaidErr = (error: string, mermaidCode: string) => {
+          if (onMermaidError) onMermaidError(error, mermaidCode, message.id);
+        };
+        if (mermaidEnabled && (language === 'mermaid' || language === 'mmd')) {
+          const diagramId = `${message.id}-${Math.random().toString(36).substr(2, 9)}`;
+          return <MermaidDiagram code={code} id={diagramId} onError={handleMermaidErr} />;
+        }
+        const mermaidKeywords = /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4Context)\b/m;
+        if (mermaidEnabled && mermaidKeywords.test(code.trim())) {
+          const diagramId = `${message.id}-${Math.random().toString(36).substr(2, 9)}`;
+          return <MermaidDiagram code={code} id={diagramId} onError={handleMermaidErr} />;
+        }
+        return (
+          <div className="relative group/code my-3">
+            {filename && (
+              <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800 border-b border-zinc-700 rounded-t-lg">
+                <span className="text-xs text-zinc-400 font-mono truncate">{filename}</span>
+                <button onClick={() => copyToClipboard(code)} className="px-2 py-0.5 text-xs rounded bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600 transition-colors">
+                  {copiedCode === code ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+            )}
+            {!filename && (
+              <div className="absolute right-2 top-2 opacity-0 group-hover/code:opacity-100 transition-opacity z-10">
+                <button onClick={() => copyToClipboard(code)} className="px-2 py-1 text-xs rounded bg-zinc-700 text-zinc-300 hover:text-white">
+                  {copiedCode === code ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+            )}
+            <SyntaxHighlighter style={oneDark} language={language} PreTag="div" customStyle={{ margin: 0, borderRadius: filename ? '0 0 0.5rem 0.5rem' : '0.5rem', fontSize: '0.8125rem' }} {...props}>
+              {code}
+            </SyntaxHighlighter>
+          </div>
+        );
+      }
+      return <code className={`${className} px-1 py-0.5 rounded bg-zinc-800 text-[var(--color-accent)] text-sm`} {...props}>{children}</code>;
+    },
+    table({ children }: any) { return <div className="overflow-x-auto my-4 rounded-lg border border-[var(--color-border)]"><table className="min-w-full divide-y divide-[var(--color-border)]">{children}</table></div>; },
+    thead({ children }: any) { return <thead className="bg-[var(--color-surface)]">{children}</thead>; },
+    tbody({ children }: any) { return <tbody className="divide-y divide-[var(--color-border)] bg-[var(--color-background)]">{children}</tbody>; },
+    tr({ children }: any) { return <tr className="hover:bg-[var(--color-surface)]/50 transition-colors">{children}</tr>; },
+    th({ children }: any) { return <th className="px-3 py-2 text-left text-xs font-semibold text-[var(--color-text)] uppercase tracking-wider whitespace-nowrap">{children}</th>; },
+    td({ children }: any) { return <td className="px-3 py-2 text-sm text-[var(--color-text-secondary)] whitespace-normal">{children}</td>; },
+    p({ children }: any) { return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>; },
+    ul({ children }: any) { return <ul className="list-disc list-outside ml-4 mb-2 space-y-0.5">{children}</ul>; },
+    ol({ children }: any) { return <ol className="list-decimal list-outside ml-4 mb-2 space-y-0.5">{children}</ol>; },
+    a({ href, children }: any) {
+      if (href) {
+        const videoInfo = extractVideoInfo(href);
+        if (videoInfo) return <VideoEmbed url={href} />;
+      }
+      return <a href={href} target="_blank" rel="noopener noreferrer" className="text-[var(--color-accent)] hover:underline">{children}</a>;
+    },
+    blockquote({ children }: any) { return <blockquote className="border-l-2 border-[var(--color-border)] pl-4 italic text-[var(--color-text-secondary)]">{children}</blockquote>; },
+  }), [message.id, mermaidEnabled, copiedCode]);
+
   return (
     <div className={`group py-4 md:py-4 ${isUser && !isFileContent ? 'bg-[var(--color-surface)]/30' : ''} ${isFileContent ? 'bg-blue-500/5 border-l-2 border-blue-500/50' : ''}`}>
       <div className="max-w-3xl mx-auto px-3 md:px-4">
@@ -962,10 +1029,6 @@ function MessageBubbleInner({
           </div>
         ) : processedContent ? (
           <>
-            {/* NC-0.8.0.12: Tool activity timeline from metadata */}
-            {!isUser && message.metadata?.ui_events && (
-              <ToolTimeline events={message.metadata.ui_events} />
-            )}
             {isStreaming ? (
               // During streaming: plain text for performance (skip expensive markdown parsing)
               <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)] whitespace-pre-wrap">
@@ -983,181 +1046,45 @@ function MessageBubbleInner({
                   onHintSelect={onHintSelect}
                 />
               )}
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  code({ node, inline, className, children, ...props }: any) {
-                    const match = /language-(\w+)/.exec(className || '');
-                    const code = String(children).replace(/\n$/, '');
-                    
-                    // Extract filename from meta or first line comment
-                    // Pattern: ```lang::/path/to/file or ```lang filename="/path/to/file"
-                    let filename: string | null = null;
-                    const metaMatch = className?.match(/language-\w+::(.+)/);
-                    if (metaMatch) {
-                      filename = metaMatch[1];
+              {(() => {
+                // NC-0.8.0.13: Split content on tool group markers for inline timeline rendering
+                const toolGroups = message.metadata?.tool_groups as Record<string, any[]> | undefined;
+                const hasToolMarkers = processedContent.includes('<!--tools:');
+                
+                if (!hasToolMarkers || !toolGroups) {
+                  // No tool markers — render as single block, strip any orphan markers
+                  const cleaned = processedContent.replace(/\n?<!--tools:\d+-->\n?/g, '');
+                  return (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {cleaned}
+                    </ReactMarkdown>
+                  );
+                }
+                
+                // Split content on <!--tools:N--> markers
+                const segments = processedContent.split(/<!--tools:(\d+)-->/);
+                // segments alternates: [text, groupId, text, groupId, text, ...]
+                
+                return segments.map((segment, idx) => {
+                  if (idx % 2 === 1) {
+                    // This is a group ID
+                    const groupId = parseInt(segment, 10);
+                    const events = toolGroups[groupId] || toolGroups[String(groupId)];
+                    if (events && events.length > 0) {
+                      return <ToolTimeline key={`tg-${groupId}`} events={events} />;
                     }
-                    
-                    if (!inline && match) {
-                      const language = match[1];
-                      
-                      // Handler for mermaid errors
-                      const handleMermaidError = (error: string, mermaidCode: string) => {
-                        if (onMermaidError) {
-                          onMermaidError(error, mermaidCode, message.id);
-                        }
-                      };
-                      
-                      // Special handling for mermaid diagrams (if enabled)
-                      if (mermaidEnabled && (language === 'mermaid' || language === 'mmd')) {
-                        const diagramId = `${message.id}-${Math.random().toString(36).substr(2, 9)}`;
-                        return <MermaidDiagram code={code} id={diagramId} onError={handleMermaidError} />;
-                      }
-                      
-                      // Detect mermaid syntax even without explicit language tag (if enabled)
-                      const mermaidKeywords = /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4Context)\b/m;
-                      if (mermaidEnabled && mermaidKeywords.test(code.trim())) {
-                        const diagramId = `${message.id}-${Math.random().toString(36).substr(2, 9)}`;
-                        return <MermaidDiagram code={code} id={diagramId} onError={handleMermaidError} />;
-                      }
-                      
-                      return (
-                        <div className="relative group/code my-3">
-                          {/* Filename header */}
-                          {filename && (
-                            <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-800 border-b border-zinc-700 rounded-t-lg">
-                              <span className="text-xs text-zinc-400 font-mono truncate">{filename}</span>
-                              <button
-                                onClick={() => copyToClipboard(code)}
-                                className="px-2 py-0.5 text-xs rounded bg-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-600 transition-colors"
-                              >
-                                {copiedCode === code ? 'Copied!' : 'Copy'}
-                              </button>
-                            </div>
-                          )}
-                          {/* Copy button for blocks without filename */}
-                          {!filename && (
-                            <div className="absolute right-2 top-2 opacity-0 group-hover/code:opacity-100 transition-opacity z-10">
-                              <button
-                                onClick={() => copyToClipboard(code)}
-                                className="px-2 py-1 text-xs rounded bg-zinc-700 text-zinc-300 hover:text-white"
-                              >
-                                {copiedCode === code ? 'Copied!' : 'Copy'}
-                              </button>
-                            </div>
-                          )}
-                          <SyntaxHighlighter
-                            style={oneDark}
-                            language={language}
-                            PreTag="div"
-                            customStyle={{
-                              margin: 0,
-                              borderRadius: filename ? '0 0 0.5rem 0.5rem' : '0.5rem',
-                              fontSize: '0.8125rem',
-                            }}
-                            {...props}
-                          >
-                            {code}
-                          </SyntaxHighlighter>
-                        </div>
-                      );
-                    }
-                    
-                    return (
-                      <code
-                        className={`${className} px-1 py-0.5 rounded bg-zinc-800 text-[var(--color-accent)] text-sm`}
-                        {...props}
-                      >
-                        {children}
-                      </code>
-                    );
-                  },
-                  // Table components for GFM tables
-                  table({ children }) {
-                    return (
-                      <div className="overflow-x-auto my-4 rounded-lg border border-[var(--color-border)]">
-                        <table className="min-w-full divide-y divide-[var(--color-border)]">
-                          {children}
-                        </table>
-                      </div>
-                    );
-                  },
-                  thead({ children }) {
-                    return (
-                      <thead className="bg-[var(--color-surface)]">
-                        {children}
-                      </thead>
-                    );
-                  },
-                  tbody({ children }) {
-                    return (
-                      <tbody className="divide-y divide-[var(--color-border)] bg-[var(--color-background)]">
-                        {children}
-                      </tbody>
-                    );
-                  },
-                  tr({ children }) {
-                    return (
-                      <tr className="hover:bg-[var(--color-surface)]/50 transition-colors">
-                        {children}
-                      </tr>
-                    );
-                  },
-                  th({ children }) {
-                    return (
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-[var(--color-text)] uppercase tracking-wider whitespace-nowrap">
-                        {children}
-                      </th>
-                    );
-                  },
-                  td({ children }) {
-                    return (
-                      <td className="px-3 py-2 text-sm text-[var(--color-text-secondary)] whitespace-normal">
-                        {children}
-                      </td>
-                    );
-                  },
-                  p({ children }) {
-                    return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>;
-                  },
-                  ul({ children }) {
-                    return <ul className="list-disc list-outside ml-4 mb-2 space-y-0.5">{children}</ul>;
-                  },
-                  ol({ children }) {
-                    return <ol className="list-decimal list-outside ml-4 mb-2 space-y-0.5">{children}</ol>;
-                  },
-                  a({ href, children }) {
-                    // Check if this is a video URL that should be embedded
-                    if (href) {
-                      const videoInfo = extractVideoInfo(href);
-                      if (videoInfo) {
-                        // Render video embed instead of link
-                        return <VideoEmbed url={href} />;
-                      }
-                    }
-                    // Regular link
-                    return (
-                      <a
-                        href={href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-[var(--color-accent)] hover:underline"
-                      >
-                        {children}
-                      </a>
-                    );
-                  },
-                  blockquote({ children }) {
-                    return (
-                      <blockquote className="border-l-2 border-[var(--color-border)] pl-4 italic text-[var(--color-text-secondary)]">
-                        {children}
-                      </blockquote>
-                    );
-                  },
-                }}
-              >
-                {processedContent}
-              </ReactMarkdown>
+                    return null;
+                  }
+                  // This is a text segment
+                  const trimmed = segment.trim();
+                  if (!trimmed) return null;
+                  return (
+                    <ReactMarkdown key={`md-${idx}`} remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {trimmed}
+                    </ReactMarkdown>
+                  );
+                });
+              })()}
             </div>
           )}
           </>

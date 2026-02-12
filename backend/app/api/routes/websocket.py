@@ -1825,12 +1825,11 @@ The following is relevant information from your previous conversations:
                     # This ensures the message is visible to any continuation requests
                     # (e.g., file content requests that immediately follow)
                     try:
-                        # NC-0.8.0.12: Save ui_events in message_metadata
-                        _ui_events = event.get("ui_events")
-                        if _ui_events and streaming_handler._current_message_id:
+                        # NC-0.8.0.13: Save tool_groups in message_metadata
+                        _tool_groups = event.get("tool_groups")
+                        if _tool_groups and streaming_handler._current_message_id:
                             try:
                                 from sqlalchemy import text as _sa_text
-                                # Merge ui_events into existing metadata
                                 result = await db.execute(
                                     _sa_text("SELECT message_metadata FROM messages WHERE id = :id"),
                                     {"id": streaming_handler._current_message_id}
@@ -1839,13 +1838,14 @@ The following is relevant information from your previous conversations:
                                 existing_meta = {}
                                 if row and row[0]:
                                     existing_meta = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                                existing_meta["ui_events"] = _ui_events
+                                # Store as tool_groups keyed by group index
+                                existing_meta["tool_groups"] = {str(k): v for k, v in _tool_groups.items()}
                                 await db.execute(
                                     _sa_text("UPDATE messages SET message_metadata = :metadata WHERE id = :id"),
                                     {"id": streaming_handler._current_message_id, "metadata": json.dumps(existing_meta)}
                                 )
                             except Exception as meta_err:
-                                logger.debug(f"[UI_EVENTS] Failed to save ui_events: {meta_err}")
+                                logger.debug(f"[TOOL_GROUPS] Failed to save tool_groups: {meta_err}")
                         
                         await db.commit()
                         logger.debug(f"Committed assistant message to DB")
@@ -1857,7 +1857,7 @@ The following is relevant information from your previous conversations:
                         event.get("input_tokens", 0),
                         event.get("output_tokens", 0),
                         event.get("parent_id"),
-                        ui_events=event.get("ui_events"),
+                        ui_events=event.get("tool_groups"),
                     )
                     
                     # Index this chat if chat knowledge is enabled (background, non-blocking)
