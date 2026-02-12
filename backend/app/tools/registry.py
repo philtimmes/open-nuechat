@@ -506,6 +506,31 @@ Returns structured data: title, meta description, headings hierarchy, links, ima
         )
         
         # =============================================================
+        # NC-0.8.0.12: fetch_document - Download and extract text from remote documents
+        # =============================================================
+        self.register(
+            name="fetch_document",
+            description="""Download a document from a URL and extract its text content. Supports PDF, DOCX, XLSX, RTF, CSV, and plain text files.
+
+USAGE: When the user provides a URL to a document (PDF, Word doc, spreadsheet, etc.) and you need to read its contents. Automatically detects file type from URL extension and HTTP content-type header.
+
+Examples:
+- "Get the text from this PDF: https://example.com/report.pdf"
+- "Read this Word document: https://example.com/memo.docx"
+- "Extract data from: https://example.com/data.xlsx"
+
+Returns the extracted text content from the document.""",
+            parameters={
+                "url": {
+                    "type": "string",
+                    "description": "URL to the document (PDF, DOCX, XLSX, RTF, CSV, TXT)",
+                    "required": True,
+                },
+            },
+            handler=self._fetch_document_handler,
+        )
+        
+        # =============================================================
         # NC-0.8.0.12: grep_files - Search across all session files
         # =============================================================
         self.register(
@@ -2956,6 +2981,160 @@ Example:
             "webpage_count": sum(1 for r in results if r.get("type") == "webpage"),
             "error_count": sum(1 for r in results if "error" in r),
         }
+
+    async def _fetch_document_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Download a document from a URL and extract text content."""
+        import httpx
+        import tempfile
+        import os
+        from urllib.parse import urlparse
+        
+        url = args.get("url", "").strip()
+        if not url:
+            return {"error": "URL is required"}
+        
+        # Validate URL
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return {"error": "Invalid URL scheme. Must be http or https."}
+        except Exception:
+            return {"error": "Invalid URL format"}
+        
+        # Extension-to-MIME mapping for when content-type is unhelpful
+        ext_to_mime = {
+            '.pdf': 'application/pdf',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.doc': 'application/msword',
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '.xls': 'application/vnd.ms-excel',
+            '.rtf': 'application/rtf',
+            '.csv': 'text/csv',
+            '.txt': 'text/plain',
+            '.md': 'text/markdown',
+            '.json': 'application/json',
+            '.html': 'text/html',
+            '.htm': 'text/html',
+            '.xml': 'text/xml',
+        }
+        
+        # Detect extension from URL path
+        url_path = parsed.path.lower()
+        url_ext = os.path.splitext(url_path)[1]
+        
+        try:
+            async with httpx.AsyncClient(
+                timeout=60.0,
+                follow_redirects=True,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; Open-NueChat/1.0; +https://nuechat.ai)",
+                    "Accept": "*/*",
+                }
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                
+                content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                content_length = len(response.content)
+                
+                # Determine MIME type: prefer content-type, fall back to extension
+                mime_type = content_type
+                if mime_type in ("application/octet-stream", "binary/octet-stream", "") and url_ext in ext_to_mime:
+                    mime_type = ext_to_mime[url_ext]
+                elif not mime_type and url_ext in ext_to_mime:
+                    mime_type = ext_to_mime[url_ext]
+                
+                # For text-like types, just return the text directly
+                text_types = ('text/plain', 'text/markdown', 'text/csv', 'application/json', 'text/xml')
+                if mime_type in text_types:
+                    text = response.text[:100000]
+                    return {
+                        "url": str(response.url),
+                        "content_type": mime_type,
+                        "size_bytes": content_length,
+                        "text": text,
+                        "text_length": len(text),
+                    }
+                
+                # For HTML, use existing HTML extractor
+                if 'text/html' in mime_type or 'application/xhtml' in mime_type:
+                    text_content = self._extract_text_from_html(response.text, True)
+                    return {
+                        "url": str(response.url),
+                        "content_type": "text/html",
+                        "title": self._extract_title(response.text),
+                        "size_bytes": content_length,
+                        "text": text_content[:100000],
+                        "text_length": len(text_content),
+                    }
+                
+                # For binary document types (PDF, DOCX, XLSX, RTF), save to temp and extract
+                supported_binary = (
+                    'application/pdf',
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'application/msword',
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'application/vnd.ms-excel',
+                    'application/rtf', 'text/rtf',
+                )
+                
+                if mime_type not in supported_binary:
+                    # Last resort: try matching by extension
+                    if url_ext in ext_to_mime and ext_to_mime[url_ext] in supported_binary:
+                        mime_type = ext_to_mime[url_ext]
+                    else:
+                        return {
+                            "url": str(response.url),
+                            "content_type": mime_type,
+                            "error": f"Unsupported document type: {mime_type}. Supported: PDF, DOCX, XLSX, XLS, RTF, CSV, TXT, HTML, JSON, XML.",
+                        }
+                
+                # Write to temp file
+                suffix = url_ext or '.bin'
+                # Map MIME to extension if URL has no extension
+                if suffix == '.bin':
+                    mime_to_ext = {v: k for k, v in ext_to_mime.items()}
+                    suffix = mime_to_ext.get(mime_type, '.bin')
+                
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                        tmp.write(response.content)
+                        tmp_path = tmp.name
+                    
+                    # Use the existing DocumentProcessor from RAG
+                    from app.services.rag import DocumentProcessor
+                    text = await DocumentProcessor.extract_text(tmp_path, mime_type)
+                    
+                    if not text or not text.strip():
+                        return {
+                            "url": str(response.url),
+                            "content_type": mime_type,
+                            "size_bytes": content_length,
+                            "error": "Document was downloaded but text extraction returned empty. The document may be image-based (scanned) or password-protected.",
+                        }
+                    
+                    # Truncate if massive
+                    if len(text) > 100000:
+                        text = text[:100000] + f"\n\n[... truncated, {len(text)} total chars]"
+                    
+                    return {
+                        "url": str(response.url),
+                        "content_type": mime_type,
+                        "size_bytes": content_length,
+                        "text": text,
+                        "text_length": len(text),
+                    }
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+        
+        except httpx.TimeoutException:
+            return {"url": url, "error": "Request timed out (60s). The file may be too large or the server too slow."}
+        except httpx.HTTPStatusError as e:
+            return {"url": url, "error": f"HTTP error {e.response.status_code}"}
+        except Exception as e:
+            return {"url": url, "error": f"Failed to fetch document: {str(e)}"}
 
     async def _add_task_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Add a single task to the queue"""
