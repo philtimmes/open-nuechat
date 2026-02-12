@@ -1696,26 +1696,37 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         // Flush any remaining buffered content
         streamingBufferRef.current?.flushNow();
         
-        // Generation was stopped by user
+        // Generation was stopped by user — preserve partial content as-is
         const chunk = message.payload as StreamChunk & { parent_id?: string };
         console.log('Stream stopped by user');
-        // Add partial message if content exists
         if (chunk.message_id) {
           const { streamingContent } = useChatStore.getState();
           if (streamingContent) {
+            // NC-0.8.0.13: Collect tool groups for the partial message
+            const toolGroups: Record<number, any[]> = (window as any).__toolGroups || {};
+            const msgMetadata: Record<string, any> = {};
+            if (Object.keys(toolGroups).length > 0) {
+              msgMetadata.tool_groups = toolGroups;
+            }
+            
             const assistantMessage: Message = {
               id: chunk.message_id,
               chat_id: chunk.chat_id || '',
               role: 'assistant',
-              content: streamingContent + '\n\n*[Generation stopped]*',
+              content: streamingContent,
               parent_id: chunk.parent_id,
               input_tokens: chunk.usage?.input_tokens,
               output_tokens: chunk.usage?.output_tokens,
               created_at: new Date().toISOString(),
+              metadata: Object.keys(msgMetadata).length > 0 ? msgMetadata : undefined,
             };
             addMessage(assistantMessage);
           }
         }
+        // Reset tool group tracking
+        (window as any).__toolGroups = {};
+        (window as any).__activeToolGroup = -1;
+        useChatStore.getState().clearToolTimeline();
         clearStreaming();
         setIsSending(false);
         break;

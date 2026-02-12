@@ -1,4 +1,4 @@
-import React, { useState, memo, useRef, useEffect, useCallback } from 'react';
+import React, { useState, memo, useRef, useEffect, useCallback, useMemo } from 'react';
 import type { Message, Artifact, GeneratedImage, UserHint } from '../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
