@@ -416,24 +416,28 @@ class StreamingHandler:
             },
         })
     
-    async def end_stream(self, input_tokens: int = 0, output_tokens: int = 0, parent_id: str = None):
+    async def end_stream(self, input_tokens: int = 0, output_tokens: int = 0, parent_id: str = None, ui_events: list = None):
         """End the streaming response"""
         # Flush any remaining buffered content
         await self._flush_buffer()
         
         self._is_streaming = False
         
+        payload = {
+            "message_id": self._current_message_id,
+            "chat_id": self._current_chat_id,
+            "parent_id": parent_id,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        }
+        if ui_events:
+            payload["ui_events"] = ui_events
+        
         await self.manager.send_to_connection(self.connection, {
             "type": "stream_end",
-            "payload": {
-                "message_id": self._current_message_id,
-                "chat_id": self._current_chat_id,
-                "parent_id": parent_id,  # For conversation tree tracking
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                },
-            },
+            "payload": payload,
         })
         
         self._current_message_id = None

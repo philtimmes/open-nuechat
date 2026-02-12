@@ -47,6 +47,9 @@ RUN pip install faiss-cpu
 COPY backend/requirements.txt .
 RUN pip install -r requirements.txt
 
+# Install Playwright Chromium browser for JS-rendered page extraction
+RUN playwright install chromium && playwright install-deps chromium
+
 # Pre-download the embedding model during build (avoids runtime download issues)
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 

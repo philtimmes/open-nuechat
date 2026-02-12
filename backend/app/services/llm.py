@@ -727,6 +727,7 @@ class LLMService:
             tool_results = []
             tool_call_history = []  # NC-0.8.0.8: Track tool calls for history
             generated_artifacts = []  # NC-0.8.0.11: Track generated charts/images from execute_python
+            ui_events = []  # NC-0.8.0.12: Tool activity timeline for frontend
             
             # Automatic search disabled - use filter chains for web search orchestration
             # search_tools = [t for t in (tools or []) if 'search' in t.get('name', '').lower() or 'fetch' in t.get('name', '').lower()]
@@ -1128,6 +1129,28 @@ class LLMService:
                             tool_calls_count += 1
                             consecutive_dedup_hits = 0  # Fresh call resets the counter
                             
+                            # NC-0.8.0.12: Emit tool_start for UI timeline
+                            import time as _time
+                            tool_start_ts = _time.time()
+                            # Build compact args summary for display
+                            _args_parts = []
+                            for _k, _v in tool_args.items():
+                                _vs = str(_v)
+                                if len(_vs) > 60:
+                                    _vs = _vs[:57] + "..."
+                                _args_parts.append(f"{_k}={_vs}")
+                            _args_summary = ", ".join(_args_parts)[:120]
+                            
+                            ui_event_start = {
+                                "ts": tool_start_ts,
+                                "type": "tool_start",
+                                "tool": tool_name,
+                                "round": tool_round,
+                                "args_summary": _args_summary,
+                            }
+                            ui_events.append(ui_event_start)
+                            yield {"type": "tool_start", **ui_event_start}
+                            
                             try:
                                 result = await tool_executor(tool_name, tool_args)
                                 
@@ -1177,6 +1200,12 @@ class LLMService:
                                             "source": "generated",
                                             "created_at": datetime.now(timezone.utc).isoformat(),
                                         })
+                                        # NC-0.8.0.12: Store in session so other tools can access
+                                        try:
+                                            from app.tools.registry import store_session_file
+                                            store_session_file(str(chat.id), filename, result["direct_text"])
+                                        except Exception:
+                                            pass
                                     
                                     # Strip large data from result before sending to LLM
                                     result_for_llm = {k: v for k, v in result.items() 
@@ -1186,8 +1215,11 @@ class LLMService:
                                     result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
                                 
                                 # Truncate very long results
-                                if len(result_str) > 15000:
-                                    result_str = result_str[:15000] + "\n... [truncated]"
+                                # Document tools get more space since their content IS the value
+                                LARGE_RESULT_TOOLS = {"fetch_document", "view_file_lines", "request_file"}
+                                max_result_len = 80000 if tool_name in LARGE_RESULT_TOOLS else 15000
+                                if len(result_str) > max_result_len:
+                                    result_str = result_str[:max_result_len] + f"\n... [truncated at {max_result_len} chars, {len(result_str)} total]"
                                 
                                 # NC-0.8.0.8: Track tool call for history
                                 tool_call_history.append({
@@ -1206,6 +1238,21 @@ class LLMService:
                                     "arguments": tool_args,
                                     "result": result_str[:1000] + "..." if len(result_str) > 1000 else result_str,
                                 }
+                                
+                                # NC-0.8.0.12: Emit tool_end for UI timeline
+                                tool_end_ts = _time.time()
+                                _result_summary = result_str[:80] + "..." if len(result_str) > 80 else result_str
+                                ui_event_end = {
+                                    "ts": tool_end_ts,
+                                    "type": "tool_end",
+                                    "tool": tool_name,
+                                    "round": tool_round,
+                                    "status": "success",
+                                    "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
+                                    "result_summary": _result_summary,
+                                }
+                                ui_events.append(ui_event_end)
+                                yield {"type": "tool_end", **ui_event_end}
                                 
                                 # Add tool result to messages for continuation
                                 # Use validated tool_args (not raw string) to ensure valid JSON
@@ -1229,6 +1276,20 @@ class LLMService:
                                 })
                             except Exception as e:
                                 logger.error(f"[LLM_TOOLS] Tool execution failed: {e}")
+                                
+                                # NC-0.8.0.12: Emit tool_end (failure) for UI timeline
+                                tool_end_ts = _time.time()
+                                ui_event_end = {
+                                    "ts": tool_end_ts,
+                                    "type": "tool_end",
+                                    "tool": tool_name,
+                                    "round": tool_round,
+                                    "status": "error",
+                                    "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
+                                    "result_summary": str(e)[:80],
+                                }
+                                ui_events.append(ui_event_end)
+                                yield {"type": "tool_end", **ui_event_end}
                                 
                                 # NC-0.8.0.8: Track failed tool call
                                 tool_call_history.append({
@@ -1708,6 +1769,8 @@ class LLMService:
                 "duration_ms": duration_ms,
                 "ttft_ms": ttft_ms,
                 "tokens_per_second": round(tokens_per_second, 1) if tokens_per_second else None,
+                "ui_events": ui_events if ui_events else None,
+                "generated_artifacts": generated_artifacts if generated_artifacts else None,
             }
             
         except Exception as e:

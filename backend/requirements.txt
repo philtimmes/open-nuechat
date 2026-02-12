@@ -63,6 +63,9 @@ filelock>=3.12.0
 # YouTube subtitle extraction (optional, has built-in fallback)
 youtube-transcript-api>=0.6.0
 
+# JS-rendered page extraction (optional, fallback for complex web pages)
+playwright>=1.40.0
+
 # TTS (Text-to-Speech) - RPC client to Kokoro microservice
 # (uses httpx from Authentication section)
 

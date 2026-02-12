@@ -6,6 +6,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import GeneratedImageCard from './GeneratedImageCard';
 import TextSelectionBubble from './TextSelectionBubble';
+import { ToolTimeline } from './chat/ToolTimeline';
 import mermaid from 'mermaid';
 import { useBrandingStore } from '../stores/brandingStore';
 
@@ -960,13 +961,18 @@ function MessageBubbleInner({
             </div>
           </div>
         ) : processedContent ? (
-          isStreaming ? (
-            // During streaming: plain text for performance (skip expensive markdown parsing)
-            <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)] whitespace-pre-wrap">
-              {processedContent}
-              <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
-            </div>
-          ) : (
+          <>
+            {/* NC-0.8.0.12: Tool activity timeline from metadata */}
+            {!isUser && message.metadata?.ui_events && (
+              <ToolTimeline events={message.metadata.ui_events} />
+            )}
+            {isStreaming ? (
+              // During streaming: plain text for performance (skip expensive markdown parsing)
+              <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)] whitespace-pre-wrap">
+                {processedContent}
+                <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
+              </div>
+            ) : (
             // After streaming complete: full markdown rendering with text selection support
             <div ref={contentRef} className="relative prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)]">
               {/* Text Selection Bubble - NC-0.8.0.0 */}
@@ -1153,7 +1159,8 @@ function MessageBubbleInner({
                 {processedContent}
               </ReactMarkdown>
             </div>
-          )
+          )}
+          </>
         ) : isStreaming ? (
           <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse" />
         ) : null}

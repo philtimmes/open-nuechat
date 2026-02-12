@@ -1112,6 +1112,66 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setStreamingToolCall(null);
         break;
       
+      // NC-0.8.0.12: Tool activity timeline events
+      case 'tool_start': {
+        const tsPayload = message.payload as {
+          chat_id: string;
+          message_id: string;
+          tool: string;
+          round: number;
+          ts: number;
+          args_summary: string;
+        };
+        
+        // Accumulate live tool events for the current stream
+        const startEvent = {
+          ts: tsPayload.ts,
+          type: 'tool_start' as const,
+          tool: tsPayload.tool,
+          round: tsPayload.round,
+          args_summary: tsPayload.args_summary,
+        };
+        
+        // Store in a ref-accessible array
+        const currentEvents = (window as any).__toolTimelineEvents || [];
+        currentEvents.push(startEvent);
+        (window as any).__toolTimelineEvents = currentEvents;
+        
+        // Notify UI of live update
+        useChatStore.getState().setToolTimelineEvent(startEvent);
+        break;
+      }
+      
+      case 'tool_end': {
+        const tePayload = message.payload as {
+          chat_id: string;
+          message_id: string;
+          tool: string;
+          round: number;
+          ts: number;
+          status: string;
+          duration_ms: number;
+          result_summary: string;
+        };
+        
+        const endEvent = {
+          ts: tePayload.ts,
+          type: 'tool_end' as const,
+          tool: tePayload.tool,
+          round: tePayload.round,
+          status: tePayload.status,
+          duration_ms: tePayload.duration_ms,
+          result_summary: tePayload.result_summary,
+        };
+        
+        const currentEvts = (window as any).__toolTimelineEvents || [];
+        currentEvts.push(endEvent);
+        (window as any).__toolTimelineEvents = currentEvts;
+        
+        useChatStore.getState().setToolTimelineEvent(endEvent);
+        break;
+      }
+      
       // NC-0.8.0.12: Handle tool_call events with file modifications
       case 'tool_call': {
         const payload = message.payload as {
@@ -1242,9 +1302,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           useChatStore.getState().updateArtifact(filename, artifact);
           console.log('[direct_text] Text artifact created:', filename);
           
-          // Also append as code block to streaming content for inline display
-          const formatted = `\n\n\`\`\`\n${payload.text}\n\`\`\`\n`;
-          streamingBufferRef.current?.append(formatted);
+          // Append a short reference to streaming content (not the full text)
+          const ref = `\n\n📄 **${filename}** extracted — see Artifacts panel.\n`;
+          streamingBufferRef.current?.append(ref);
         }
         break;
       }
@@ -1292,13 +1352,20 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               'No image found yet for message:', chunk.message_id);
           }
           
+          // NC-0.8.0.12: Collect tool timeline events
+          const toolTimelineEvents = (window as any).__toolTimelineEvents || [];
+          const uiEventsFromPayload = (chunk as any).ui_events;
+          const finalUiEvents = uiEventsFromPayload || (toolTimelineEvents.length > 0 ? toolTimelineEvents : undefined);
+          
+          // Build metadata
+          const msgMetadata: Record<string, any> = {};
+          if (generatedImage) msgMetadata.generated_image = generatedImage;
+          if (finalUiEvents) msgMetadata.ui_events = finalUiEvents;
+          
           const assistantMessage: Message = {
             id: chunk.message_id,
             chat_id: chunk.chat_id || '',
             role: 'assistant',
-            // Use cleanContent which has artifact placeholders, preserving code blocks for markdown rendering
-            // But actually we want the ORIGINAL content so code blocks render via markdown
-            // The artifacts are stored separately for the panel
             content: streamingContent,
             parent_id: chunk.parent_id,
             input_tokens: chunk.usage?.input_tokens,
@@ -1307,12 +1374,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             ttft_ms: chunk.usage?.ttft_ms,
             tokens_per_second: chunk.usage?.tokens_per_second,
             created_at: new Date().toISOString(),
-            // Attach extracted artifacts to the message
             artifacts: extractedArtifacts.length > 0 ? extractedArtifacts : undefined,
-            // Attach generated image directly to message metadata
-            metadata: generatedImage ? { generated_image: generatedImage } : undefined,
+            metadata: Object.keys(msgMetadata).length > 0 ? msgMetadata : undefined,
           };
           addMessage(assistantMessage);
+          
+          // Reset tool timeline accumulator
+          (window as any).__toolTimelineEvents = [];
+          useChatStore.getState().clearToolTimeline();
           
           console.log('Added assistant message with', extractedArtifacts.length, 'artifacts');
           

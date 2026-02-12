@@ -59,7 +59,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.8.0.12"
+SCHEMA_VERSION = "NC-0.8.0.13"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""
@@ -467,6 +467,22 @@ async def run_migrations(conn):
             ("ALTER TABLE knowledge_stores ADD COLUMN force_trigger_enabled BOOLEAN DEFAULT 0", "knowledge_stores.force_trigger_enabled"),
             ("ALTER TABLE knowledge_stores ADD COLUMN force_trigger_keywords JSON", "knowledge_stores.force_trigger_keywords"),
             ("ALTER TABLE knowledge_stores ADD COLUMN force_trigger_max_chunks INTEGER DEFAULT 5", "knowledge_stores.force_trigger_max_chunks"),
+        ],
+        "NC-0.8.0.9": [
+            # No schema changes - code-only (streaming stats: ttft, tokens/sec)
+        ],
+        "NC-0.8.0.10": [
+            # No schema changes - code-only (unlimited tools, Google CSE)
+        ],
+        "NC-0.8.0.11": [
+            # No schema changes - code-only (session sandboxes, file versioning, paste detection)
+        ],
+        "NC-0.8.0.12": [
+            # No schema changes - code-only (call graph, associations, fetch_document, tool dedup/compression)
+        ],
+        "NC-0.8.0.13": [
+            # No schema changes - ui_events stored in existing message_metadata JSON column
+            # Features: tool activity timeline, Playwright JS rendering fallback, artifact-only direct_text
         ],
     }
     

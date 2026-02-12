@@ -1825,6 +1825,28 @@ The following is relevant information from your previous conversations:
                     # This ensures the message is visible to any continuation requests
                     # (e.g., file content requests that immediately follow)
                     try:
+                        # NC-0.8.0.12: Save ui_events in message_metadata
+                        _ui_events = event.get("ui_events")
+                        if _ui_events and streaming_handler._current_message_id:
+                            try:
+                                from sqlalchemy import text as _sa_text
+                                # Merge ui_events into existing metadata
+                                result = await db.execute(
+                                    _sa_text("SELECT message_metadata FROM messages WHERE id = :id"),
+                                    {"id": streaming_handler._current_message_id}
+                                )
+                                row = result.fetchone()
+                                existing_meta = {}
+                                if row and row[0]:
+                                    existing_meta = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                                existing_meta["ui_events"] = _ui_events
+                                await db.execute(
+                                    _sa_text("UPDATE messages SET message_metadata = :metadata WHERE id = :id"),
+                                    {"id": streaming_handler._current_message_id, "metadata": json.dumps(existing_meta)}
+                                )
+                            except Exception as meta_err:
+                                logger.debug(f"[UI_EVENTS] Failed to save ui_events: {meta_err}")
+                        
                         await db.commit()
                         logger.debug(f"Committed assistant message to DB")
                     except Exception as commit_err:
@@ -1834,7 +1856,8 @@ The following is relevant information from your previous conversations:
                     await streaming_handler.end_stream(
                         event.get("input_tokens", 0),
                         event.get("output_tokens", 0),
-                        event.get("parent_id"),  # For conversation tree tracking
+                        event.get("parent_id"),
+                        ui_events=event.get("ui_events"),
                     )
                     
                     # Index this chat if chat knowledge is enabled (background, non-blocking)
@@ -1898,6 +1921,23 @@ The following is relevant information from your previous conversations:
                             "tool_name": event.get("tool_name"),
                             "text": event.get("text"),
                             "filename": event.get("filename", "output.txt"),
+                        },
+                    })
+                
+                # NC-0.8.0.12: Forward tool activity events for UI timeline
+                elif event_type in ("tool_start", "tool_end"):
+                    await ws_manager.send_to_connection(connection, {
+                        "type": event_type,
+                        "payload": {
+                            "chat_id": chat_id,
+                            "message_id": streaming_handler._current_message_id,
+                            "tool": event.get("tool", ""),
+                            "round": event.get("round", 0),
+                            "ts": event.get("ts", 0),
+                            "args_summary": event.get("args_summary", ""),
+                            "status": event.get("status", ""),
+                            "duration_ms": event.get("duration_ms", 0),
+                            "result_summary": event.get("result_summary", ""),
                         },
                     })
                 

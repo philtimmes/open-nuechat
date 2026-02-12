@@ -9,6 +9,7 @@ export const createStreamSlice: SliceCreator<StreamSlice> = (set, get) => ({
   streamingContent: '',
   streamingToolCall: null,
   streamingArtifacts: [],
+  toolTimeline: [],
   error: null,
 
   setStreamingContent: (content: string) => {
@@ -25,11 +26,22 @@ export const createStreamSlice: SliceCreator<StreamSlice> = (set, get) => ({
     set({ streamingToolCall: toolCall });
   },
 
+  setToolTimelineEvent: (event) => {
+    set((state) => ({
+      toolTimeline: [...state.toolTimeline, event],
+    }));
+  },
+
+  clearToolTimeline: () => {
+    set({ toolTimeline: [] });
+  },
+
   clearStreaming: () => {
     set({
       streamingContent: '',
       streamingToolCall: null,
       streamingArtifacts: [],
+      toolTimeline: [],
       isSending: false,
     });
   },

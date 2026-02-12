@@ -8,6 +8,7 @@ import { useWebSocket } from '../contexts/WebSocketContext';
 import { useVoice } from '../hooks/useVoice';
 import { useChatShortcuts } from '../hooks/useKeyboardShortcuts';
 import MessageBubble from '../components/MessageBubble';
+import { ToolTimeline } from '../components/chat/ToolTimeline';
 import ChatInput from '../components/ChatInput';
 import EmptyState from '../components/EmptyState';
 import ArtifactsPanel from '../components/ArtifactsPanel';
@@ -630,6 +631,7 @@ export default function ChatPage() {
     isSending,
     streamingContent,
     streamingToolCall,
+    toolTimeline,
     artifacts: savedArtifacts,
     streamingArtifacts,
     selectedArtifact,
@@ -2052,6 +2054,15 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
                 />
               )}
               
+              {/* NC-0.8.0.12: Live tool activity timeline */}
+              {isSending && toolTimeline.length > 0 && (
+                <div className="py-2 px-4">
+                  <div className="max-w-3xl mx-auto">
+                    <ToolTimeline events={toolTimeline} isLive />
+                  </div>
+                </div>
+              )}
+              
               {/* Streaming message - separate component to avoid re-rendering list */}
               {(streamingContent || streamingToolCall) && (
                 <StreamingMessage
@@ -2063,7 +2074,7 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
               )}
               
               {/* Sending indicator */}
-              {isSending && !streamingContent && !streamingToolCall && (
+              {isSending && !streamingContent && !streamingToolCall && toolTimeline.length === 0 && (
                 <div className="py-4 px-4">
                   <div className="max-w-3xl mx-auto flex items-center gap-2 text-[var(--color-text-secondary)]">
                     <div className="flex gap-1">

@@ -61,15 +61,29 @@ export interface StreamSlice {
   streamingContent: string;
   streamingToolCall: { name: string; input: string } | null;
   streamingArtifacts: Artifact[];
+  toolTimeline: ToolTimelineEvent[];
   error: string | null;
   
   setStreamingContent: (content: string) => void;
   appendStreamingContent: (chunk: string) => void;
   setStreamingToolCall: (toolCall: { name: string; input: string } | null) => void;
+  setToolTimelineEvent: (event: ToolTimelineEvent) => void;
+  clearToolTimeline: () => void;
   clearStreaming: () => void;
   setIsSending: (isSending: boolean) => void;
   setError: (error: string | null) => void;
   updateStreamingArtifacts: (content: string) => void;
+}
+
+export interface ToolTimelineEvent {
+  ts: number;
+  type: 'tool_start' | 'tool_end';
+  tool: string;
+  round: number;
+  args_summary?: string;
+  status?: string;
+  duration_ms?: number;
+  result_summary?: string;
 }
 
 /**

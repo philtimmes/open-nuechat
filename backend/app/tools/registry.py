@@ -1744,8 +1744,8 @@ Example:
                 
                 html = response.text
                 
-                # Extract text from HTML
-                text_content = self._extract_text_from_html(html, extract_main)
+                # Extract text from HTML with JS-rendering fallback
+                text_content = await self._extract_text_with_js_fallback(url, html, extract_main)
                 
                 return {
                     "type": "webpage",
@@ -1827,6 +1827,94 @@ Example:
             import html as html_module
             text = html_module.unescape(text)
             return text
+    
+    async def _render_with_playwright(self, url: str, timeout_ms: int = 20000) -> Optional[str]:
+        """
+        Render a page with Playwright (headless Chromium) and return the full HTML.
+        Used as fallback when static fetch yields sparse content (JS-heavy pages).
+        Returns None if Playwright is unavailable or rendering fails.
+        """
+        import logging
+        _log = logging.getLogger(__name__)
+        
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            _log.debug("[PLAYWRIGHT] playwright not installed, skipping JS render")
+            return None
+        
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+                )
+                try:
+                    context = await browser.new_context(
+                        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        viewport={"width": 1280, "height": 720},
+                    )
+                    page = await context.new_page()
+                    
+                    # Navigate and wait for network to settle
+                    await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+                    
+                    # Give JS frameworks a moment to hydrate
+                    await page.wait_for_timeout(1500)
+                    
+                    html = await page.content()
+                    _log.info(f"[PLAYWRIGHT] Rendered {url}, got {len(html)} chars HTML")
+                    return html
+                finally:
+                    await browser.close()
+        except Exception as e:
+            _log.warning(f"[PLAYWRIGHT] Render failed for {url}: {e}")
+            return None
+    
+    async def _extract_text_with_js_fallback(self, url: str, static_html: str, extract_main: bool = True) -> str:
+        """
+        Extract text from HTML, falling back to Playwright rendering if static
+        extraction yields sparse content (indicating a JS-rendered page).
+        """
+        import logging
+        _log = logging.getLogger(__name__)
+        
+        # Try static extraction first
+        text = self._extract_text_from_html(static_html, extract_main)
+        
+        # Heuristics for "sparse" content that suggests JS rendering is needed:
+        # - Very little text despite substantial HTML
+        # - Common SPA indicators in the HTML
+        html_len = len(static_html)
+        text_len = len(text.strip())
+        
+        needs_js = False
+        if text_len < 200 and html_len > 5000:
+            needs_js = True
+            _log.info(f"[JS_FALLBACK] Sparse text ({text_len} chars from {html_len} HTML) — trying Playwright")
+        elif text_len < 500 and html_len > 50000:
+            needs_js = True
+            _log.info(f"[JS_FALLBACK] Low text ratio ({text_len}/{html_len}) — trying Playwright")
+        
+        # Check for SPA framework indicators
+        if not needs_js and html_len > 2000:
+            spa_indicators = ('id="__next"', 'id="app"', 'id="root"', 'ng-app', 
+                            'data-reactroot', 'nuxt', '__nuxt', '__NEXT_DATA__')
+            if any(ind in static_html for ind in spa_indicators) and text_len < 1000:
+                needs_js = True
+                _log.info(f"[JS_FALLBACK] SPA framework detected with low text ({text_len} chars) — trying Playwright")
+        
+        if needs_js:
+            rendered_html = await self._render_with_playwright(url)
+            if rendered_html:
+                rendered_text = self._extract_text_from_html(rendered_html, extract_main)
+                if len(rendered_text.strip()) > text_len:
+                    _log.info(f"[JS_FALLBACK] Playwright yielded {len(rendered_text)} chars (was {text_len})")
+                    return rendered_text
+                else:
+                    _log.info(f"[JS_FALLBACK] Playwright didn't improve ({len(rendered_text)} vs {text_len}), using static")
+        
+        return text
     
     def _extract_video_id(self, url: str) -> tuple:
         """
@@ -2722,8 +2810,8 @@ Example:
                         break
                 result["images"] = images
             
-            # Extract clean body text
-            body_text = self._extract_text_from_html(html, True)
+            # Extract clean body text with JS-rendering fallback
+            body_text = await self._extract_text_with_js_fallback(url, html, True)
             result["content"] = body_text[:50000]
             result["content_length"] = len(body_text)
             
@@ -2987,6 +3075,7 @@ Example:
         import httpx
         import tempfile
         import os
+        import re
         from urllib.parse import urlparse
         
         url = args.get("url", "").strip()
@@ -3044,29 +3133,40 @@ Example:
                 elif not mime_type and url_ext in ext_to_mime:
                     mime_type = ext_to_mime[url_ext]
                 
+                # Build artifact filename from URL
+                url_basename = os.path.basename(parsed.path) or "document"
+                url_stem = os.path.splitext(url_basename)[0]
+                # Clean up the stem
+                url_stem = re.sub(r'[^\w\-.]', '_', url_stem)[:60]
+                extracted_filename = f"{url_stem}_Extracted.txt"
+                
+                # Helper to build direct_to_chat result
+                def _doc_result(text: str, mime: str) -> Dict:
+                    # Truncate for LLM context but keep full text in artifact
+                    llm_preview = text[:15000]
+                    if len(text) > 15000:
+                        llm_preview += f"\n\n[... {len(text)} total chars — full text in artifact: {extracted_filename}]"
+                    return {
+                        "direct_to_chat": True,
+                        "direct_text": text,
+                        "filename": extracted_filename,
+                        "url": str(response.url),
+                        "content_type": mime,
+                        "size_bytes": content_length,
+                        "text": llm_preview,
+                        "text_length": len(text),
+                    }
+                
                 # For text-like types, just return the text directly
                 text_types = ('text/plain', 'text/markdown', 'text/csv', 'application/json', 'text/xml')
                 if mime_type in text_types:
                     text = response.text[:100000]
-                    return {
-                        "url": str(response.url),
-                        "content_type": mime_type,
-                        "size_bytes": content_length,
-                        "text": text,
-                        "text_length": len(text),
-                    }
+                    return _doc_result(text, mime_type)
                 
-                # For HTML, use existing HTML extractor
+                # For HTML, use existing HTML extractor with JS-rendering fallback
                 if 'text/html' in mime_type or 'application/xhtml' in mime_type:
-                    text_content = self._extract_text_from_html(response.text, True)
-                    return {
-                        "url": str(response.url),
-                        "content_type": "text/html",
-                        "title": self._extract_title(response.text),
-                        "size_bytes": content_length,
-                        "text": text_content[:100000],
-                        "text_length": len(text_content),
-                    }
+                    text_content = (await self._extract_text_with_js_fallback(url, response.text, True))[:100000]
+                    return _doc_result(text_content, "text/html")
                 
                 # For binary document types (PDF, DOCX, XLSX, RTF), save to temp and extract
                 supported_binary = (
@@ -3102,9 +3202,50 @@ Example:
                         tmp.write(response.content)
                         tmp_path = tmp.name
                     
+                    import logging
+                    _log = logging.getLogger(__name__)
+                    _log.info(f"[FETCH_DOC] Wrote {content_length} bytes to {tmp_path}, mime={mime_type}")
+                    
                     # Use the existing DocumentProcessor from RAG
-                    from app.services.rag import DocumentProcessor
-                    text = await DocumentProcessor.extract_text(tmp_path, mime_type)
+                    try:
+                        from app.services.rag import DocumentProcessor
+                        text = await DocumentProcessor.extract_text(tmp_path, mime_type)
+                    except Exception as extract_err:
+                        _log.error(f"[FETCH_DOC] DocumentProcessor.extract_text failed: {extract_err}")
+                        text = ""
+                    
+                    # If RAG extraction failed, try direct PyMuPDF for PDF
+                    if (not text or not text.strip()) and mime_type == 'application/pdf':
+                        _log.info("[FETCH_DOC] RAG extraction empty, trying direct PyMuPDF...")
+                        try:
+                            import fitz
+                            doc = fitz.open(tmp_path)
+                            pages = []
+                            for page in doc:
+                                pages.append(page.get_text())
+                            doc.close()
+                            text = "\n\n".join(pages)
+                            _log.info(f"[FETCH_DOC] PyMuPDF extracted {len(text)} chars from {len(pages)} pages")
+                        except ImportError:
+                            _log.warning("[FETCH_DOC] PyMuPDF not installed")
+                        except Exception as pdf_err:
+                            _log.error(f"[FETCH_DOC] PyMuPDF failed: {pdf_err}")
+                    
+                    # If still empty for DOCX, try direct
+                    if (not text or not text.strip()) and mime_type in (
+                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                        'application/msword',
+                    ):
+                        _log.info("[FETCH_DOC] RAG extraction empty, trying direct python-docx...")
+                        try:
+                            from docx import Document as DocxDocument
+                            doc = DocxDocument(tmp_path)
+                            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+                            _log.info(f"[FETCH_DOC] python-docx extracted {len(text)} chars")
+                        except ImportError:
+                            _log.warning("[FETCH_DOC] python-docx not installed")
+                        except Exception as docx_err:
+                            _log.error(f"[FETCH_DOC] python-docx failed: {docx_err}")
                     
                     if not text or not text.strip():
                         return {
@@ -3118,13 +3259,7 @@ Example:
                     if len(text) > 100000:
                         text = text[:100000] + f"\n\n[... truncated, {len(text)} total chars]"
                     
-                    return {
-                        "url": str(response.url),
-                        "content_type": mime_type,
-                        "size_bytes": content_length,
-                        "text": text,
-                        "text_length": len(text),
-                    }
+                    return _doc_result(text, mime_type)
                 finally:
                     if tmp_path and os.path.exists(tmp_path):
                         os.unlink(tmp_path)

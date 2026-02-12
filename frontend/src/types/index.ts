@@ -168,6 +168,17 @@ export interface Message {
       generation_time?: number;
       job_id?: string;
     };
+    // NC-0.8.0.12: Tool activity timeline events
+    ui_events?: Array<{
+      ts: number;
+      type: 'tool_start' | 'tool_end';
+      tool: string;
+      round: number;
+      args_summary?: string;
+      status?: string;
+      duration_ms?: number;
+      result_summary?: string;
+    }>;
   };
 }
 
