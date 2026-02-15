@@ -719,7 +719,10 @@ async def list_messages(
     
     await _get_user_chat(db, user, chat_id)
     
-    query = select(Message).where(Message.chat_id == chat_id)
+    query = select(Message).where(
+        Message.chat_id == chat_id,
+        Message.content_type != ContentType.TOOL_RESULT,
+    )
     
     if before:
         query = query.where(Message.id < before)

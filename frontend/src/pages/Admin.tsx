@@ -2258,7 +2258,7 @@ export default function Admin() {
                           setSystemSettings(updated);
                           fetch('/api/admin/settings', {
                             method: 'PUT',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${(() => { try { const d = localStorage.getItem('nexus-auth'); return d ? JSON.parse(d).state?.accessToken : ''; } catch { return ''; } })()}` },
                             body: JSON.stringify(updated),
                           });
                         }
@@ -2561,7 +2561,7 @@ export default function Admin() {
                           setSystemSettings(updated);
                           fetch('/api/admin/settings', {
                             method: 'PUT',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${(() => { try { const d = localStorage.getItem('nexus-auth'); return d ? JSON.parse(d).state?.accessToken : ''; } catch { return ''; } })()}` },
                             body: JSON.stringify(updated),
                           });
                         }}
@@ -2909,6 +2909,32 @@ export default function Admin() {
                       />
                     </div>
                   </div>
+                </div>
+                
+                {/* YouTube Proxy Configuration */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-2">YouTube Proxy</h2>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                    URL to a proxy list file for YouTube transcript fetching. Each line: <code className="text-xs bg-[var(--color-background)] px-1.5 py-0.5 rounded">ip:port:user:pass</code>. A random proxy is selected per request. Required if YouTube blocks your server IP.
+                  </p>
+                  <input
+                    type="text"
+                    value={systemSettings?.youtube_proxy_list_url || ''}
+                    onChange={(e) => {
+                      if (!systemSettings) return;
+                      setSystemSettings({ ...systemSettings, youtube_proxy_list_url: e.target.value });
+                    }}
+                    onBlur={() => {
+                      if (!systemSettings) return;
+                      fetch('/api/admin/settings', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${(() => { try { const d = localStorage.getItem('nexus-auth'); return d ? JSON.parse(d).state?.accessToken : ''; } catch { return ''; } })()}` },
+                        body: JSON.stringify(systemSettings),
+                      });
+                    }}
+                    placeholder="https://example.com/proxy-list.txt"
+                    className="w-full px-3 py-2 bg-[var(--color-background)] text-[var(--color-text)] border border-[var(--color-border)] rounded-lg font-mono text-sm"
+                  />
                 </div>
                 
                 <button
@@ -5551,7 +5577,7 @@ export default function Admin() {
                           // Save immediately
                           fetch('/api/admin/settings', {
                             method: 'PUT',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${(() => { try { const d = localStorage.getItem('nexus-auth'); return d ? JSON.parse(d).state?.accessToken : ''; } catch { return ''; } })()}` },
                             body: JSON.stringify(updated),
                           });
                         }}
@@ -5581,7 +5607,7 @@ export default function Admin() {
                           setSystemSettings(updated);
                           fetch('/api/admin/settings', {
                             method: 'PUT',
-                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${(() => { try { const d = localStorage.getItem('nexus-auth'); return d ? JSON.parse(d).state?.accessToken : ''; } catch { return ''; } })()}` },
                             body: JSON.stringify(updated),
                           });
                         }}
@@ -5595,6 +5621,32 @@ export default function Admin() {
                       </div>
                     </label>
                   </div>
+                </div>
+                
+                {/* Python Allowed Packages */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Python Packages</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                    Comma-separated list of pip packages the LLM can install via <code className="text-xs bg-[var(--color-background)] px-1.5 py-0.5 rounded">execute_python</code>. Packages are cached locally.
+                  </p>
+                  <textarea
+                    value={systemSettings?.python_allowed_packages || ''}
+                    onChange={(e) => {
+                      if (!systemSettings) return;
+                      setSystemSettings({ ...systemSettings, python_allowed_packages: e.target.value });
+                    }}
+                    onBlur={() => {
+                      if (!systemSettings) return;
+                      fetch('/api/admin/settings', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${(() => { try { const d = localStorage.getItem('nexus-auth'); return d ? JSON.parse(d).state?.accessToken : ''; } catch { return ''; } })()}` },
+                        body: JSON.stringify(systemSettings),
+                      });
+                    }}
+                    rows={3}
+                    placeholder="mpmath, sympy, scipy, requests, beautifulsoup4, openpyxl"
+                    className="w-full px-3 py-2 bg-[var(--color-background)] text-[var(--color-text)] border border-[var(--color-border)] rounded-lg font-mono text-sm"
+                  />
                 </div>
                 
                 {/* Web Search Configuration */}

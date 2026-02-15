@@ -63,7 +63,10 @@ COPY backend/requirements.txt .
 RUN pip install -r requirements.txt
 
 # Optional: DuckDuckGo search library (falls back to HTML scraping if install fails)
-RUN pip install duckduckgo_search || echo "duckduckgo_search not available, using HTML scraper fallback"
+RUN pip install ddgs || echo "ddgs not available, using HTML scraper fallback"
+
+# yt-dlp for extracting audio from video platforms (Rumble, etc.)
+RUN pip install yt-dlp curl-cffi || echo "yt-dlp not available, Rumble transcription will be limited"
 
 # Install Playwright Chromium browser for JS-rendered page extraction
 RUN playwright install chromium && playwright install-deps chromium

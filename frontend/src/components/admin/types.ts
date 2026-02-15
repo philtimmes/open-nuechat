@@ -6,6 +6,8 @@ export interface SystemSettings {
   server_timezone: string;
   store_tool_call_log: boolean;
   llm_comm_dump: boolean;
+  python_allowed_packages: string;
+  youtube_proxy_list_url: string;
   utility_model: string;
   utility_api_base_url: string;
   utility_api_key: string;

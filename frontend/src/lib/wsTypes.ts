@@ -122,6 +122,14 @@ export interface WSUnsubscribed {
 }
 
 // Union of all server message types
+export interface WSBrowserFetchRequest {
+  type: 'browser_fetch_request';
+  payload: {
+    request_id: string;
+    url: string;
+  };
+}
+
 export type ServerMessage =
   | WSStreamStart
   | WSStreamChunk
@@ -134,7 +142,8 @@ export type ServerMessage =
   | WSPong
   | WSError
   | WSSubscribed
-  | WSUnsubscribed;
+  | WSUnsubscribed
+  | WSBrowserFetchRequest;
 
 // ============ Client -> Server Event Types ============
 

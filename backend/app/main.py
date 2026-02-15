@@ -50,6 +50,7 @@ logging.getLogger("app.services.llm").setLevel(logging.INFO)
 logging.getLogger("app.services.billing").setLevel(logging.INFO)
 logging.getLogger("app.services.document_queue").setLevel(logging.INFO)
 logging.getLogger("app.services.rag").setLevel(logging.INFO)  # For debug RAG logging
+logging.getLogger("app.tools.registry").setLevel(logging.INFO)  # Tool execution logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)  # Keep main app logger at INFO for startup messages
@@ -59,7 +60,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 
 
 # Current schema version
-SCHEMA_VERSION = "NC-0.8.0.13"
+SCHEMA_VERSION = "NC-0.8.0.15"
 
 def parse_version(v: str) -> tuple:
     """Parse version string like 'NC-0.5.1' into comparable tuple (0, 5, 1)"""

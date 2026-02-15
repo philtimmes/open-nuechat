@@ -924,6 +924,7 @@ class LLMService:
             # Debug: Log the ACTUAL JSON payload size that will be sent
             import json as json_module
             import time as _dump_time
+            import os as os
             dump_dir = ""
             try:
                 from app.services.settings_service import SettingsService as _DumpSS

@@ -36,8 +36,32 @@ from app.api.ws_types import (
 
 logger = logging.getLogger(__name__)
 
+# Browser proxy: pending fetch requests awaiting browser response
+_browser_fetch_pending: dict[str, asyncio.Future] = {}
+
 
 router = APIRouter(tags=["WebSocket"])
+
+
+async def browser_fetch(connection, url: str, timeout: float = 30.0) -> dict:
+    """Request the user's browser to fetch a URL and return the content.
+    Used as a proxy for sites that block server-side requests (e.g. YouTube).
+    """
+    req_id = str(uuid.uuid4())[:8]
+    future = asyncio.get_event_loop().create_future()
+    _browser_fetch_pending[req_id] = future
+    
+    try:
+        await ws_manager.send_to_connection(connection, {
+            "type": "browser_fetch_request",
+            "payload": {"request_id": req_id, "url": url},
+        })
+        result = await asyncio.wait_for(future, timeout=timeout)
+        return result
+    except asyncio.TimeoutError:
+        return {"error": "Browser fetch timed out"}
+    finally:
+        _browser_fetch_pending.pop(req_id, None)
 
 
 # YouTube URL patterns for detection
@@ -67,66 +91,34 @@ def extract_youtube_urls(text: str) -> List[Tuple[str, str]]:
     return results
 
 
-async def fetch_youtube_context(video_ids: List[str]) -> str:
-    """Fetch YouTube video subtitles and metadata for context.
-    
-    Returns formatted context string with video transcripts or metadata.
-    """
+async def fetch_youtube_context(video_ids: List[str], connection=None, chat_id: str = None, db=None) -> str:
+    """Fetch YouTube video subtitles via youtube-transcript-api with optional proxy."""
     if not video_ids:
         return ""
     
     context_parts = []
+    context_dict = {}
+    if chat_id:
+        context_dict["chat_id"] = chat_id
+    if db:
+        context_dict["db"] = db
     
-    for video_id in video_ids[:3]:  # Limit to 3 videos max
+    for video_id in video_ids[:3]:
         try:
-            # Use the tool registry's full video info extraction (includes title + subtitles)
-            video_info = await tool_registry._create_video_embed_with_subtitles(
-                'youtube', video_id, f"https://www.youtube.com/watch?v={video_id}"
-            )
-            
-            if video_info:
-                title = video_info.get("title", "Unknown")
-                channel = video_info.get("channel", "")
-                description = video_info.get("description", "")
-                
-                # Build header with available metadata
-                header_parts = [f"[YouTube Video: {video_id}]", f"Title: {title}"]
-                if channel:
-                    header_parts.append(f"Channel: {channel}")
-                if description:
-                    header_parts.append(f"Description: {description}")
-                header = "\n".join(header_parts)
-                
-                # Check for subtitles
-                if video_info.get("subtitles"):
-                    transcript = video_info["subtitles"].get("transcript", "")
-                    lang = video_info["subtitles"].get("language", "en")
-                    is_auto = video_info["subtitles"].get("is_auto_generated", False)
-                    auto_note = " (auto-generated)" if is_auto else ""
-                    
-                    # Truncate very long transcripts
-                    if len(transcript) > 15000:
-                        transcript = transcript[:15000] + "... [truncated]"
-                    
-                    context_parts.append(f"{header}\nSubtitles ({lang}{auto_note}):\n{transcript}\n")
-                    logger.info(f"[YOUTUBE] Fetched subtitles for {video_id}: {len(transcript)} chars")
-                else:
-                    # No subtitles, but we have metadata
-                    error = video_info.get("subtitles_error", "No subtitles available")
-                    context_parts.append(f"{header}\nNote: {error}\n")
-                    logger.info(f"[YOUTUBE] No subtitles for {video_id}, but got metadata: title='{title}'")
+            result = await tool_registry._fetch_youtube_subtitles(video_id, 'en', context_dict)
+            if result.get("success") and result.get("transcript"):
+                transcript = result["transcript"]
+                if len(transcript) > 15000:
+                    transcript = transcript[:15000] + "... [truncated]"
+                context_parts.append(f"[YouTube Video: {video_id}]\nhttps://www.youtube.com/watch?v={video_id}\nTranscript:\n{transcript}\n")
+                logger.info(f"[YOUTUBE] Transcript for {video_id}: {len(transcript)} chars")
             else:
-                context_parts.append(f"[YouTube Video: {video_id}]\nFailed to fetch video info.\n")
-                logger.warning(f"[YOUTUBE] Failed to get video info for {video_id}")
-                
+                error = result.get("error", "Unknown error")
+                logger.info(f"[YOUTUBE] No transcript for {video_id}: {error}")
         except Exception as e:
-            logger.warning(f"[YOUTUBE] Error fetching video info for {video_id}: {e}")
-            context_parts.append(f"[YouTube Video: {video_id}]\nError: {str(e)}\n")
+            logger.warning(f"[YOUTUBE] Error for {video_id}: {e}")
     
-    if context_parts:
-        return "\n---\n".join(context_parts)
-    
-    return ""
+    return "\n---\n".join(context_parts) if context_parts else ""
 
 
 @router.websocket("/ws")
@@ -197,6 +189,12 @@ async def websocket_endpoint(
             
             if msg_type == "ping":
                 await ws_manager.send_to_connection(connection, {"type": "pong"})
+            
+            elif msg_type == "browser_fetch_response":
+                # Browser completed a fetch request on our behalf
+                req_id = payload.get("request_id")
+                if req_id and req_id in _browser_fetch_pending:
+                    _browser_fetch_pending[req_id].set_result(payload)
             
             elif msg_type == "subscribe":
                 chat_id = payload.get("chat_id")
@@ -1067,7 +1065,7 @@ The following is relevant information from your previous conversations:
         if youtube_urls:
             logger.info(f"[YOUTUBE] Processing {len(youtube_urls)} YouTube URLs")
             video_ids = [vid for _, vid in youtube_urls]
-            youtube_context = await fetch_youtube_context(video_ids)
+            youtube_context = await fetch_youtube_context(video_ids, connection=connection, chat_id=chat_id, db=db)
             if youtube_context:
                 logger.info(f"[YOUTUBE] Added {len(youtube_context)} chars of context from video subtitles")
                 # Add YouTube context to system prompt
@@ -1758,6 +1756,7 @@ The following is relevant information from your previous conversations:
                         "user_id": user.id,
                         "chat_id": chat_id,
                         "message_id": streaming_handler._current_message_id,
+                        "ws_connection": connection,
                     },
                 )
             

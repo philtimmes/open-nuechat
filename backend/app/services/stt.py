@@ -76,12 +76,25 @@ def _get_pipeline():
         
         logger.info(f"Loading Whisper model: {model_id}")
         
-        # Load model - CRITICAL: low_cpu_mem_usage=False to avoid meta tensor issues
+        # Load model
         _model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
-            low_cpu_mem_usage=False,  # Disabled to avoid meta tensor errors
-        ).to(device)
+            low_cpu_mem_usage=False,
+        )
+        
+        # Move to device - handle meta tensors from newer transformers
+        try:
+            _model = _model.to(device)
+        except NotImplementedError:
+            # Meta tensor error - use to_empty() then load weights properly
+            _model = _model.to_empty(device=device)
+            _model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                low_cpu_mem_usage=False,
+                device_map=str(device),
+            )
         
         # Enable static cache for faster generation
         _model.generation_config.cache_implementation = "static"
@@ -368,25 +381,77 @@ class STTService:
     ) -> Dict[str, Any]:
         """Synchronous transcription (runs in thread pool)"""
         import torch
+        import numpy as np
         
-        pipeline = self.pipeline
+        # For short audio (<30s), use pipeline directly
+        # For long audio, use model.generate() with chunking
+        duration_s = len(audio) / self.SAMPLE_RATE
         
-        # Build generate kwargs
-        generate_kwargs = {}
-        if language:
-            generate_kwargs["language"] = language
-        if task == "translate":
-            generate_kwargs["task"] = "translate"
+        if duration_s <= 30:
+            pipeline_obj = self.pipeline
+            generate_kwargs = {}
+            if language:
+                generate_kwargs["language"] = language
+            if task == "translate":
+                generate_kwargs["task"] = "translate"
+            
+            with torch.inference_mode():
+                result = pipeline_obj(
+                    audio,
+                    generate_kwargs=generate_kwargs if generate_kwargs else None,
+                    return_timestamps=False,
+                )
+            return result or {"text": "", "chunks": []}
         
-        # Run inference
+        # Long audio: use model.generate() directly (Whisper's native long-form)
+        logger.info(f"[STT] Long audio ({duration_s:.0f}s), using model.generate()")
+        
+        model = _model
+        processor = _processor
+        device = next(model.parameters()).device
+        torch_dtype = next(model.parameters()).dtype
+        
+        # Process in 30-second chunks with stride
+        chunk_length = 30 * self.SAMPLE_RATE  # 30 seconds
+        stride = 5 * self.SAMPLE_RATE  # 5 second overlap
+        
+        all_text = []
+        offset = 0
+        
         with torch.inference_mode():
-            result = pipeline(
-                audio,
-                generate_kwargs=generate_kwargs if generate_kwargs else None,
-                return_timestamps=True
-            )
+            while offset < len(audio):
+                end = min(offset + chunk_length, len(audio))
+                chunk = audio[offset:end]
+                
+                # Pad short final chunks
+                if len(chunk) < 400:  # Too short for feature extraction
+                    break
+                
+                input_features = processor(
+                    chunk, 
+                    sampling_rate=self.SAMPLE_RATE, 
+                    return_tensors="pt"
+                ).input_features.to(device, dtype=torch_dtype)
+                
+                generate_kwargs = {}
+                if language:
+                    generate_kwargs["language"] = language
+                if task == "translate":
+                    generate_kwargs["task"] = "translate"
+                
+                predicted_ids = model.generate(
+                    input_features, 
+                    **generate_kwargs
+                )
+                text = processor.batch_decode(predicted_ids, skip_special_tokens=True)
+                if text and text[0].strip():
+                    all_text.append(text[0].strip())
+                
+                # Advance by chunk minus stride for overlap
+                offset += chunk_length - stride
         
-        return result
+        full_text = " ".join(all_text)
+        return {"text": full_text, "chunks": []}
     
     async def transcribe(
         self,

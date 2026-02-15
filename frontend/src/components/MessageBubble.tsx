@@ -2,6 +2,7 @@ import React, { useState, memo, useRef, useEffect, useCallback, useMemo } from '
 import type { Message, Artifact, GeneratedImage, UserHint } from '../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkBreaks from 'remark-breaks';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import GeneratedImageCard from './GeneratedImageCard';
@@ -1055,7 +1056,7 @@ function MessageBubbleInner({
                   // No tool markers — render as single block, strip any orphan markers
                   const cleaned = processedContent.replace(/\n?<!--tools:\d+-->\n?/g, '');
                   return (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={markdownComponents}>
                       {cleaned}
                     </ReactMarkdown>
                   );
@@ -1079,7 +1080,7 @@ function MessageBubbleInner({
                   const trimmed = segment.trim();
                   if (!trimmed) return null;
                   return (
-                    <ReactMarkdown key={`md-${idx}`} remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    <ReactMarkdown key={`md-${idx}`} remarkPlugins={[remarkGfm, remarkBreaks]} components={markdownComponents}>
                       {trimmed}
                     </ReactMarkdown>
                   );

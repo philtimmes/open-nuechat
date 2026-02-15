@@ -284,6 +284,37 @@ plt.bar(df['name'], df['value'])
             handler=self._fetch_urls_handler,
         )
         
+        self.register(
+            name="youtube_transcript",
+            description="Fetch the transcript/captions of a YouTube video. Returns the full text transcript saved as an artifact file. Accepts a full YouTube URL or just the video ID.",
+            parameters={
+                "video": {
+                    "type": "string",
+                    "description": "YouTube video URL (e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ) or just the video ID (e.g. dQw4w9WgXcQ)",
+                    "required": True,
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Preferred language code for captions (default: en)",
+                    "required": False,
+                },
+            },
+            handler=self._youtube_transcript_handler,
+        )
+        
+        self.register(
+            name="rumble_transcript",
+            description="Fetch the transcript of a Rumble video. Checks for existing subtitles first, then falls back to Whisper audio transcription. Returns the full text saved as an artifact file.",
+            parameters={
+                "video": {
+                    "type": "string",
+                    "description": "Rumble video URL (e.g. https://rumble.com/v1abc23-title.html) or embed URL",
+                    "required": True,
+                },
+            },
+            handler=self._rumble_transcript_handler,
+        )
+        
         # File viewing tools for uploaded files
         self.register(
             name="view_file_lines",
@@ -1141,60 +1172,22 @@ Example:
         }
     
     async def _python_executor_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
-        """Execute Python code in a restricted environment with optional direct output"""
+        """Execute Python code in an isolated venv with admin-configured packages"""
+        import asyncio
+        import io
+        import os
+        import sys
+        import base64
+        import shutil
+        import uuid
+        import tempfile
+        
         code = args.get("code", "")
         output_image = args.get("output_image", False)
         output_text = args.get("output_text", False)
         output_filename = args.get("output_filename", None)
         
-        # Extended safe builtins
-        safe_builtins = {
-            "abs": abs, "all": all, "any": any, "bin": bin, "bool": bool,
-            "chr": chr, "dict": dict, "divmod": divmod, "enumerate": enumerate,
-            "filter": filter, "float": float, "format": format, "frozenset": frozenset,
-            "hex": hex, "int": int, "isinstance": isinstance, "len": len,
-            "list": list, "map": map, "max": max, "min": min, "oct": oct,
-            "ord": ord, "pow": pow, "print": print, "range": range, "repr": repr,
-            "reversed": reversed, "round": round, "set": set, "slice": slice,
-            "sorted": sorted, "str": str, "sum": sum, "tuple": tuple, "type": type,
-            "zip": zip, "hasattr": hasattr, "getattr": getattr, "setattr": setattr,
-            "callable": callable, "bytes": bytes, "bytearray": bytearray,
-            "open": sandboxed_open,  # NC-0.8.0.12: Jailed to session sandbox
-        }
-        
-        # Create a controlled __import__ that only allows safe modules
-        allowed_modules = {
-            "matplotlib", "matplotlib.pyplot", "matplotlib.ticker",
-            "pandas", "numpy", "math", "statistics", "datetime", "random",
-            "json", "re", "csv", "collections", "itertools", "functools",
-            "PIL", "PIL.Image", "io", "os",
-        }
-        
-        def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-            # Check if module is allowed
-            if name not in allowed_modules and not any(name.startswith(m + ".") for m in allowed_modules):
-                raise ImportError(f"Import of '{name}' is not allowed. Available: matplotlib, pandas, numpy, etc.")
-            return __import__(name, globals, locals, fromlist, level)
-        
-        safe_builtins["__import__"] = safe_import
-        
-        # Check for dangerous patterns
-        dangerous = ["exec(", "eval(", "subprocess", "os.system", "os.popen", "os.remove", "shutil.rmtree", "compile("]
-        code_lower = code.lower()
-        if any(d in code_lower for d in dangerous):
-            return {"error": "Code contains restricted operations"}
-        
-        # Capture output
-        import io
-        import sys
-        import base64
-        import os
-        
-        output_capture = io.StringIO()
-        old_stdout = sys.stdout
-        old_cwd = os.getcwd()
-        
-        # NC-0.8.0.12: Per-session sandbox directory (GUID-based isolation)
+        # Get chat sandbox for file I/O
         chat_id = context.get("chat_id") if context else None
         if chat_id:
             sandbox_dir = get_session_sandbox(chat_id)
@@ -1202,9 +1195,7 @@ Example:
             sandbox_dir = os.environ.get("ARTIFACTS_DIR", "/app/data/artifacts")
             os.makedirs(sandbox_dir, exist_ok=True)
         
-        os.chdir(sandbox_dir)
-        
-        # NC-0.8.0.12: Materialize session files into sandbox so execute_python can access them
+        # Materialize session files into sandbox
         _materialized_files = []
         if chat_id:
             try:
@@ -1218,83 +1209,201 @@ Example:
                         with open(file_path, 'w', encoding='utf-8') as f:
                             f.write(fcontent)
                         _materialized_files.append(fname)
-                if _materialized_files:
-                    logger.debug(f"[EXECUTE_PYTHON] Materialized {len(_materialized_files)} session files to sandbox {chat_id[:8]}...")
             except Exception as e:
                 logger.warning(f"[EXECUTE_PYTHON] Failed to materialize session files: {e}")
         
-        # NC-0.8.0.12: Create sandboxed open() and os that prevent traversal above sandbox
-        sandboxed_open = make_sandboxed_open(sandbox_dir)
-        sandboxed_os = make_sandboxed_os(sandbox_dir)
+        # Create GUID-based venv for this execution
+        pip_cache_dir = "/app/data/python/packages/cache"
+        os.makedirs(pip_cache_dir, exist_ok=True)
+        
+        exec_id = str(uuid.uuid4())[:12]
+        venv_base = "/app/data/sandboxes"
+        os.makedirs(venv_base, exist_ok=True)
+        venv_dir = os.path.join(venv_base, f"pyenv_{exec_id}")
         
         try:
-            sys.stdout = output_capture
-            
-            # Build safe globals with allowed modules
-            import statistics
-            import datetime
-            import random
-            import collections
-            import itertools
-            import functools
-            import numpy as np
-            import csv
-            
-            # Try to import pandas
+            # Get admin-allowed packages from DB
+            admin_allowed_packages = set()
             try:
-                import pandas as pd
-                has_pandas = True
-            except ImportError:
-                pd = None
-                has_pandas = False
+                db = context.get("db") if context else None
+                if db:
+                    from app.services.settings_service import SettingsService
+                    pkg_setting = await SettingsService.get(db, "python_allowed_packages")
+                    if pkg_setting:
+                        admin_allowed_packages = {p.strip().lower() for p in pkg_setting.split(",") if p.strip()}
+            except Exception as e:
+                logger.debug(f"[EXECUTE_PYTHON] Could not load allowed packages: {e}")
             
-            safe_globals = {
-                "__builtins__": safe_builtins,
-                "math": math,
-                "statistics": statistics,
-                "datetime": datetime,
-                "random": random,
-                "json": json,
-                "re": re,
-                "collections": collections,
-                "itertools": itertools,
-                "functools": functools,
-                "np": np,
-                "numpy": np,
-                "csv": csv,
-                "os": sandboxed_os,  # NC-0.8.0.12: Jailed to session sandbox
+            # Detect imports in code to determine what needs installing
+            import re as _re_imports
+            import_names = set()
+            for line in code.split('\n'):
+                line = line.strip()
+                m = _re_imports.match(r'^(?:from\s+(\S+)|import\s+(\S+))', line)
+                if m:
+                    mod = (m.group(1) or m.group(2)).split('.')[0]
+                    import_names.add(mod)
+            
+            # Built-in / always available modules (no install needed)
+            builtin_modules = {
+                "math", "statistics", "datetime", "random", "json", "re", "csv",
+                "collections", "itertools", "functools", "io", "os", "sys",
+                "decimal", "fractions", "time", "string", "textwrap", "struct",
+                "hashlib", "base64", "copy", "typing", "pathlib", "tempfile",
+                "urllib", "abc", "dataclasses", "enum", "operator",
+            }
+            # Pre-installed packages (in the container)
+            preinstalled = {
+                "numpy", "np", "pandas", "pd", "matplotlib", "plt", "PIL",
+                "pillow", "scipy", "sklearn", "scikit-learn",
             }
             
-            if has_pandas:
-                safe_globals["pd"] = pd
-                safe_globals["pandas"] = pd
+            # Packages that need installing
+            needs_install = []
+            for mod in import_names:
+                mod_lower = mod.lower()
+                if mod_lower in builtin_modules or mod_lower in preinstalled:
+                    continue
+                if mod_lower in admin_allowed_packages or mod in admin_allowed_packages:
+                    needs_install.append(mod)
+                # Also check if it's just not recognized - let it try anyway if admin allows all
             
-            # Always try to add matplotlib and PIL (needed for charts)
+            # Create venv and install packages if needed
+            venv_python = sys.executable  # Default: use system python
+            
+            if needs_install:
+                logger.info(f"[EXECUTE_PYTHON] Creating venv for packages: {needs_install}")
+                
+                # Create venv
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, "-m", "venv", "--system-site-packages", venv_dir,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.wait()
+                
+                venv_python = os.path.join(venv_dir, "bin", "python")
+                venv_pip = os.path.join(venv_dir, "bin", "pip")
+                
+                # Symlink artifacts/sandbox into venv so code can find files
+                artifacts_link = os.path.join(venv_dir, "artifacts")
+                try:
+                    os.symlink(sandbox_dir, artifacts_link)
+                except Exception:
+                    pass
+                
+                # Install packages with cache
+                for pkg in needs_install:
+                    if pkg.lower() not in admin_allowed_packages:
+                        logger.warning(f"[EXECUTE_PYTHON] Package '{pkg}' not in admin allowed list, skipping")
+                        continue
+                    logger.info(f"[EXECUTE_PYTHON] Installing {pkg}")
+                    proc = await asyncio.create_subprocess_exec(
+                        venv_pip, "install", "--cache-dir", pip_cache_dir, pkg,
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                    if proc.returncode != 0:
+                        logger.warning(f"[EXECUTE_PYTHON] pip install {pkg} failed: {stderr.decode()[:500]}")
+            
+            # Write code to temp file in sandbox
+            script_path = os.path.join(sandbox_dir, f"_exec_{exec_id}.py")
+            
+            # Wrap code to capture output and handle image/result serialization
+            wrapper = f'''
+import sys, os, json, base64, io
+os.chdir({repr(sandbox_dir)})
+os.environ["ARTIFACTS_DIR"] = {repr(sandbox_dir)}
+os.environ["MPLBACKEND"] = "Agg"
+
+# Capture stdout
+_captured = io.StringIO()
+_old_stdout = sys.stdout
+sys.stdout = _captured
+
+_result = None
+_image_b64 = None
+_error = None
+_tb = None
+
+try:
+    _local = {{}}
+    exec({repr(code)}, {{}}, _local)
+    _result = _local.get("result", None)
+    
+    # Check for matplotlib figure
+    if {repr(output_image)}:
+        try:
+            import matplotlib.pyplot as plt
+            fig = plt.gcf()
+            if fig.get_axes():
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+                buf.seek(0)
+                _image_b64 = base64.b64encode(buf.read()).decode("utf-8")
+                plt.close(fig)
+        except Exception:
+            pass
+        
+        if not _image_b64:
             try:
-                import matplotlib
-                matplotlib.use('Agg')  # Non-interactive backend
-                import matplotlib.pyplot as plt
-                # Clear any existing figures
-                plt.close('all')
-                safe_globals["plt"] = plt
-                safe_globals["matplotlib"] = matplotlib
-            except ImportError:
-                pass  # matplotlib not available
+                from PIL import Image as _PILImage
+                _img = _local.get("result") or _local.get("img") or _local.get("image")
+                if isinstance(_img, _PILImage.Image):
+                    buf = io.BytesIO()
+                    _img.save(buf, format="PNG")
+                    buf.seek(0)
+                    _image_b64 = base64.b64encode(buf.read()).decode("utf-8")
+            except Exception:
+                pass
+
+except Exception as _e:
+    import traceback
+    _error = str(_e)
+    _tb = traceback.format_exc()
+
+sys.stdout = _old_stdout
+_output = _captured.getvalue()
+
+# Write result as JSON to a known file
+_res = {{"output": _output, "result": str(_result) if _result is not None else None, "error": _error, "traceback": _tb, "image_b64": _image_b64}}
+with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as _f:
+    json.dump(_res, _f)
+'''
             
+            with open(script_path, 'w') as f:
+                f.write(wrapper)
+            
+            # Execute in subprocess
+            proc = await asyncio.create_subprocess_exec(
+                venv_python, script_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=sandbox_dir,
+            )
             try:
-                from PIL import Image
-                safe_globals["Image"] = Image
-                safe_globals["PIL"] = __import__("PIL")
-            except ImportError:
-                pass  # PIL not available
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return {"success": False, "error": "Execution timed out (300s)"}
             
-            local_vars = {}
-            exec(code, safe_globals, local_vars)
+            # Read result
+            result_path = os.path.join(sandbox_dir, f"_result_{exec_id}.json")
+            if os.path.exists(result_path):
+                with open(result_path, 'r') as f:
+                    exec_result = json.load(f)
+                os.remove(result_path)
+            else:
+                # Script crashed before writing result
+                return {
+                    "success": False,
+                    "error": stderr.decode()[:2000] if stderr else "Execution failed with no output",
+                }
             
-            sys.stdout = old_stdout
-            output = output_capture.getvalue()
+            # Clean up script
+            if os.path.exists(script_path):
+                os.remove(script_path)
             
-            # NC-0.8.0.12: Sync back any modified files to session storage
+            # Sync back modified files
             if chat_id and _materialized_files:
                 for fname in _materialized_files:
                     file_path = os.path.join(sandbox_dir, fname)
@@ -1305,101 +1414,60 @@ Example:
                             old_content = get_session_file(chat_id, fname)
                             if old_content != new_content:
                                 store_session_file(chat_id, fname, new_content)
-                                logger.info(f"[EXECUTE_PYTHON] Synced modified file back to session: {fname}")
                         except Exception:
-                            pass  # Binary file or encoding issue
+                            pass
             
-            # Restore working directory
-            os.chdir(old_cwd)
+            # Check for errors
+            if exec_result.get("error"):
+                return {
+                    "success": False,
+                    "error": exec_result["error"],
+                    "traceback": exec_result.get("traceback", ""),
+                    "output": exec_result.get("output", ""),
+                }
             
-            # Get returned value if any
-            result = local_vars.get("result", None)
-            
+            # Build response
+            output = exec_result.get("output", "")
             response = {
                 "success": True,
                 "output": output if output else None,
-                "result": result,
+                "result": exec_result.get("result"),
             }
             
             # Handle image output
-            if output_image:
-                image_data = None
-                image_error = None
-                
-                # Check for matplotlib figure
-                try:
-                    import matplotlib.pyplot as plt
-                    fig = plt.gcf()
-                    logger.info(f"[EXECUTE_PYTHON] Checking matplotlib figure: axes={len(fig.get_axes())}")
-                    if fig.get_axes():  # Figure has content
-                        buf = io.BytesIO()
-                        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-                        buf.seek(0)
-                        image_data = base64.b64encode(buf.read()).decode('utf-8')
-                        logger.info(f"[EXECUTE_PYTHON] Captured matplotlib figure, base64 length: {len(image_data)}")
-                        plt.close(fig)
-                    else:
-                        logger.warning("[EXECUTE_PYTHON] Matplotlib figure has no axes/content")
-                except Exception as mpl_err:
-                    image_error = f"matplotlib error: {mpl_err}"
-                    logger.error(f"[EXECUTE_PYTHON] {image_error}")
-                
-                # Check for PIL Image in result or local_vars
-                if not image_data:
-                    try:
-                        from PIL import Image as PILImage
-                        img = local_vars.get("result") or local_vars.get("img") or local_vars.get("image")
-                        if isinstance(img, PILImage.Image):
-                            buf = io.BytesIO()
-                            img.save(buf, format='PNG')
-                            buf.seek(0)
-                            image_data = base64.b64encode(buf.read()).decode('utf-8')
-                            logger.info(f"[EXECUTE_PYTHON] Captured PIL image, base64 length: {len(image_data)}")
-                    except Exception as pil_err:
-                        if not image_error:
-                            image_error = f"PIL error: {pil_err}"
-                        logger.error(f"[EXECUTE_PYTHON] PIL error: {pil_err}")
-                
-                if image_data:
-                    response["image_base64"] = image_data
-                    response["image_mime_type"] = "image/png"
-                    response["filename"] = output_filename or "output.png"
-                    response["direct_to_chat"] = True
-                    # Tell the LLM the image was already shown to user
-                    response["image_displayed"] = True
-                    response["message"] = "Chart/image was generated and displayed to the user. Do not try to show or link to the image - it's already visible in the chat."
-                    logger.info(f"[EXECUTE_PYTHON] Image ready for direct_to_chat")
-                elif image_error:
-                    response["image_error"] = image_error
-                    response["message"] = f"Failed to generate image: {image_error}"
-                    logger.warning(f"[EXECUTE_PYTHON] No image captured, error: {image_error}")
-                else:
-                    response["message"] = "output_image=True was set but no matplotlib figure or PIL image was created by the code."
-                    logger.warning("[EXECUTE_PYTHON] output_image=True but no image was generated")
+            if output_image and exec_result.get("image_b64"):
+                response["image_base64"] = exec_result["image_b64"]
+                response["image_mime_type"] = "image/png"
+                response["filename"] = output_filename or "output.png"
+                response["direct_to_chat"] = True
+                response["image_displayed"] = True
+                response["message"] = "Chart/image was generated and displayed to the user."
+            elif output_image:
+                response["message"] = "output_image=True was set but no image was generated."
             
             # Handle direct text output
             if output_text:
                 response["direct_to_chat"] = True
-                response["direct_text"] = output if output else str(result) if result is not None else ""
+                response["direct_text"] = output if output else str(exec_result.get("result", ""))
                 response["filename"] = output_filename or "output.txt"
                 response["text_displayed"] = True
-                response["message"] = "Output was displayed directly to the user. Do not repeat the output in your response."
+                response["message"] = "Output was displayed directly to the user."
             
-            logger.info(f"[EXECUTE_PYTHON] Returning response: success={response.get('success')}, has_image={bool(response.get('image_base64'))}, direct_to_chat={response.get('direct_to_chat')}")
             return response
             
         except Exception as e:
-            sys.stdout = old_stdout
-            os.chdir(old_cwd)  # Restore cwd on error
             import traceback
             tb = traceback.format_exc()
             logger.error(f"[EXECUTE_PYTHON] Execution failed: {e}")
-            logger.error(f"[EXECUTE_PYTHON] Traceback: {tb}")
-            return {
-                "success": False,
-                "error": str(e),
-                "traceback": tb,
-            }
+            return {"success": False, "error": str(e), "traceback": tb}
+        
+        finally:
+            # Clean up venv
+            if os.path.exists(venv_dir):
+                try:
+                    shutil.rmtree(venv_dir)
+                except Exception:
+                    pass
     
     async def _json_formatter_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Format JSON data"""
@@ -1707,7 +1775,7 @@ Example:
         # Check if it's a video URL first
         platform, video_id = self._extract_video_id(url)
         if platform and video_id:
-            embed = await self._create_video_embed_with_subtitles(platform, video_id, url)
+            embed = await self._create_video_embed_with_subtitles(platform, video_id, url, context=context)
             if embed:
                 return embed
         
@@ -2027,201 +2095,436 @@ Example:
         
         return (None, None)
     
-    async def _fetch_youtube_subtitles(self, video_id: str, lang: str = 'en') -> dict:
-        """Fetch YouTube video subtitles/captions."""
-        import httpx
+    async def _youtube_transcript_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Handle youtube_transcript tool call - extract video ID and fetch transcript."""
         import re
-        import json
+        video = args.get("video", "").strip()
+        lang = args.get("language", "en") or "en"
+        
+        if not video:
+            return {"error": "No video URL or ID provided"}
+        
+        # Extract video ID from various URL formats
+        video_id = None
+        patterns = [
+            r'(?:youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/embed/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})',
+        ]
+        for pat in patterns:
+            m = re.search(pat, video)
+            if m:
+                video_id = m.group(1)
+                break
+        
+        # If no URL match, treat as raw video ID
+        if not video_id:
+            video_id = re.sub(r'[^a-zA-Z0-9_-]', '', video)
+            if len(video_id) != 11:
+                return {"error": f"Invalid video ID: '{video}'. Expected 11-character YouTube video ID or a full URL."}
+        
+        result = await self._fetch_youtube_subtitles(video_id, lang, context)
+        
+        if result.get("error"):
+            return result
+        
+        # Return just the artifact path and summary - transcript is in the file
+        transcript = result.get("transcript", "")
+        return {
+            "success": True,
+            "video_id": video_id,
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "artifact": result.get("artifact", f"{video_id}.txt"),
+            "language": result.get("language", lang),
+            "length": len(transcript),
+            "preview": transcript[:500] + "..." if len(transcript) > 500 else transcript,
+            "message": f"Transcript saved to artifacts as {video_id}.txt ({len(transcript)} chars). Read it with view_file_lines if needed.",
+        }
+    
+    async def _rumble_transcript_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Fetch Rumble video transcript - VTT subtitles first, yt-dlp + Whisper fallback."""
+        import re
+        import httpx
         import logging
+        import asyncio
+        import tempfile
+        import os
         logger = logging.getLogger(__name__)
         
-        # Try youtube-transcript-api first (most reliable)
+        logger.info(f"[RUMBLE] Handler called. context={'yes' if context else 'no'}, context_keys={list(context.keys()) if context else '[]'}")
+        
+        video_url = args.get("video", "").strip()
+        if not video_url:
+            return {"error": "No Rumble video URL provided"}
+        
+        # Extract video ID for naming
+        video_id = "unknown"
+        m = re.search(r'rumble\.com/embed/v([a-zA-Z0-9]+)', video_url)
+        if m:
+            video_id = m.group(1)
+        else:
+            m = re.search(r'rumble\.com/v([a-zA-Z0-9]+)', video_url)
+            if m:
+                video_id = m.group(1)
+        
+        logger.info(f"[RUMBLE] video_id={video_id}")
+        
+        # Get proxy FIRST - used for both embed page and yt-dlp
+        proxy_url = None
+        db = context.get("db") if context else None
+        logger.info(f"[RUMBLE] db={'yes' if db else 'no'}")
+        if db:
+            try:
+                from app.services.settings_service import SettingsService
+                proxy_list_url = await SettingsService.get(db, "youtube_proxy_list_url")
+                logger.info(f"[RUMBLE] proxy_list_url='{proxy_list_url[:30]}...' " if proxy_list_url else "[RUMBLE] proxy_list_url=empty")
+                if proxy_list_url:
+                    import random
+                    lines = await self._get_proxy_list(proxy_list_url)
+                    logger.info(f"[RUMBLE] proxy list has {len(lines)} entries")
+                    if lines:
+                        line = random.choice(lines)
+                        parts = line.split(':')
+                        if len(parts) == 4:
+                            ip, port, user, passwd = parts
+                            proxy_url = f"http://{user}:{passwd}@{ip}:{port}"
+                            logger.info(f"[RUMBLE] Selected proxy {ip}:{port}")
+                        elif len(parts) == 2:
+                            proxy_url = f"http://{parts[0]}:{parts[1]}"
+            except Exception as e:
+                logger.error(f"[RUMBLE] Proxy fetch error: {e}", exc_info=True)
+        
+        logger.info(f"[RUMBLE] proxy_url={'set' if proxy_url else 'none'}")
+        
+        # Step 1: Try embed page for VTT subtitles (with proxy if available)
+        embed_url = f"https://rumble.com/embed/v{video_id}/" if video_id != "unknown" else video_url
+        title = ""
+        
+        try:
+            client_kwargs = {"timeout": 20.0, "follow_redirects": True}
+            if proxy_url:
+                client_kwargs["proxy"] = proxy_url
+            
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                resp = await client.get(embed_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                })
+                html = resp.text
+                
+                title_m = re.search(r'"title"\s*:\s*"([^"]*)"', html)
+                if title_m:
+                    title = title_m.group(1)
+                
+                vtt_urls = re.findall(r'(https?://[^\s"\']+\.vtt[^\s"\']*)', html)
+                if vtt_urls:
+                    logger.info(f"[RUMBLE] Found {len(vtt_urls)} VTT subtitle URLs")
+                    vtt_resp = await client.get(vtt_urls[0])
+                    vtt_text = vtt_resp.text
+                    
+                    lines = []
+                    for line in vtt_text.split('\n'):
+                        line = line.strip()
+                        if not line or line.startswith('WEBVTT') or line.startswith('NOTE') or '-->' in line or re.match(r'^\d+$', line):
+                            continue
+                        clean = re.sub(r'<[^>]+>', '', line)
+                        if clean.strip():
+                            lines.append(clean.strip())
+                    
+                    transcript = " ".join(lines)
+                    if transcript:
+                        chat_id = context.get("chat_id") if context else None
+                        if chat_id:
+                            artifact = f"rumble_{video_id}.txt"
+                            header = f"# Rumble Video: {title}\n# {video_url}\n\n"
+                            store_session_file(chat_id, artifact, header + transcript)
+                            logger.info(f"[RUMBLE] Saved VTT transcript: {artifact} ({len(transcript)} chars)")
+                        
+                        return {
+                            "success": True, "video_id": video_id, "title": title,
+                            "source": "subtitles", "artifact": f"rumble_{video_id}.txt",
+                            "length": len(transcript),
+                            "preview": transcript[:500] + ("..." if len(transcript) > 500 else ""),
+                            "message": f"Transcript from subtitles saved as rumble_{video_id}.txt ({len(transcript)} chars).",
+                        }
+        except Exception as e:
+            logger.warning(f"[RUMBLE] Embed page fetch failed: {e}")
+        
+        # Step 2: Use yt-dlp to extract audio, then Whisper
+        logger.info(f"[RUMBLE] No subtitles found, using yt-dlp + Whisper for {video_url}")
+        
+        # Get full proxy list for retries
+        proxy_lines = []
+        if db:
+            try:
+                from app.services.settings_service import SettingsService
+                proxy_list_url = await SettingsService.get(db, "youtube_proxy_list_url")
+                if proxy_list_url:
+                    proxy_lines = await self._get_proxy_list(proxy_list_url)
+            except Exception:
+                pass
+        
+        import random
+        if proxy_lines:
+            random.shuffle(proxy_lines)
+        
+        # Try up to 5 different proxies (or no proxy if none configured)
+        max_attempts = min(5, len(proxy_lines)) if proxy_lines else 1
+        last_error = ""
+        
+        tmpdir = tempfile.mkdtemp(prefix="rumble_", dir="/tmp")
+        audio_path = os.path.join(tmpdir, f"{video_id}.mp3")
+        
+        try:
+            for attempt in range(max_attempts):
+                # Pick proxy for this attempt
+                attempt_proxy = None
+                if proxy_lines and attempt < len(proxy_lines):
+                    line = proxy_lines[attempt]
+                    parts = line.split(':')
+                    if len(parts) == 4:
+                        ip, port, user, passwd = parts
+                        attempt_proxy = f"http://{user}:{passwd}@{ip}:{port}"
+                        logger.info(f"[RUMBLE] Attempt {attempt+1}/{max_attempts}: proxy {ip}:{port}")
+                    elif len(parts) == 2:
+                        attempt_proxy = f"http://{parts[0]}:{parts[1]}"
+                        logger.info(f"[RUMBLE] Attempt {attempt+1}/{max_attempts}: proxy {parts[0]}:{parts[1]}")
+                else:
+                    logger.info(f"[RUMBLE] Attempt {attempt+1}/{max_attempts}: no proxy")
+                
+                # Clean up any previous attempt files
+                for f in os.listdir(tmpdir):
+                    try:
+                        os.remove(os.path.join(tmpdir, f))
+                    except Exception:
+                        pass
+                
+                cmd = [
+                    "yt-dlp",
+                    "--extract-audio",
+                    "--audio-format", "mp3",
+                    "--audio-quality", "9",
+                    "--no-playlist",
+                    "--impersonate", "chrome",
+                    "-o", audio_path,
+                ]
+                if attempt_proxy:
+                    cmd.extend(["--proxy", attempt_proxy])
+                cmd.append(video_url)
+                
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+                stderr_text = stderr.decode().strip()
+                
+                if proc.returncode == 0:
+                    # Find the output file
+                    actual_path = None
+                    for f in os.listdir(tmpdir):
+                        if f.endswith(('.mp3', '.m4a', '.wav', '.opus', '.ogg', '.mp4')):
+                            actual_path = os.path.join(tmpdir, f)
+                            break
+                    
+                    if actual_path and os.path.exists(actual_path) and os.path.getsize(actual_path) > 1000:
+                        logger.info(f"[RUMBLE] Audio extracted on attempt {attempt+1}: {os.path.getsize(actual_path)} bytes")
+                        break
+                
+                # Failed - log and try next proxy
+                first_line = stderr_text.split('\n')[0] if stderr_text else "unknown error"
+                logger.warning(f"[RUMBLE] Attempt {attempt+1} failed: {first_line[:150]}")
+                last_error = first_line
+                actual_path = None
+            
+            if not actual_path or not os.path.exists(actual_path):
+                return {"error": f"yt-dlp failed after {max_attempts} attempts. Last error: {last_error[:200]}"}
+            
+            file_size = os.path.getsize(actual_path)
+            logger.info(f"[RUMBLE] Audio extracted: {actual_path} ({file_size} bytes)")
+            
+            if file_size < 1000:
+                return {"error": "Audio file too small - download may have failed"}
+            
+            # Read audio bytes
+            with open(actual_path, 'rb') as f:
+                audio_bytes = f.read()
+            
+            # Determine content type
+            ext = os.path.splitext(actual_path)[1].lower()
+            content_type_map = {
+                '.mp3': 'audio/mpeg',
+                '.m4a': 'audio/mp4',
+                '.wav': 'audio/wav',
+                '.ogg': 'audio/ogg',
+                '.opus': 'audio/ogg',
+                '.mp4': 'audio/mp4',
+            }
+            content_type = content_type_map.get(ext, 'audio/mpeg')
+            
+            # Transcribe with Whisper
+            logger.info(f"[RUMBLE] Running Whisper transcription ({file_size} bytes, {content_type})...")
+            from app.services.stt import get_stt_service
+            stt = get_stt_service()
+            result = await stt.transcribe(audio_bytes, content_type=content_type)
+            transcript = result.get("text", "").strip()
+            
+            if not transcript:
+                return {"error": "Whisper returned empty transcript"}
+            
+            logger.info(f"[RUMBLE] Whisper transcript: {len(transcript)} chars")
+            
+            chat_id = context.get("chat_id") if context else None
+            if chat_id:
+                artifact = f"rumble_{video_id}.txt"
+                header = f"# Rumble Video: {title}\n# {video_url}\n# Transcribed with Whisper\n\n"
+                store_session_file(chat_id, artifact, header + transcript)
+                logger.info(f"[RUMBLE] Saved transcript: {artifact}")
+            
+            return {
+                "success": True, "video_id": video_id, "title": title,
+                "source": "whisper", "artifact": f"rumble_{video_id}.txt",
+                "length": len(transcript),
+                "preview": transcript[:500] + ("..." if len(transcript) > 500 else ""),
+                "message": f"Transcript (Whisper) saved as rumble_{video_id}.txt ({len(transcript)} chars).",
+            }
+            
+        except asyncio.TimeoutError:
+            return {"error": "yt-dlp audio extraction timed out (120s)"}
+        except Exception as e:
+            logger.error(f"[RUMBLE] Failed: {e}")
+            return {"error": f"Rumble transcript failed: {e}"}
+        finally:
+            # Cleanup
+            import shutil
+            try:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            except Exception:
+                pass
+    
+    # Cache for proxy list: {url: (lines, timestamp)}
+    _proxy_cache: Dict[str, tuple] = {}
+    _PROXY_CACHE_TTL = 300  # 5 minutes
+    
+    async def _get_proxy_list(self, proxy_list_url: str) -> list:
+        """Fetch proxy list with caching."""
+        import time
+        now = time.time()
+        cached = self._proxy_cache.get(proxy_list_url)
+        if cached and (now - cached[1]) < self._PROXY_CACHE_TTL:
+            return cached[0]
+        
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(proxy_list_url)
+            lines = [l.strip() for l in resp.text.strip().split('\n') if l.strip() and not l.startswith('#')]
+            self._proxy_cache[proxy_list_url] = (lines, now)
+            return lines
+    
+    async def _fetch_youtube_subtitles(self, video_id: str, lang: str = 'en', context: Dict = None) -> dict:
+        """Fetch YouTube video subtitles/captions via youtube-transcript-api with optional proxy list."""
+        import json
+        import logging
+        import random
+        logger = logging.getLogger(__name__)
+        
+        # Get proxy list URL from admin settings
+        proxy_list_url = None
+        try:
+            db = context.get("db") if context else None
+            if db:
+                from app.services.settings_service import SettingsService
+                proxy_list_url = await SettingsService.get(db, "youtube_proxy_list_url")
+        except Exception:
+            pass
+        
+        # Get proxy from cached list
+        proxy_url = None
+        if proxy_list_url:
+            try:
+                lines = await self._get_proxy_list(proxy_list_url)
+                if lines:
+                    line = random.choice(lines)
+                    parts = line.split(':')
+                    if len(parts) == 4:
+                        ip, port, user, passwd = parts
+                        proxy_url = f"http://{user}:{passwd}@{ip}:{port}"
+                        logger.info(f"[YOUTUBE] Using proxy {ip}:{port} for {video_id}")
+                    elif len(parts) == 2:
+                        proxy_url = f"http://{parts[0]}:{parts[1]}"
+                    else:
+                        proxy_url = line
+            except Exception as e:
+                logger.warning(f"[YOUTUBE] Failed to fetch proxy list: {e}")
+        
         try:
             from youtube_transcript_api import YouTubeTranscriptApi
-            from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
             
-            logger.info(f"[YOUTUBE] Trying youtube-transcript-api for {video_id}")
-            
-            try:
-                # Try to get transcript in preferred language
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                
-                # Try manual transcript first, then auto-generated
-                transcript = None
+            kwargs = {}
+            if proxy_url:
                 try:
-                    transcript = transcript_list.find_manually_created_transcript([lang, 'en'])
-                    logger.info(f"[YOUTUBE] Found manual transcript")
-                except NoTranscriptFound:
-                    try:
-                        transcript = transcript_list.find_generated_transcript([lang, 'en'])
-                        logger.info(f"[YOUTUBE] Found auto-generated transcript")
-                    except NoTranscriptFound:
-                        # Try to get any available transcript
-                        try:
-                            for t in transcript_list:
-                                transcript = t
-                                logger.info(f"[YOUTUBE] Found transcript in {t.language_code}")
-                                break
-                        except:
-                            pass
-                
-                if transcript:
-                    transcript_data = transcript.fetch()
-                    text = " ".join([entry['text'] for entry in transcript_data])
-                    return {
-                        "success": True,
-                        "language": transcript.language_code,
-                        "is_auto_generated": transcript.is_generated,
-                        "transcript": text,
-                        "line_count": len(transcript_data),
-                    }
-                else:
-                    logger.info(f"[YOUTUBE] No transcript found via API")
-                    
-            except TranscriptsDisabled:
-                logger.info(f"[YOUTUBE] Transcripts disabled for {video_id}")
-                return {"error": "Transcripts are disabled for this video"}
-            except VideoUnavailable:
-                logger.info(f"[YOUTUBE] Video unavailable: {video_id}")
-                return {"error": "Video is unavailable"}
-            except NoTranscriptFound:
-                logger.info(f"[YOUTUBE] No transcript found for {video_id}")
-            except Exception as e:
-                logger.warning(f"[YOUTUBE] API error for {video_id}: {e}")
+                    from youtube_transcript_api.proxies import GenericProxyConfig
+                    kwargs["proxy_config"] = GenericProxyConfig(
+                        http_url=proxy_url,
+                        https_url=proxy_url,
+                    )
+                except ImportError:
+                    logger.warning("[YOUTUBE] GenericProxyConfig not available")
+            
+            ytt = YouTubeTranscriptApi(**kwargs)
+            transcript_data = ytt.fetch(video_id, languages=[lang, 'en'])
+            text = " ".join([entry.text for entry in transcript_data])
+            
+            chat_id = context.get("chat_id") if context else None
+            if chat_id:
+                try:
+                    artifact_content = f"# YouTube Video ID: {video_id}\n# https://www.youtube.com/watch?v={video_id}\n\n{text}"
+                    store_session_file(chat_id, f"{video_id}.txt", artifact_content)
+                    logger.info(f"[YOUTUBE] Saved transcript: {video_id}.txt ({len(text)} chars)")
+                except Exception as e:
+                    logger.warning(f"[YOUTUBE] Failed to save artifact: {e}")
+            
+            return {
+                "success": True,
+                "language": lang,
+                "is_auto_generated": True,
+                "transcript": text,
+                "line_count": len(transcript_data),
+                "artifact": f"{video_id}.txt",
+            }
                 
         except ImportError:
-            logger.info("[YOUTUBE] youtube-transcript-api not installed, using manual method")
-        
-        # Fallback: Manual extraction from YouTube page
-        logger.info(f"[YOUTUBE] Trying manual extraction for {video_id}")
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(
-                    f"https://www.youtube.com/watch?v={video_id}",
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    }
-                )
-                html = response.text
-                logger.info(f"[YOUTUBE] Fetched page for {video_id}, length={len(html)}")
-                
-                # Check if captions exist at all
-                if '"captions"' not in html:
-                    logger.info(f"[YOUTUBE] No captions section in page for {video_id}")
-                    return {"error": "No captions found for this video"}
-                
-                # Try to extract the baseUrl for captions directly
-                # Pattern: "baseUrl":"https://www.youtube.com/api/timedtext?..."
-                baseurl_pattern = re.search(r'"baseUrl"\s*:\s*"(https://www\.youtube\.com/api/timedtext[^"]+)"', html)
-                if baseurl_pattern:
-                    subtitle_url = baseurl_pattern.group(1).replace('\\u0026', '&')
-                    logger.info(f"[YOUTUBE] Found baseUrl for subtitles")
-                    
-                    try:
-                        sub_response = await client.get(subtitle_url)
-                        subtitle_content = sub_response.text
-                        
-                        # Parse XML/JSON response
-                        if subtitle_content.strip().startswith('<'):
-                            # XML format
-                            text_pattern = re.compile(r'<text[^>]*>([^<]*)</text>')
-                            matches = text_pattern.findall(subtitle_content)
-                            if matches:
-                                import html as html_module
-                                transcript_lines = [html_module.unescape(t).strip() for t in matches if t.strip()]
-                                transcript = " ".join(transcript_lines)
-                                logger.info(f"[YOUTUBE] Extracted {len(transcript_lines)} lines from XML")
-                                return {
-                                    "success": True,
-                                    "language": "en",
-                                    "is_auto_generated": True,
-                                    "transcript": transcript,
-                                    "line_count": len(transcript_lines),
-                                }
-                        else:
-                            # Try JSON format
-                            try:
-                                data = json.loads(subtitle_content)
-                                events = data.get("events", [])
-                                lines = []
-                                for event in events:
-                                    segs = event.get("segs", [])
-                                    for seg in segs:
-                                        text = seg.get("utf8", "").strip()
-                                        if text and text != "\n":
-                                            lines.append(text)
-                                if lines:
-                                    transcript = " ".join(lines)
-                                    logger.info(f"[YOUTUBE] Extracted {len(lines)} segments from JSON")
-                                    return {
-                                        "success": True,
-                                        "language": "en",
-                                        "is_auto_generated": True,
-                                        "transcript": transcript,
-                                        "line_count": len(lines),
-                                    }
-                            except json.JSONDecodeError:
-                                pass
-                    except Exception as e:
-                        logger.warning(f"[YOUTUBE] Error fetching subtitle URL: {e}")
-                
-                # Pattern 2: Try to find captionTracks and extract baseUrl
-                caption_tracks_match = re.search(r'"captionTracks"\s*:\s*(\[.*?\])', html, re.DOTALL)
-                if caption_tracks_match:
-                    try:
-                        # Clean up the JSON - it might have nested objects
-                        tracks_str = caption_tracks_match.group(1)
-                        # Find just the array
-                        bracket_count = 0
-                        end_idx = 0
-                        for i, c in enumerate(tracks_str):
-                            if c == '[':
-                                bracket_count += 1
-                            elif c == ']':
-                                bracket_count -= 1
-                                if bracket_count == 0:
-                                    end_idx = i + 1
-                                    break
-                        tracks_str = tracks_str[:end_idx]
-                        tracks = json.loads(tracks_str)
-                        logger.info(f"[YOUTUBE] Found {len(tracks)} caption tracks")
-                        
-                        for track in tracks:
-                            base_url = track.get("baseUrl", "")
-                            if base_url:
-                                base_url = base_url.replace('\\u0026', '&')
-                                sub_response = await client.get(base_url)
-                                # ... process response
-                                subtitle_content = sub_response.text
-                                if '<text' in subtitle_content:
-                                    text_pattern = re.compile(r'<text[^>]*>([^<]*)</text>')
-                                    matches = text_pattern.findall(subtitle_content)
-                                    if matches:
-                                        import html as html_module
-                                        transcript_lines = [html_module.unescape(t).strip() for t in matches if t.strip()]
-                                        transcript = " ".join(transcript_lines)
-                                        return {
-                                            "success": True,
-                                            "language": track.get("languageCode", "en"),
-                                            "is_auto_generated": "asr" in track.get("vssId", "").lower(),
-                                            "transcript": transcript,
-                                            "line_count": len(transcript_lines),
-                                        }
-                    except Exception as e:
-                        logger.warning(f"[YOUTUBE] Error parsing caption tracks: {e}")
-                
-                logger.info(f"[YOUTUBE] Could not extract subtitles for {video_id}")
-                return {"error": "No captions found for this video"}
-                
-        except httpx.TimeoutException:
-            return {"error": "Timeout fetching video page"}
+            return {"error": "youtube-transcript-api not installed"}
         except Exception as e:
-            logger.warning(f"[YOUTUBE] Error in manual extraction: {e}")
-            return {"error": f"Failed to fetch subtitles: {str(e)}"}
+            first_line = str(e).split('\n')[0]
+            logger.warning(f"[YOUTUBE] Failed for {video_id}: {first_line}")
+            return {"error": first_line}
     
-    async def _create_video_embed_with_subtitles(self, platform: str, video_id: str, url: str) -> dict:
+    def _parse_subtitle_content(self, content: str) -> str:
+        """Parse subtitle XML or JSON into plain text."""
+        import re
+        content = content.strip()
+        if content.startswith('<'):
+            # XML format
+            import html as html_module
+            matches = re.findall(r'<text[^>]*>([^<]*)</text>', content)
+            if matches:
+                return " ".join(html_module.unescape(t).strip() for t in matches if t.strip())
+        else:
+            # JSON format
+            try:
+                data = json.loads(content)
+                lines = []
+                for event in data.get("events", []):
+                    for seg in event.get("segs", []):
+                        text = seg.get("utf8", "").strip()
+                        if text and text != "\n":
+                            lines.append(text)
+                if lines:
+                    return " ".join(lines)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return ""
+    
+    async def _create_video_embed_with_subtitles(self, platform: str, video_id: str, url: str, context: Dict = None) -> dict:
         """Create an embeddable video response with subtitles and title if available."""
         import httpx
         import re
@@ -2270,7 +2573,7 @@ Example:
                 pass  # Title extraction is optional
             
             # Try to fetch subtitles
-            subtitles = await self._fetch_youtube_subtitles(video_id)
+            subtitles = await self._fetch_youtube_subtitles(video_id, context=context)
             if subtitles.get("success"):
                 embed["subtitles"] = {
                     "language": subtitles.get("language"),
@@ -2279,7 +2582,10 @@ Example:
                     "line_count": subtitles.get("line_count"),
                 }
                 # Add transcript as content for context
-                embed["content"] = subtitles.get("transcript", "")[:30000]  # Limit size
+                embed["content"] = subtitles.get("transcript", "")[:30000]
+                if subtitles.get("artifact"):
+                    embed["artifact"] = subtitles["artifact"]
+                    embed["content"] += f"\n\n[Transcript saved to artifact: {subtitles['artifact']}]"
             else:
                 embed["subtitles_error"] = subtitles.get("error")
                 # Even without subtitles, provide what we know

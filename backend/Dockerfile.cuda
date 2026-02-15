@@ -63,6 +63,9 @@ RUN pip install /tmp/faiss*.whl && rm /tmp/faiss*.whl
 COPY backend/requirements.txt .
 RUN pip install -r requirements.txt
 
+# yt-dlp for extracting audio from video platforms (Rumble, etc.)
+RUN pip install yt-dlp curl-cffi || echo "yt-dlp not available"
+
 # Install Playwright Chromium browser for JS-rendered page extraction
 RUN playwright install chromium && playwright install-deps chromium
 

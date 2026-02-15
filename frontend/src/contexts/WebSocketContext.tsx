@@ -2268,6 +2268,130 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           return;
         }
         
+        // Handle browser fetch proxy requests from backend
+        if (data.type === 'browser_fetch_request' && data.payload) {
+          const { request_id, url } = data.payload as { request_id: string; url: string };
+          console.log('%c[BROWSER_FETCH]', 'color: orange; font-weight: bold', url);
+          
+          // Use YouTube innertube API for transcript fetching
+          const ytMatch = url.match(/[?&]v=([a-zA-Z0-9_-]+)/);
+          if (ytMatch) {
+            const videoId = ytMatch[1];
+            // Step 1: Get video page to extract captions info
+            const innertubePayload = {
+              context: {
+                client: {
+                  clientName: 'WEB',
+                  clientVersion: '2.20240101.00.00',
+                  hl: 'en',
+                },
+              },
+              videoId,
+            };
+            
+            fetch('https://www.youtube.com/youtubei/v1/get_transcript?prettyPrint=false', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                context: { client: { clientName: 'WEB', clientVersion: '2.20240101.00.00' } },
+                params: btoa(`\n\x0b${videoId}`),
+              }),
+            })
+              .then(res => res.json())
+              .then(data => {
+                // Extract transcript text from innertube response
+                const segments = data?.actions?.[0]?.updateEngagementPanelAction
+                  ?.content?.transcriptRenderer?.content?.transcriptSearchPanelRenderer
+                  ?.body?.transcriptSegmentListRenderer?.initialSegments || 
+                  data?.actions?.[0]?.updateEngagementPanelAction
+                  ?.content?.transcriptRenderer?.body?.transcriptBodyRenderer?.transcriptSegmentListRenderer?.initialSegments || [];
+                
+                let lines: string[] = [];
+                
+                // Try direct segment extraction
+                if (segments.length > 0) {
+                  for (const seg of segments) {
+                    const text = seg?.transcriptSegmentRenderer?.snippet?.runs
+                      ?.map((r: any) => r.text)?.join('') || '';
+                    if (text.trim()) lines.push(text.trim());
+                  }
+                }
+                
+                // If innertube transcript endpoint didn't work, try player endpoint for caption URLs
+                if (lines.length === 0) {
+                  fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(innertubePayload),
+                  })
+                    .then(r => r.json())
+                    .then(playerData => {
+                      const tracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+                      if (tracks.length > 0) {
+                        const captionUrl = tracks[0].baseUrl;
+                        // Fetch the actual caption content
+                        fetch(captionUrl)
+                          .then(r => r.text())
+                          .then(xmlContent => {
+                            ws.send(JSON.stringify({
+                              type: 'browser_fetch_response',
+                              payload: { request_id, content: xmlContent, format: 'timedtext_xml' },
+                            }));
+                          })
+                          .catch(() => {
+                            ws.send(JSON.stringify({
+                              type: 'browser_fetch_response',
+                              payload: { request_id, error: 'Failed to fetch captions' },
+                            }));
+                          });
+                      } else {
+                        ws.send(JSON.stringify({
+                          type: 'browser_fetch_response',
+                          payload: { request_id, error: 'No caption tracks found', 
+                            content: JSON.stringify({ title: playerData?.videoDetails?.title || '' }) },
+                        }));
+                      }
+                    })
+                    .catch(err => {
+                      ws.send(JSON.stringify({
+                        type: 'browser_fetch_response',
+                        payload: { request_id, error: err.message },
+                      }));
+                    });
+                  return;
+                }
+                
+                ws.send(JSON.stringify({
+                  type: 'browser_fetch_response',
+                  payload: { request_id, content: lines.join('\n'), format: 'transcript_text' },
+                }));
+              })
+              .catch(err => {
+                ws.send(JSON.stringify({
+                  type: 'browser_fetch_response',
+                  payload: { request_id, error: err.message },
+                }));
+              });
+          } else {
+            // Non-YouTube URL - direct fetch
+            fetch(url)
+              .then(res => res.text())
+              .then(content => {
+                ws.send(JSON.stringify({
+                  type: 'browser_fetch_response',
+                  payload: { request_id, content },
+                }));
+              })
+              .catch(err => {
+                ws.send(JSON.stringify({
+                  type: 'browser_fetch_response',
+                  payload: { request_id, error: err.message },
+                }));
+              });
+          }
+          return;
+        }
+        
         // Debug: log ALL incoming messages except pong
         if (data.type !== 'pong') {
           console.log('%c[WS]', 'color: green; font-weight: bold', data.type, data.payload ? Object.keys(data.payload) : 'no payload');

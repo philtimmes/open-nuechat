@@ -117,6 +117,8 @@ class SystemSettingsSchema(BaseModel):
     server_timezone: str = ""  # NC-0.8.0.13: Server timezone fallback (e.g. "America/Chicago")
     store_tool_call_log: bool = False  # NC-0.8.0.13: Store full tool call log in message metadata
     llm_comm_dump: bool = False  # NC-0.8.0.16: Dump full LLM requests to /app/data/llm_dumps
+    python_allowed_packages: str = ""  # NC-0.8.0.16: Comma-separated list of pip packages allowed for execute_python
+    youtube_proxy_list_url: str = ""  # Proxy URL for YouTube transcript fetching (e.g. http://user:pass@proxy:port)
     utility_model: str = ""  # NC-0.8.0.15: Utility model name (titles, narration)
     utility_api_base_url: str = ""  # NC-0.8.0.15: Utility model API endpoint
     utility_api_key: str = ""  # NC-0.8.0.15: Utility model API key
@@ -222,6 +224,7 @@ class FeatureFlagsSchema(BaseModel):
     freeforall: bool = False
     enable_safety_filters: bool = False  # Prompt injection & content moderation filters
     enable_mermaid_rendering: bool = True  # Render mermaid diagrams as graphics
+    enable_preemptive_rag: bool = True  # Preemptive RAG search on user messages
 
 
 class APIRateLimitsSchema(BaseModel):
@@ -326,6 +329,8 @@ async def get_admin_settings(
         server_timezone=await get_system_setting(db, "server_timezone"),
         store_tool_call_log=(await get_system_setting(db, "store_tool_call_log")) in ("true", "True", "1"),
         llm_comm_dump=(await get_system_setting(db, "llm_comm_dump")) in ("true", "True", "1"),
+        python_allowed_packages=await get_system_setting(db, "python_allowed_packages") or "",
+        youtube_proxy_list_url=await get_system_setting(db, "youtube_proxy_list_url") or "",
         utility_model=await get_system_setting(db, "utility_model") or "",
         utility_api_base_url=await get_system_setting(db, "utility_api_base_url") or "",
         utility_api_key=await get_system_setting(db, "utility_api_key") or "",
@@ -364,6 +369,8 @@ async def update_admin_settings(
     await set_setting(db, "server_timezone", data.server_timezone)
     await set_setting(db, "store_tool_call_log", str(data.store_tool_call_log).lower())
     await set_setting(db, "llm_comm_dump", str(data.llm_comm_dump).lower())
+    await set_setting(db, "python_allowed_packages", data.python_allowed_packages)
+    await set_setting(db, "youtube_proxy_list_url", data.youtube_proxy_list_url)
     await set_setting(db, "utility_model", data.utility_model)
     await set_setting(db, "utility_api_base_url", data.utility_api_base_url)
     await set_setting(db, "utility_api_key", data.utility_api_key)
