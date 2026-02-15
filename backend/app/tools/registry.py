@@ -1664,11 +1664,11 @@ Example:
         
         # If single URL, return single result (backward compatible)
         if len(url_list) == 1:
-            return await self._fetch_single_url(url_list[0], extract_main)
+            return await self._fetch_single_url(url_list[0], extract_main, context=context)
         
         # Multiple URLs - fetch concurrently
         async def fetch_one(u):
-            return await self._fetch_single_url(u, extract_main)
+            return await self._fetch_single_url(u, extract_main, context=context)
         
         tasks = [fetch_one(u) for u in url_list[:10]]  # Limit to 10
         results = await asyncio.gather(*tasks)
@@ -1681,10 +1681,25 @@ Example:
             "error_count": sum(1 for r in results if "error" in r),
         }
     
-    async def _fetch_single_url(self, url: str, extract_main: bool = True) -> Dict[str, Any]:
+    async def _fetch_single_url(self, url: str, extract_main: bool = True, context: Dict = None) -> Dict[str, Any]:
         """Fetch a single URL with video detection and subtitle extraction."""
         import httpx
         from urllib.parse import urlparse
+        
+        LLM_PREVIEW_LIMIT = 8000
+        LARGE_CONTENT_THRESHOLD = 64000
+        
+        def _build_truncation_notice(total_chars: int, artifact_ref: str) -> str:
+            """Build a clear notice telling the LLM how to access the full content."""
+            notice = f"\n\n[TRUNCATED — showing {LLM_PREVIEW_LIMIT} of {total_chars} total chars]"
+            notice += f"\nFull content saved to: {artifact_ref}"
+            notice += f"\n\nTo access the full content:"
+            notice += f"\n  • view_file_lines(filename='{artifact_ref}', start=1, end=100) — read specific line ranges"
+            notice += f"\n  • grep_files(pattern='search term', file_pattern='{artifact_ref}') — search for specific content"
+            if total_chars > LARGE_CONTENT_THRESHOLD:
+                notice += f"\n\n⚠ This file is {total_chars:,} chars. Loading it all at once would consume most of your context window."
+                notice += f"\n  Use grep_files to find relevant sections first, then view_file_lines to read them."
+            return notice
         
         if not url:
             return {"error": "URL is required"}
@@ -1692,7 +1707,6 @@ Example:
         # Check if it's a video URL first
         platform, video_id = self._extract_video_id(url)
         if platform and video_id:
-            # Use the subtitle-enabled version for videos
             embed = await self._create_video_embed_with_subtitles(platform, video_id, url)
             if embed:
                 return embed
@@ -1721,19 +1735,33 @@ Example:
                 
                 # Handle non-HTML content
                 if "application/json" in content_type:
-                    return {
-                        "type": "json",
-                        "url": str(response.url),
-                        "content_type": "json",
-                        "content": response.text[:50000],
-                    }
+                    full_text = response.text
+                    artifact_path = await self._save_web_retrieval_artifact(url, full_text, context, suffix=".json")
+                    preview = full_text[:LLM_PREVIEW_LIMIT]
+                    result = {"type": "json", "url": str(response.url), "content_type": "json"}
+                    if len(full_text) > LLM_PREVIEW_LIMIT:
+                        ref = artifact_path or "retrievedFromWeb/"
+                        preview += _build_truncation_notice(len(full_text), ref)
+                    result["content"] = preview
+                    result["content_length"] = len(full_text)
+                    if artifact_path:
+                        result["artifact_path"] = artifact_path
+                    return result
+                    
                 elif "text/plain" in content_type:
-                    return {
-                        "type": "text",
-                        "url": str(response.url),
-                        "content_type": "text",
-                        "content": response.text[:50000],
-                    }
+                    full_text = response.text
+                    artifact_path = await self._save_web_retrieval_artifact(url, full_text, context, suffix=".txt")
+                    preview = full_text[:LLM_PREVIEW_LIMIT]
+                    result = {"type": "text", "url": str(response.url), "content_type": "text"}
+                    if len(full_text) > LLM_PREVIEW_LIMIT:
+                        ref = artifact_path or "retrievedFromWeb/"
+                        preview += _build_truncation_notice(len(full_text), ref)
+                    result["content"] = preview
+                    result["content_length"] = len(full_text)
+                    if artifact_path:
+                        result["artifact_path"] = artifact_path
+                    return result
+                    
                 elif "text/html" not in content_type and "application/xhtml" not in content_type:
                     return {
                         "type": "unknown",
@@ -1744,17 +1772,57 @@ Example:
                 
                 html = response.text
                 
-                # Extract text from HTML with JS-rendering fallback
-                text_content = await self._extract_text_with_js_fallback(url, html, extract_main)
+                # NC-0.8.0.13: Smart extraction — try main content first, fallback to full page,
+                # and only invoke Playwright once if needed
+                text_content = self._extract_text_from_html(html, extract_main)
                 
-                return {
+                # If main extraction is empty, try full page from static HTML
+                if extract_main and len(text_content.strip()) < 50:
+                    text_content = self._extract_text_from_html(html, False)
+                
+                # If still sparse, try Playwright (JS-rendered SPA)
+                html_len = len(html)
+                text_len = len(text_content.strip())
+                needs_js = (text_len < 200 and html_len > 5000) or (text_len < 500 and html_len > 50000)
+                if not needs_js and html_len > 2000:
+                    spa_indicators = ('id="__next"', 'id="app"', 'id="root"', 'ng-app',
+                                    'data-reactroot', 'nuxt', '__nuxt', '__NEXT_DATA__')
+                    if any(ind in html for ind in spa_indicators) and text_len < 1000:
+                        needs_js = True
+                
+                if needs_js:
+                    import logging as _flog
+                    _flog.getLogger(__name__).info(f"[FETCH] Sparse content ({text_len} chars), trying Playwright for {url}")
+                    rendered_html = await self._render_with_playwright(url)
+                    if rendered_html:
+                        # Try main content from rendered HTML first
+                        rendered_text = self._extract_text_from_html(rendered_html, True)
+                        if len(rendered_text.strip()) < 50:
+                            rendered_text = self._extract_text_from_html(rendered_html, False)
+                        if len(rendered_text.strip()) > text_len:
+                            text_content = rendered_text
+                
+                full_text = text_content
+                
+                # NC-0.8.0.13: Always save to retrievedFromWeb/
+                artifact_path = await self._save_web_retrieval_artifact(url, full_text, context, suffix=".txt")
+                
+                preview = full_text[:LLM_PREVIEW_LIMIT]
+                if len(full_text) > LLM_PREVIEW_LIMIT:
+                    ref = artifact_path or "retrievedFromWeb/"
+                    preview += _build_truncation_notice(len(full_text), ref)
+                
+                result = {
                     "type": "webpage",
                     "url": str(response.url),
                     "title": self._extract_title(html),
                     "content_type": "html",
-                    "content": text_content[:50000],
-                    "content_length": len(text_content),
+                    "content": preview,
+                    "content_length": len(full_text),
                 }
+                if artifact_path:
+                    result["artifact_path"] = artifact_path
+                return result
                 
         except httpx.TimeoutException:
             return {"url": url, "error": "Request timed out"}
@@ -2520,6 +2588,69 @@ Example:
             "message": f"Replaced in {filename}"
         }
     
+    async def _save_web_retrieval_artifact(self, url: str, content: str, context: Dict = None, 
+                                            suffix: str = ".txt", title: str = None) -> str | None:
+        """NC-0.8.0.13: Save web-retrieved content as an artifact in retrievedFromWeb/ subfolder.
+        Returns the filepath if saved, None otherwise."""
+        import os
+        import re
+        import logging
+        from urllib.parse import urlparse
+        logger = logging.getLogger(__name__)
+        
+        if not context or not content:
+            return None
+        
+        chat_id = context.get("chat_id")
+        db = context.get("db")
+        if not chat_id or not db:
+            return None
+        
+        try:
+            parsed = urlparse(url)
+            basename = os.path.basename(parsed.path) or parsed.netloc
+            stem = os.path.splitext(basename)[0]
+            stem = re.sub(r'[^\w\-.]', '_', stem)[:60]
+            if not stem:
+                stem = re.sub(r'[^\w\-.]', '_', parsed.netloc)[:40]
+            
+            filepath = f"retrievedFromWeb/{stem}{suffix}"
+            
+            from sqlalchemy import select as _sel
+            from app.models.upload import UploadedFile
+            
+            existing = await db.execute(
+                _sel(UploadedFile)
+                .where(UploadedFile.chat_id == chat_id)
+                .where(UploadedFile.filepath == filepath)
+            )
+            if existing.scalar_one_or_none():
+                import time
+                filepath = f"retrievedFromWeb/{stem}_{int(time.time())}{suffix}"
+            
+            header = f"# Retrieved from: {url}\n# Date: {__import__('datetime').datetime.utcnow().isoformat()}Z\n\n"
+            full_content = header + content
+            
+            new_file = UploadedFile(
+                chat_id=chat_id,
+                archive_name=None,
+                filepath=filepath,
+                filename=os.path.basename(filepath),
+                extension=suffix,
+                language=None,
+                size=len(full_content),
+                is_binary=False,
+                content=full_content,
+                signatures=None,
+            )
+            db.add(new_file)
+            await db.flush()
+            logger.info(f"[WEB_RETRIEVAL] Saved artifact: {filepath} ({len(full_content)} chars)")
+            return filepath
+        except Exception as e:
+            logger.error(f"[WEB_RETRIEVAL] Failed to save artifact for {url}: {e}", exc_info=True)
+            return None
+    
     async def _web_search_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Search the web - Google Custom Search Engine if configured, DuckDuckGo fallback"""
         import httpx
@@ -2612,19 +2743,53 @@ Example:
     
     async def _ddg_search(self, query: str, max_results: int) -> Dict[str, Any]:
         """Fallback search using DuckDuckGo"""
-        import httpx
         import logging
-        from urllib.parse import quote_plus
         logger = logging.getLogger(__name__)
         
+        # Try the duckduckgo_search library first (most reliable)
         try:
+            from duckduckgo_search import DDGS
+            import asyncio
+            
+            def _do_ddg():
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, max_results=max_results))
+            
+            raw_results = await asyncio.get_event_loop().run_in_executor(None, _do_ddg)
+            
+            if raw_results:
+                results = []
+                for r in raw_results[:max_results]:
+                    results.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("href", r.get("link", "")),
+                        "snippet": r.get("body", r.get("snippet", "")),
+                    })
+                
+                logger.info(f"[WEB_SEARCH] DuckDuckGo (lib): '{query}' → {len(results)} results")
+                return {
+                    "query": query,
+                    "result_count": len(results),
+                    "results": results,
+                    "engine": "duckduckgo",
+                }
+        except ImportError:
+            logger.debug("[WEB_SEARCH] duckduckgo_search not installed, trying HTML scraper")
+        except Exception as e:
+            logger.warning(f"[WEB_SEARCH] duckduckgo_search lib failed: {e}, trying HTML scraper")
+        
+        # Fallback: scrape DDG HTML
+        try:
+            import httpx
+            from urllib.parse import quote_plus
+            
             search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
             
             async with httpx.AsyncClient(
                 timeout=15.0,
                 follow_redirects=True,
                 headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; Open-NueChat/1.0; +https://nuechat.ai)",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 }
             ) as client:
                 response = await client.get(search_url)
@@ -2634,15 +2799,16 @@ Example:
             results = self._parse_ddg_results(html, max_results)
             
             if not results:
+                # Try lite version
                 lite_url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
                 async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; Open-NueChat/1.0)",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 }) as client:
                     response = await client.get(lite_url)
                     html = response.text
                 results = self._parse_ddg_lite_results(html, max_results)
             
-            logger.info(f"[WEB_SEARCH] DuckDuckGo: '{query}' → {len(results)} results")
+            logger.info(f"[WEB_SEARCH] DuckDuckGo (scrape): '{query}' → {len(results)} results")
             
             return {
                 "query": query,
@@ -2651,8 +2817,6 @@ Example:
                 "engine": "duckduckgo",
             }
             
-        except httpx.TimeoutException:
-            return {"error": "Search request timed out", "query": query}
         except Exception as e:
             logger.error(f"[WEB_SEARCH] DuckDuckGo error: {e}")
             return {"error": f"Search failed: {str(e)}", "query": query}
@@ -2810,12 +2974,58 @@ Example:
                         break
                 result["images"] = images
             
-            # Extract clean body text with JS-rendering fallback
-            body_text = await self._extract_text_with_js_fallback(url, html, True)
-            result["content"] = body_text[:50000]
+            # Extract clean body text — try main content, fallback to full, then Playwright
+            body_text = self._extract_text_from_html(html, True)
+            if len(body_text.strip()) < 50:
+                body_text = self._extract_text_from_html(html, False)
+            
+            # If still sparse, try Playwright
+            _html_len = len(html)
+            _text_len = len(body_text.strip())
+            _needs_js = (_text_len < 200 and _html_len > 5000) or (_text_len < 500 and _html_len > 50000)
+            if not _needs_js and _html_len > 2000:
+                _spa = ('id="__next"', 'id="app"', 'id="root"', 'ng-app',
+                       'data-reactroot', 'nuxt', '__nuxt', '__NEXT_DATA__')
+                if any(ind in html for ind in _spa) and _text_len < 1000:
+                    _needs_js = True
+            if _needs_js:
+                logger.info(f"[WEB_EXTRACT] Sparse content ({_text_len} chars), trying Playwright for {url}")
+                rendered_html = await self._render_with_playwright(url)
+                if rendered_html:
+                    rendered_text = self._extract_text_from_html(rendered_html, True)
+                    if len(rendered_text.strip()) < 50:
+                        rendered_text = self._extract_text_from_html(rendered_html, False)
+                    if len(rendered_text.strip()) > _text_len:
+                        body_text = rendered_text
+            
+            full_text = body_text
             result["content_length"] = len(body_text)
             
             logger.info(f"[WEB_EXTRACT] {url} → {len(headings)} headings, {result['content_length']} chars")
+            
+            # NC-0.8.0.13: Save full content as retrieval artifact
+            artifact_path = await self._save_web_retrieval_artifact(
+                url, full_text, context, suffix=".txt",
+                title=result.get("title", "")
+            )
+            
+            # Truncate what goes to LLM — reference artifact for full content
+            LLM_PREVIEW_LIMIT = 8000
+            LARGE_CONTENT_THRESHOLD = 64000
+            if len(full_text) > LLM_PREVIEW_LIMIT:
+                artifact_ref = artifact_path or "retrievedFromWeb/"
+                notice = f"\n\n[TRUNCATED — showing {LLM_PREVIEW_LIMIT} of {len(full_text)} total chars]"
+                notice += f"\nFull content saved to: {artifact_ref}"
+                notice += f"\n\nTo access the full content:"
+                notice += f"\n  • view_file_lines(filename='{artifact_ref}', start=1, end=100) — read specific line ranges"
+                notice += f"\n  • grep_files(pattern='search term', file_pattern='{artifact_ref}') — search for specific content"
+                if len(full_text) > LARGE_CONTENT_THRESHOLD:
+                    notice += f"\n\n⚠ This file is {len(full_text):,} chars. Loading it all at once would consume most of your context window."
+                    notice += f"\n  Use grep_files to find relevant sections first, then view_file_lines to read them."
+                result["content"] = full_text[:LLM_PREVIEW_LIMIT] + notice
+                result["artifact_path"] = artifact_ref
+            else:
+                result["content"] = full_text
             
             return result
             
@@ -2836,7 +3046,7 @@ Example:
         pattern = args.get("pattern", "")
         context_lines = args.get("context_lines", 2)
         file_pattern = args.get("file_pattern", "")
-        max_per_file = args.get("max_matches_per_file", 10)
+        max_per_file = args.get("max_matches_per_file", 50)
         
         if not pattern:
             return {"error": "pattern is required"}
@@ -2845,6 +3055,18 @@ Example:
         db = context.get("db") if context else None
         if not chat_id:
             return {"error": "No chat context available"}
+        
+        # Get context window limit for response budgeting
+        context_window = 200000  # default
+        if db:
+            try:
+                from app.services.settings_service import SettingsService
+                context_window = await SettingsService.get_int(db, "llm_context_size") or 200000
+            except Exception:
+                pass
+        # Budget: grep result should not exceed 50% of context window
+        # ~4 chars per token rough estimate
+        max_result_chars = (context_window * 4) // 2
         
         # Get all files
         if db:
@@ -2863,8 +3085,11 @@ Example:
         
         results = {}
         total_matches = 0
+        total_matches_all = 0  # includes matches beyond per-file limit
         files_searched = 0
         files_matched = 0
+        result_chars = 0
+        truncated_by_budget = False
         
         for filename, content in files.items():
             # Apply file pattern filter
@@ -2874,40 +3099,78 @@ Example:
             files_searched += 1
             lines = content.split('\n')
             file_matches = []
+            file_total_matches = 0
             
             for i, line in enumerate(lines):
                 if regex.search(line):
-                    start = max(0, i - context_lines)
-                    end = min(len(lines), i + context_lines + 1)
+                    file_total_matches += 1
                     
-                    ctx = []
-                    for j in range(start, end):
-                        marker = ">" if j == i else " "
-                        ctx.append(f"{j + 1}{marker} {lines[j]}")
-                    
-                    file_matches.append({
-                        "line": i + 1,
-                        "match": line.strip(),
-                        "context": "\n".join(ctx)
-                    })
-                    
-                    if len(file_matches) >= max_per_file:
-                        break
+                    if len(file_matches) < max_per_file and not truncated_by_budget:
+                        start = max(0, i - context_lines)
+                        end = min(len(lines), i + context_lines + 1)
+                        
+                        ctx = []
+                        for j in range(start, end):
+                            marker = ">" if j == i else " "
+                            ctx.append(f"{j + 1}{marker} {lines[j]}")
+                        
+                        match_entry = {
+                            "line": i + 1,
+                            "match": line.strip(),
+                            "context": "\n".join(ctx)
+                        }
+                        
+                        # Check if adding this match would exceed budget
+                        entry_chars = len(str(match_entry))
+                        if result_chars + entry_chars > max_result_chars:
+                            truncated_by_budget = True
+                        else:
+                            file_matches.append(match_entry)
+                            result_chars += entry_chars
+            
+            total_matches_all += file_total_matches
             
             if file_matches:
-                results[filename] = file_matches
+                file_result = {
+                    "matches": file_matches,
+                    "match_count": len(file_matches),
+                    "total_in_file": file_total_matches,
+                }
+                if file_total_matches > len(file_matches):
+                    file_result["note"] = f"Showing {len(file_matches)} of {file_total_matches} matches. Use view_file_lines to see more."
+                results[filename] = file_result
                 total_matches += len(file_matches)
                 files_matched += 1
+            elif file_total_matches > 0:
+                # Had matches but all were truncated by budget
+                results[filename] = {
+                    "matches": [],
+                    "match_count": 0,
+                    "total_in_file": file_total_matches,
+                    "note": f"{file_total_matches} matches found but omitted to stay within context budget. Use view_file_lines to read this file."
+                }
+                files_matched += 1
         
-        logger.info(f"[GREP_FILES] '{pattern}' → {total_matches} matches in {files_matched}/{files_searched} files")
+        logger.info(f"[GREP_FILES] '{pattern}' → {total_matches}/{total_matches_all} matches shown in {files_matched}/{files_searched} files (budget: {result_chars}/{max_result_chars} chars)")
         
-        return {
+        response = {
             "pattern": pattern,
             "files_searched": files_searched,
             "files_matched": files_matched,
-            "total_matches": total_matches,
+            "matches_shown": total_matches,
+            "total_matches": total_matches_all,
             "results": results,
         }
+        
+        if truncated_by_budget:
+            response["truncated"] = True
+            response["truncation_reason"] = (
+                f"Results truncated to stay within 50% of context window ({max_result_chars:,} chars). "
+                f"Showing {total_matches} of {total_matches_all} total matches. "
+                f"Narrow your search pattern or use file_pattern to target specific files."
+            )
+        
+        return response
     
     async def _sed_files_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Batch find and replace across multiple files"""
@@ -3157,16 +3420,52 @@ Example:
                         "text_length": len(text),
                     }
                 
+                # NC-0.8.0.13: Async wrapper that saves retrieval artifact then returns
+                async def _doc_result_and_save(text: str, mime: str) -> Dict:
+                    _ext_map = {
+                        'application/pdf': '.txt', 'text/html': '.txt',
+                        'text/csv': '.csv', 'application/json': '.json',
+                        'text/plain': '.txt', 'text/markdown': '.md', 'text/xml': '.xml',
+                    }
+                    _suffix = _ext_map.get(mime, '.txt')
+                    artifact_path = await self._save_web_retrieval_artifact(url, text, context, suffix=_suffix)
+                    
+                    # Build result with LLM-appropriate truncation referencing the artifact
+                    LLM_PREVIEW_LIMIT = 8000
+                    LARGE_CONTENT_THRESHOLD = 64000
+                    llm_preview = text[:LLM_PREVIEW_LIMIT]
+                    if len(text) > LLM_PREVIEW_LIMIT:
+                        artifact_ref = artifact_path or f"retrievedFromWeb/{extracted_filename}"
+                        llm_preview += f"\n\n[TRUNCATED — showing {LLM_PREVIEW_LIMIT} of {len(text)} total chars]"
+                        llm_preview += f"\nFull content saved to: {artifact_ref}"
+                        llm_preview += f"\n\nTo access the full content:"
+                        llm_preview += f"\n  • view_file_lines(filename='{artifact_ref}', start=1, end=100) — read specific line ranges"
+                        llm_preview += f"\n  • grep_files(pattern='search term', file_pattern='{artifact_ref}') — search for specific content"
+                        if len(text) > LARGE_CONTENT_THRESHOLD:
+                            llm_preview += f"\n\n⚠ This file is {len(text):,} chars. Loading it all at once would consume most of your context window."
+                            llm_preview += f"\n  Use grep_files to find relevant sections first, then view_file_lines to read them."
+                    return {
+                        "direct_to_chat": True,
+                        "direct_text": text,
+                        "filename": extracted_filename,
+                        "url": str(response.url),
+                        "content_type": mime,
+                        "size_bytes": content_length,
+                        "text": llm_preview,
+                        "text_length": len(text),
+                        "artifact_path": artifact_path,
+                    }
+                
                 # For text-like types, just return the text directly
                 text_types = ('text/plain', 'text/markdown', 'text/csv', 'application/json', 'text/xml')
                 if mime_type in text_types:
-                    text = response.text[:100000]
-                    return _doc_result(text, mime_type)
+                    text = response.text
+                    return await _doc_result_and_save(text, mime_type)
                 
                 # For HTML, use existing HTML extractor with JS-rendering fallback
                 if 'text/html' in mime_type or 'application/xhtml' in mime_type:
-                    text_content = (await self._extract_text_with_js_fallback(url, response.text, True))[:100000]
-                    return _doc_result(text_content, "text/html")
+                    text_content = await self._extract_text_with_js_fallback(url, response.text, True)
+                    return await _doc_result_and_save(text_content, "text/html")
                 
                 # For binary document types (PDF, DOCX, XLSX, RTF), save to temp and extract
                 supported_binary = (
@@ -3255,11 +3554,7 @@ Example:
                             "error": "Document was downloaded but text extraction returned empty. The document may be image-based (scanned) or password-protected.",
                         }
                     
-                    # Truncate if massive
-                    if len(text) > 100000:
-                        text = text[:100000] + f"\n\n[... truncated, {len(text)} total chars]"
-                    
-                    return _doc_result(text, mime_type)
+                    return await _doc_result_and_save(text, mime_type)
                 finally:
                     if tmp_path and os.path.exists(tmp_path):
                         os.unlink(tmp_path)

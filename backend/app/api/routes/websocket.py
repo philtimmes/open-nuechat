@@ -336,6 +336,7 @@ async def handle_chat_message(
     attachments = payload.get("attachments", [])
     parent_id = payload.get("parent_id")  # For conversation branching
     client_message_id = payload.get("message_id")  # Client-generated UUID for the user message
+    user_timezone = payload.get("timezone")  # NC-0.8.0.13: Browser timezone (e.g. "America/Chicago")
     
     # NC-0.8.0.8: Reorganized tool categories into logical sections
     # Maps frontend category toggles to backend tool names
@@ -1792,6 +1793,7 @@ The following is relevant information from your previous conversations:
                 cancel_check=streaming_handler.is_stop_requested,  # Allow LLM to check cancellation
                 stream_setter=streaming_handler.set_active_stream,  # Allow direct stream cancellation
                 is_file_content=not save_user_message,  # Skip injection filter for user-uploaded files
+                user_timezone=user_timezone,  # NC-0.8.0.13: Browser timezone
             ):
                 # Check if stop was requested (backup check)
                 if streaming_handler.is_stop_requested():
@@ -1825,28 +1827,6 @@ The following is relevant information from your previous conversations:
                     # This ensures the message is visible to any continuation requests
                     # (e.g., file content requests that immediately follow)
                     try:
-                        # NC-0.8.0.13: Save tool_groups in message_metadata
-                        _tool_groups = event.get("tool_groups")
-                        if _tool_groups and streaming_handler._current_message_id:
-                            try:
-                                from sqlalchemy import text as _sa_text
-                                result = await db.execute(
-                                    _sa_text("SELECT message_metadata FROM messages WHERE id = :id"),
-                                    {"id": streaming_handler._current_message_id}
-                                )
-                                row = result.fetchone()
-                                existing_meta = {}
-                                if row and row[0]:
-                                    existing_meta = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                                # Store as tool_groups keyed by group index
-                                existing_meta["tool_groups"] = {str(k): v for k, v in _tool_groups.items()}
-                                await db.execute(
-                                    _sa_text("UPDATE messages SET message_metadata = :metadata WHERE id = :id"),
-                                    {"id": streaming_handler._current_message_id, "metadata": json.dumps(existing_meta)}
-                                )
-                            except Exception as meta_err:
-                                logger.debug(f"[TOOL_GROUPS] Failed to save tool_groups: {meta_err}")
-                        
                         await db.commit()
                         logger.debug(f"Committed assistant message to DB")
                     except Exception as commit_err:
@@ -1926,18 +1906,34 @@ The following is relevant information from your previous conversations:
                 
                 # NC-0.8.0.12: Forward tool activity events for UI timeline
                 elif event_type in ("tool_start", "tool_end"):
+                    payload_data = {
+                        "chat_id": chat_id,
+                        "message_id": streaming_handler._current_message_id,
+                        "tool": event.get("tool", ""),
+                        "round": event.get("round", 0),
+                        "ts": event.get("ts", 0),
+                        "args_summary": event.get("args_summary", ""),
+                        "status": event.get("status", ""),
+                        "duration_ms": event.get("duration_ms", 0),
+                        "result_summary": event.get("result_summary", ""),
+                    }
+                    
                     await ws_manager.send_to_connection(connection, {
                         "type": event_type,
+                        "payload": payload_data,
+                    })
+                
+                # NC-0.8.0.13: Stream tool content deltas to frontend (live file creation preview)
+                elif event_type == "tool_content_delta":
+                    await ws_manager.send_to_connection(connection, {
+                        "type": "tool_content_delta",
                         "payload": {
                             "chat_id": chat_id,
                             "message_id": streaming_handler._current_message_id,
-                            "tool": event.get("tool", ""),
-                            "round": event.get("round", 0),
-                            "ts": event.get("ts", 0),
-                            "args_summary": event.get("args_summary", ""),
-                            "status": event.get("status", ""),
-                            "duration_ms": event.get("duration_ms", 0),
-                            "result_summary": event.get("result_summary", ""),
+                            "tool_name": event.get("tool_name", ""),
+                            "tool_index": event.get("tool_index", 0),
+                            "delta": event.get("delta", ""),
+                            "accumulated_length": event.get("accumulated_length", 0),
                         },
                     })
                 
@@ -2010,6 +2006,20 @@ The following is relevant information from your previous conversations:
                         "type": "tool_call",
                         "payload": payload,
                     })
+                
+                # NC-0.8.0.13: Forward web retrieval artifact notifications to frontend
+                elif event_type == "web_retrieval_artifact":
+                    await ws_manager.send_to_connection(connection, {
+                        "type": "web_retrieval_artifact",
+                        "payload": {
+                            "chat_id": chat_id,
+                            "message_id": streaming_handler._current_message_id,
+                            "filepath": event.get("filepath", ""),
+                            "url": event.get("url", ""),
+                            "content_length": event.get("content_length", 0),
+                        },
+                    })
+                    
         except asyncio.CancelledError:
             logger.debug(f"Streaming task cancelled for chat {chat_id}")
             await ws_manager.send_to_connection(connection, {
@@ -2274,11 +2284,12 @@ async def generate_chat_title(first_message: str, db: AsyncSession) -> str:
         # Create LLM instance from database settings
         title_llm = await LLMService.from_database(db)
         
-        # Use simple_completion with the clean instance
-        title = await title_llm.simple_completion(
+        # Use utility model to avoid vLLM tokenizer conflicts with main model
+        title = await title_llm.utility_completion(
             prompt=content_for_title[:500],
             system_prompt=title_prompt,
             max_tokens=30,
+            db=db,
         )
         
         # Clean up the title

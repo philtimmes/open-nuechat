@@ -39,6 +39,20 @@ export default function SystemTab({ settings, setSettings, onSave, isSaving }: P
           </div>
           
           <div>
+            <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+              Server Timezone
+              <span className="ml-2 text-xs text-[var(--color-text-muted)]">(fallback when browser timezone unavailable)</span>
+            </label>
+            <input
+              type="text"
+              value={settings.server_timezone || ''}
+              onChange={(e) => setSettings({ ...settings, server_timezone: e.target.value })}
+              placeholder="America/New_York"
+              className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            />
+          </div>
+          
+          <div>
             <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Title Generation Prompt</label>
             <textarea
               value={settings.title_generation_prompt}

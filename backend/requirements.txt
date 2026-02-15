@@ -66,6 +66,9 @@ youtube-transcript-api>=0.6.0
 # JS-rendered page extraction (optional, fallback for complex web pages)
 playwright>=1.40.0
 
+# Web search: duckduckgo_search is optional (install manually: pip install duckduckgo_search)
+# Falls back to HTML scraping if not installed
+
 # TTS (Text-to-Speech) - RPC client to Kokoro microservice
 # (uses httpx from Authentication section)
 

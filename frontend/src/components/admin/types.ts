@@ -3,6 +3,12 @@
 export interface SystemSettings {
   default_system_prompt: string;
   all_models_prompt: string;
+  server_timezone: string;
+  store_tool_call_log: boolean;
+  llm_comm_dump: boolean;
+  utility_model: string;
+  utility_api_base_url: string;
+  utility_api_key: string;
   title_generation_prompt: string;
   rag_context_prompt: string;
   // Source-specific RAG prompts

@@ -560,6 +560,16 @@ function StreamingMessageComponent({
   const lastRenderRef = useRef({ content: '', lineCount: 0 });
   const [renderedContent, setRenderedContent] = useState('');
   
+  // NC-0.8.0.13: Subscribe to tool timeline changes for live re-rendering
+  const toolTimeline = useChatStore(state => state.toolTimeline);
+  const [liveToolGroups, setLiveToolGroups] = useState<Record<number, any[]>>({});
+  
+  // Update live tool groups whenever toolTimeline changes
+  useEffect(() => {
+    const groups: Record<number, any[]> = (window as any).__toolGroups || {};
+    setLiveToolGroups({...groups});
+  }, [toolTimeline]);
+  
   useEffect(() => {
     if (!content) {
       setRenderedContent('');
@@ -571,10 +581,9 @@ function StreamingMessageComponent({
     const lastLines = lastRenderRef.current.lineCount;
     const lastContent = lastRenderRef.current.content;
     
-    // Check if we should re-render markdown
     const newContent = content.slice(lastContent.length);
     const closedCodeFence = newContent.includes('```') && 
-      (content.match(/```/g)?.length || 0) % 2 === 0; // Even number = all fences closed
+      (content.match(/```/g)?.length || 0) % 2 === 0;
     const addedEnoughLines = currentLines - lastLines >= 10;
     
     if (closedCodeFence || addedEnoughLines || content.length < 100) {
@@ -583,10 +592,101 @@ function StreamingMessageComponent({
     }
   }, [content]);
   
-  // Use rendered content for markdown, but show full content length
   const displayContent = renderedContent || content;
   const hasUnrenderedContent = content.length > renderedContent.length;
   
+  // Check for tool markers in content
+  const hasToolMarkers = displayContent.includes('<!--tools:');
+  
+  // NC-0.8.0.13: Show tool timeline even before any text content arrives
+  const hasLiveTools = Object.values(liveToolGroups).some(g => g.length > 0);
+  
+  // NC-0.8.0.13: Track streaming tool content for live preview
+  const [streamingToolContent, setStreamingToolContent] = useState<string>('');
+  const [streamingToolFile, setStreamingToolFile] = useState<string>('');
+  const [toolContentCollapsed, setToolContentCollapsed] = useState(false);
+  const preRef = useRef<HTMLPreElement>(null);
+  
+  useEffect(() => {
+    let frame: number;
+    const poll = () => {
+      const streams = (window as any).__toolContentStream || {};
+      const keys = Object.keys(streams);
+      if (keys.length > 0) {
+        const raw = streams[keys[keys.length - 1]] || '';
+        if (raw && raw.length > 0) {
+          const contentStart = raw.indexOf('"content"');
+          if (contentStart !== -1) {
+            const valueStart = raw.indexOf('"', contentStart + 9);
+            if (valueStart !== -1) {
+              let c = raw.slice(valueStart + 1).replace(/"\s*\}\s*$/, '');
+              try { c = c.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\'); } catch {}
+              setStreamingToolContent(c);
+            }
+          }
+          const pathMatch = raw.match(/"path"\s*:\s*"([^"]*)/);
+          if (pathMatch) setStreamingToolFile(pathMatch[1]);
+        }
+      } else if (streamingToolContent) {
+        setStreamingToolContent('');
+        setStreamingToolFile('');
+        setToolContentCollapsed(false);
+      }
+      frame = requestAnimationFrame(poll);
+    };
+    frame = requestAnimationFrame(poll);
+    return () => cancelAnimationFrame(frame);
+  }, [toolTimeline, streamingToolContent]);
+  
+  useEffect(() => {
+    if (preRef.current && !toolContentCollapsed) {
+      preRef.current.scrollTop = preRef.current.scrollHeight;
+    }
+  }, [streamingToolContent, toolContentCollapsed]);
+  
+  // NC-0.8.0.13: Track completed tool breadcrumbs
+  const [toolBreadcrumbs, setToolBreadcrumbs] = useState<Array<{tool: string; summary: string; ts: number}>>([]);
+  
+  useEffect(() => {
+    // Build breadcrumbs from completed tools in liveToolGroups
+    const crumbs: Array<{tool: string; summary: string; ts: number}> = [];
+    for (const [, events] of Object.entries(liveToolGroups)) {
+      for (const evt of events) {
+        if (evt.type === 'tool_end') {
+          const toolName = evt.tool || '';
+          const startEvt = events.find((e: any) => e.type === 'tool_start' && e.tool === toolName && e.round === evt.round);
+          const narrator = (startEvt as any)?.narrator || '';
+          let summary = narrator;
+          if (!summary) {
+            // Build a default summary from tool name and args
+            const args = (startEvt as any)?.args_summary || '';
+            if (toolName === 'create_file') {
+              const pathMatch = args.match(/path=([^,)]+)/);
+              summary = `Created file: ${pathMatch ? pathMatch[1] : 'file'}`;
+            } else if (toolName === 'search_replace') {
+              summary = 'Applied edits';
+            } else if (toolName === 'web_search') {
+              const qMatch = args.match(/query=([^,)]+)/);
+              summary = `Searched: ${qMatch ? qMatch[1] : 'web'}`;
+            } else if (toolName === 'fetch_webpage' || toolName === 'web_extract') {
+              const urlMatch = args.match(/url=([^,)]+)/);
+              summary = `Fetched: ${urlMatch ? urlMatch[1] : 'page'}`;
+            } else if (toolName === 'execute_python') {
+              summary = 'Ran code';
+            } else if (toolName === 'grep_files') {
+              const pMatch = args.match(/pattern=([^,)]+)/);
+              summary = `Searched files: ${pMatch ? pMatch[1] : ''}`;
+            } else {
+              summary = `${toolName}`;
+            }
+          }
+          crumbs.push({ tool: toolName, summary, ts: evt.ts });
+        }
+      }
+    }
+    setToolBreadcrumbs(crumbs);
+  }, [liveToolGroups]);
+
   return (
     <div className="py-4">
       <div className="max-w-3xl mx-auto px-3 md:px-4">
@@ -596,8 +696,8 @@ function StreamingMessageComponent({
           </span>
         </div>
         
-        {/* Tool call indicator */}
-        {toolCall && (
+        {/* Tool call indicator (legacy spinner) */}
+        {toolCall && !hasLiveTools && (
           <div className="mb-3 py-2 px-3 rounded border border-[var(--color-border)] bg-[var(--color-surface)]">
             <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
               <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -609,19 +709,89 @@ function StreamingMessageComponent({
           </div>
         )}
         
-        {/* Markdown content with incremental rendering */}
-        {displayContent ? (
-          <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)]">
-            <MessageMarkdown content={displayContent} />
-            {/* Show unrendered tail as plain text */}
-            {hasUnrenderedContent && (
-              <span className="whitespace-pre-wrap">{content.slice(renderedContent.length)}</span>
-            )}
-            <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
-          </div>
-        ) : (
-          <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse" />
-        )}
+        {/* Content with inline tool timelines */}
+        <div className="prose prose-base md:prose-sm max-w-none prose-neutral dark:prose-invert text-[var(--color-text)]">
+          {hasToolMarkers ? (
+            (() => {
+              const segments = displayContent.split(/<!--tools:(\d+)-->/);
+              return segments.map((segment: string, idx: number) => {
+                if (idx % 2 === 1) {
+                  const groupId = parseInt(segment, 10);
+                  const events = liveToolGroups[groupId];
+                  if (events && events.length > 0) {
+                    return <ToolTimeline key={`tg-${groupId}`} events={events} isLive />;
+                  }
+                  return null;
+                }
+                const trimmed = segment.trim();
+                if (!trimmed) return null;
+                return <MessageMarkdown key={`md-${idx}`} content={trimmed} />;
+              });
+            })()
+          ) : (
+            <>
+              {displayContent && <MessageMarkdown content={displayContent} />}
+            </>
+          )}
+          {hasUnrenderedContent && (
+            <span className="whitespace-pre-wrap">{content.slice(renderedContent.length)}</span>
+          )}
+          
+          {/* NC-0.8.0.13: Tool completion breadcrumbs */}
+          {toolBreadcrumbs.length > 0 && (
+            <div className="mt-1 mb-1">
+              {toolBreadcrumbs.map((crumb, i) => (
+                <div key={`crumb-${i}-${crumb.ts}`} className="text-xs italic text-gray-400 dark:text-gray-500 py-0.5">
+                  {crumb.summary}
+                </div>
+              ))}
+            </div>
+          )}
+          
+          {/* NC-0.8.0.13: Live tool content preview at bottom */}
+          {streamingToolContent && (
+            <div className="my-2 rounded-lg border border-gray-200 dark:border-gray-700/50 bg-gray-50 dark:bg-gray-800/50 overflow-hidden">
+              <div
+                onClick={() => setToolContentCollapsed(!toolContentCollapsed)}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs text-gray-500 dark:text-gray-400
+                           cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700/50 select-none"
+              >
+                <span className="text-blue-400 animate-pulse">✎</span>
+                <span className="font-mono font-medium">{streamingToolFile || 'Writing file...'}</span>
+                <span className="text-gray-400 dark:text-gray-500">·</span>
+                <span>{streamingToolContent.split('\n').length} lines</span>
+                <span className="text-gray-400 dark:text-gray-500">·</span>
+                <span>{streamingToolContent.length.toLocaleString()} chars</span>
+                <span className="ml-auto text-gray-400">{toolContentCollapsed ? '▸' : '▾'}</span>
+              </div>
+              {!toolContentCollapsed && (
+                <pre
+                  ref={preRef}
+                  className="px-3 pb-2 text-[11px] leading-relaxed font-mono text-gray-600 dark:text-gray-300
+                             overflow-y-auto whitespace-pre-wrap break-words"
+                  style={{ maxHeight: 200 }}
+                >
+                  {streamingToolContent}
+                  <span className="inline-block w-1 h-3 bg-blue-400 animate-pulse ml-0.5 align-middle" />
+                </pre>
+              )}
+            </div>
+          )}
+          
+          {/* NC-0.8.0.13: Live tool timeline at bottom */}
+          {hasLiveTools && (
+            <div className="my-1">
+              {Object.entries(liveToolGroups).map(([gid, events]) => {
+                // Only show groups with running tools (completed ones become breadcrumbs)
+                const hasRunning = events.some((e: any) => e.type === 'tool_start' && 
+                  !events.some((e2: any) => e2.type === 'tool_end' && e2.tool === e.tool && e2.round === e.round));
+                return hasRunning ? <ToolTimeline key={`bottom-tg-${gid}`} events={events} isLive /> : null;
+              })}
+            </div>
+          )}
+          
+          <span className="inline-block w-1.5 h-4 bg-[var(--color-primary)] animate-pulse ml-0.5 align-middle" />
+        </div>
       </div>
     </div>
   );
@@ -737,6 +907,8 @@ export default function ChatPage() {
   // Chat menu state
   const [showChatMenu, setShowChatMenu] = useState(false);
   const [showShareDialog, setShowShareDialog] = useState(false);
+  const [showDownloadDialog, setShowDownloadDialog] = useState(false);
+  const [downloadIncludeRetrieved, setDownloadIncludeRetrieved] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [shareCopied, setShareCopied] = useState(false);
   const [shareAnonymous, setShareAnonymous] = useState(false);
@@ -1493,9 +1665,10 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
       }
       
       console.log(`Zip uploaded: ${result.total_files} files, ${result.artifacts.length} artifacts`);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to upload zip:', error);
-      alert('Failed to process zip file. Please try again.');
+      const detail = error?.response?.data?.detail || error?.message || 'Unknown error';
+      alert(`Failed to process zip file: ${detail}`);
     } finally {
       setIsUploadingZip(false);
     }
@@ -1538,45 +1711,62 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
     }
   }, [currentChat, stopGeneration]);
   
+  // NC-0.8.0.13: Check if retrieved web artifacts exist
+  const retrievedArtifacts = useMemo(() => 
+    artifacts.filter(a => a.filename?.startsWith('retrievedFromWeb/')),
+    [artifacts]
+  );
+  
   const handleDownloadAll = async () => {
-    // Get only the latest version of each unique file
-    // Note: artifacts array already filters out agent memory files
     const latestArtifacts = getLatestArtifacts(artifacts);
     if (latestArtifacts.length === 0) {
       alert('No files to download');
       return;
     }
     
-    // Dynamic import of JSZip
+    // If there are retrieved web artifacts, show choice dialog
+    const hasRetrieved = latestArtifacts.some(a => a.filename?.startsWith('retrievedFromWeb/'));
+    if (hasRetrieved) {
+      setShowDownloadDialog(true);
+      return;
+    }
+    
+    // No retrieved artifacts — download directly
+    await executeDownload(latestArtifacts, false);
+  };
+  
+  const executeDownload = async (allArtifacts: typeof artifacts, includeRetrieved: boolean) => {
+    const filtered = includeRetrieved 
+      ? allArtifacts 
+      : allArtifacts.filter(a => !a.filename?.startsWith('retrievedFromWeb/'));
+    
+    if (filtered.length === 0) {
+      alert('No files to download');
+      return;
+    }
+    
     const JSZip = (await import('jszip')).default;
     const zip = new JSZip();
     
-    for (const artifact of latestArtifacts) {
+    for (const artifact of filtered) {
       const filename = artifact.filename || `${artifact.title.replace(/\s+/g, '_')}.txt`;
-      // Double-check: skip any agent memory files
       if (isAgentFile(filename)) continue;
       
-      // NC-0.8.0.7: Handle image artifacts - fetch from URL or use base64
       if (artifact.type === 'image') {
         const imgSrc = artifact.imageData?.url || artifact.imageData?.base64 || artifact.content;
         if (imgSrc) {
           try {
             if (imgSrc.startsWith('data:')) {
-              // Base64 data URL - extract the data part
               const base64Data = imgSrc.split(',')[1];
               zip.file(filename, base64Data, { base64: true });
             } else if (imgSrc.startsWith('/') || imgSrc.startsWith('http')) {
-              // URL - fetch the image
               const fullUrl = imgSrc.startsWith('/') ? `${window.location.origin}${imgSrc}` : imgSrc;
               const response = await fetch(fullUrl);
               if (response.ok) {
                 const blob = await response.blob();
                 zip.file(filename, blob);
-              } else {
-                console.warn(`Failed to fetch image ${filename}: ${response.status}`);
               }
             } else {
-              // Raw base64 without data: prefix
               zip.file(filename, imgSrc, { base64: true });
             }
           } catch (err) {
@@ -1584,7 +1774,6 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
           }
         }
       } else {
-        // Regular text/code artifact
         zip.file(filename, artifact.content);
       }
     }
@@ -2068,17 +2257,8 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
                 />
               )}
               
-              {/* NC-0.8.0.12: Live tool activity timeline */}
-              {isSending && toolTimeline.length > 0 && (
-                <div className="py-2 px-4">
-                  <div className="max-w-3xl mx-auto">
-                    <ToolTimeline events={toolTimeline} isLive />
-                  </div>
-                </div>
-              )}
-              
-              {/* Streaming message - separate component to avoid re-rendering list */}
-              {(streamingContent || streamingToolCall) && (
+              {/* Streaming message with inline tool timelines */}
+              {(streamingContent || streamingToolCall || (isSending && toolTimeline.length > 0)) && (
                 <StreamingMessage
                   chatId={currentChat?.id || ''}
                   content={streamingContent}
@@ -2220,6 +2400,47 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
                 className="px-4 py-2 rounded-lg text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-background)] transition-colors text-sm"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* NC-0.8.0.13: Download dialog - choose whether to include retrieved web content */}
+      {showDownloadDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-[var(--color-surface)] rounded-xl border border-[var(--color-border)] p-6 w-full max-w-md mx-4 shadow-2xl">
+            <h3 className="text-lg font-semibold text-[var(--color-text)] mb-3">Download Files</h3>
+            <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+              This chat has {retrievedArtifacts.length} retrieved web document{retrievedArtifacts.length !== 1 ? 's' : ''} in <code className="text-xs bg-[var(--color-background)] px-1 py-0.5 rounded">retrievedFromWeb/</code>
+            </p>
+            
+            <label className="flex items-center gap-2 mb-5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={downloadIncludeRetrieved}
+                onChange={(e) => setDownloadIncludeRetrieved(e.target.checked)}
+                className="w-4 h-4 rounded border-[var(--color-border)] text-[var(--color-button)] focus:ring-[var(--color-button)]"
+              />
+              <span className="text-sm text-[var(--color-text)]">Include retrieved web documents</span>
+            </label>
+            
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowDownloadDialog(false)}
+                className="px-4 py-2 rounded-lg text-[var(--color-text-secondary)] hover:text-[var(--color-text)] hover:bg-[var(--color-background)] transition-colors text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  setShowDownloadDialog(false);
+                  const latestArtifacts = getLatestArtifacts(artifacts);
+                  await executeDownload(latestArtifacts, downloadIncludeRetrieved);
+                }}
+                className="px-4 py-2 rounded-lg bg-[var(--color-button)] text-[var(--color-button-text)] hover:opacity-90 transition-opacity text-sm font-medium"
+              >
+                Download ZIP
               </button>
             </div>
           </div>

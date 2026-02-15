@@ -79,6 +79,7 @@ services:
       - FAISS_INDEX_DIR=${FAISS_INDEX_DIR:-/app/faiss_indexes}
       - FAISS_NPROBE=${FAISS_NPROBE:-32}
       - FAISS_USE_GPU=${FAISS_USE_GPU:-true}
+      - RAG_FORCE_CPU=${RAG_FORCE_CPU:-false}
       - TOOL_ENCRYPTION_KEY=${TOOL_ENCRYPTION_KEY:-}
       # TTS Service
       - TTS_SERVICE_URL=${TTS_SERVICE_URL:-http://localhost:8033}

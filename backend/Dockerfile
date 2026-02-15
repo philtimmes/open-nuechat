@@ -62,6 +62,9 @@ RUN if [ "$FAISS_CPU" = "1" ]; then \
 COPY backend/requirements.txt .
 RUN pip install -r requirements.txt
 
+# Optional: DuckDuckGo search library (falls back to HTML scraping if install fails)
+RUN pip install duckduckgo_search || echo "duckduckgo_search not available, using HTML scraper fallback"
+
 # Install Playwright Chromium browser for JS-rendered page extraction
 RUN playwright install chromium && playwright install-deps chromium
 

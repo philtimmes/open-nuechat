@@ -1076,6 +1076,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         
         // NC-0.8.0.13: Reset tool group tracking
         (window as any).__toolGroups = {};
+        (window as any).__toolContentStream = {};
         (window as any).__activeToolGroup = -1;
         useChatStore.getState().clearToolTimeline();
         
@@ -1192,6 +1193,99 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         (window as any).__toolGroups = grps;
         
         useChatStore.getState().setToolTimelineEvent(endEvent);
+        break;
+      }
+      
+      // NC-0.8.0.13: Narrator description for a tool call — update the timeline entry
+      case 'tool_narrator': {
+        const np = message.payload as {
+          chat_id: string;
+          tool: string;
+          round: number;
+          group: number;
+          narrator: string;
+        };
+        
+        // Update the tool_start event in __toolGroups with the narrator text
+        const narratorGroups: Record<number, any[]> = (window as any).__toolGroups || {};
+        const grpEvents = narratorGroups[np.group];
+        if (grpEvents) {
+          for (const evt of grpEvents) {
+            if (evt.type === 'tool_start' && evt.tool === np.tool && evt.round === np.round) {
+              evt.narrator = np.narrator;
+              break;
+            }
+          }
+        }
+        (window as any).__toolGroups = narratorGroups;
+        
+        // Trigger re-render by updating store
+        useChatStore.getState().setToolTimelineEvent({
+          ts: Date.now() / 1000,
+          type: 'tool_start',
+          tool: np.tool,
+          round: np.round,
+          narrator: np.narrator,
+        } as any);
+        break;
+      }
+      
+      // NC-0.8.0.13: Stream tool content deltas for live file creation preview
+      case 'tool_content_delta': {
+        const tcd = message.payload as {
+          chat_id: string;
+          message_id: string;
+          tool_name: string;
+          tool_index: number;
+          delta: string;
+          accumulated_length: number;
+        };
+        
+        // Accumulate on window for the ToolTimeline to read
+        if (!(window as any).__toolContentStream) {
+          (window as any).__toolContentStream = {};
+        }
+        const streamKey = `${tcd.tool_name}:${tcd.tool_index}`;
+        if (!(window as any).__toolContentStream[streamKey]) {
+          (window as any).__toolContentStream[streamKey] = '';
+        }
+        (window as any).__toolContentStream[streamKey] += tcd.delta;
+        
+        // Trigger re-render via store
+        useChatStore.getState().setToolTimelineEvent({
+          ts: Date.now() / 1000,
+          type: 'tool_start',
+          tool: tcd.tool_name,
+          round: -1,  // sentinel — just triggers re-render
+        } as any);
+        break;
+      }
+      
+      // NC-0.8.0.13: Web retrieval artifact saved — add to artifacts list
+      case 'web_retrieval_artifact': {
+        const wra = message.payload as {
+          chat_id: string;
+          message_id: string;
+          filepath: string;
+          url: string;
+          content_length: number;
+        };
+        const { currentChat, updateArtifact } = useChatStore.getState();
+        if (wra.chat_id && currentChat?.id && wra.chat_id !== currentChat.id) break;
+        
+        if (wra.filepath) {
+          const artifact: Artifact = {
+            id: `web_${Date.now()}_${wra.filepath}`,
+            type: 'code',
+            title: wra.filepath.split('/').pop() || wra.filepath,
+            filename: wra.filepath,
+            content: `[Retrieved from ${wra.url}]\n[${wra.content_length} characters — use view_file_lines to read]`,
+            source: 'upload',
+            created_at: new Date().toISOString(),
+          };
+          updateArtifact(wra.filepath, artifact);
+          console.log(`[web_retrieval] Artifact created: ${wra.filepath} (${wra.content_length} chars)`);
+        }
         break;
       }
       
@@ -1409,6 +1503,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           
           // Reset tool timeline accumulator
           (window as any).__toolGroups = {};
+        (window as any).__toolContentStream = {};
           (window as any).__activeToolGroup = -1;
           useChatStore.getState().clearToolTimeline();
           
@@ -1725,6 +1820,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         // Reset tool group tracking
         (window as any).__toolGroups = {};
+        (window as any).__toolContentStream = {};
         (window as any).__activeToolGroup = -1;
         useChatStore.getState().clearToolTimeline();
         clearStreaming();
@@ -2292,6 +2388,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           parent_id: parentId,
           message_id: messageId,  // Send the ID so backend uses it
           zip_context: zipContext,  // Include zip manifest if available
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,  // NC-0.8.0.13: Browser timezone
         },
       }));
     } else {
@@ -2311,6 +2408,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           chat_id: chatId,
           content,
           parent_id: parentId,  // The user message whose response we're regenerating
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         },
       }));
     } else {

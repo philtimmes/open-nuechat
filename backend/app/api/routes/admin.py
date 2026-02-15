@@ -114,6 +114,12 @@ class SystemSettingsSchema(BaseModel):
     # Prompts
     default_system_prompt: str = ""
     all_models_prompt: str = ""  # Appended to all system prompts including Custom GPTs
+    server_timezone: str = ""  # NC-0.8.0.13: Server timezone fallback (e.g. "America/Chicago")
+    store_tool_call_log: bool = False  # NC-0.8.0.13: Store full tool call log in message metadata
+    llm_comm_dump: bool = False  # NC-0.8.0.16: Dump full LLM requests to /app/data/llm_dumps
+    utility_model: str = ""  # NC-0.8.0.15: Utility model name (titles, narration)
+    utility_api_base_url: str = ""  # NC-0.8.0.15: Utility model API endpoint
+    utility_api_key: str = ""  # NC-0.8.0.15: Utility model API key
     title_generation_prompt: str = ""
     rag_context_prompt: str = ""  # Legacy - used for user documents if specific prompt not set
     
@@ -317,6 +323,12 @@ async def get_admin_settings(
     return SystemSettingsSchema(
         default_system_prompt=await get_system_setting(db, "default_system_prompt"),
         all_models_prompt=await get_system_setting(db, "all_models_prompt"),
+        server_timezone=await get_system_setting(db, "server_timezone"),
+        store_tool_call_log=(await get_system_setting(db, "store_tool_call_log")) in ("true", "True", "1"),
+        llm_comm_dump=(await get_system_setting(db, "llm_comm_dump")) in ("true", "True", "1"),
+        utility_model=await get_system_setting(db, "utility_model") or "",
+        utility_api_base_url=await get_system_setting(db, "utility_api_base_url") or "",
+        utility_api_key=await get_system_setting(db, "utility_api_key") or "",
         title_generation_prompt=await get_system_setting(db, "title_generation_prompt"),
         rag_context_prompt=await get_system_setting(db, "rag_context_prompt"),
         rag_prompt_global_kb=await get_system_setting(db, "rag_prompt_global_kb"),
@@ -349,6 +361,12 @@ async def update_admin_settings(
     """Update system settings"""
     await set_setting(db, "default_system_prompt", data.default_system_prompt)
     await set_setting(db, "all_models_prompt", data.all_models_prompt)
+    await set_setting(db, "server_timezone", data.server_timezone)
+    await set_setting(db, "store_tool_call_log", str(data.store_tool_call_log).lower())
+    await set_setting(db, "llm_comm_dump", str(data.llm_comm_dump).lower())
+    await set_setting(db, "utility_model", data.utility_model)
+    await set_setting(db, "utility_api_base_url", data.utility_api_base_url)
+    await set_setting(db, "utility_api_key", data.utility_api_key)
     await set_setting(db, "title_generation_prompt", data.title_generation_prompt)
     await set_setting(db, "rag_context_prompt", data.rag_context_prompt)
     await set_setting(db, "rag_prompt_global_kb", data.rag_prompt_global_kb)

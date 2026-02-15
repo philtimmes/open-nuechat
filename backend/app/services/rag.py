@@ -177,7 +177,13 @@ class FAISSIndexManager:
         self._id_maps: Dict[str, Dict[int, str]] = {}  # faiss_id -> chunk_id
     
     def _init_gpu(self):
-        """Initialize FAISS GPU resources"""
+        """Initialize FAISS GPU resources (skipped if RAG_FORCE_CPU=true)"""
+        import os
+        force_cpu = os.environ.get("RAG_FORCE_CPU", "false").lower() in ("true", "1", "yes")
+        if force_cpu:
+            logger.info("FAISS GPU skipped — RAG_FORCE_CPU=true")
+            self.gpu_available = False
+            return
         try:
             self.gpu_resources = faiss.StandardGpuResources()
             self.gpu_available = True
@@ -553,14 +559,20 @@ class RAGService:
                     else:
                         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                 
-                # Now try to move to GPU if available
-                target_device = "cuda" if torch.cuda.is_available() else "cpu"
-                if target_device == "cuda" and model is not None:
-                    try:
-                        model = model.to("cuda")
-                        logger.info("Moved model to GPU")
-                    except Exception as e:
-                        logger.warning(f"Could not move model to GPU, using CPU: {e}")
+                # NC-0.8.0.13: Force CPU to avoid GPU compatibility issues
+                # Set RAG_FORCE_CPU=true in environment to disable GPU acceleration
+                force_cpu = os.environ.get("RAG_FORCE_CPU", "false").lower() in ("true", "1", "yes")
+                
+                if not force_cpu:
+                    target_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    if target_device == "cuda" and model is not None:
+                        try:
+                            model = model.to("cuda")
+                            logger.info("Moved model to GPU")
+                        except Exception as e:
+                            logger.warning(f"Could not move model to GPU, using CPU: {e}")
+                else:
+                    logger.info("RAG_FORCE_CPU=true — keeping embedding model on CPU")
                 
                 if model is None:
                     logger.error("Model loading failed")

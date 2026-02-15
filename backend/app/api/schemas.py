@@ -162,6 +162,15 @@ class MessageResponse(BaseModel):
     def model_validate(cls, obj, **kwargs):
         """Custom validator to map message_metadata to metadata"""
         if hasattr(obj, 'message_metadata'):
+            # NC-0.8.0.13: Handle double-encoded JSON strings in message_metadata
+            _raw_meta = obj.message_metadata
+            if isinstance(_raw_meta, str):
+                try:
+                    import json as _json
+                    _raw_meta = _json.loads(_raw_meta)
+                except Exception:
+                    _raw_meta = None
+            
             # Create dict from ORM object
             data = {
                 'id': obj.id,
@@ -170,7 +179,7 @@ class MessageResponse(BaseModel):
                 'content': obj.content,
                 'content_type': obj.content_type.value if hasattr(obj.content_type, 'value') else obj.content_type,
                 'attachments': obj.attachments,
-                'artifacts': obj.artifacts,  # Include artifacts
+                'artifacts': obj.artifacts,
                 'tool_calls': obj.tool_calls,
                 'input_tokens': obj.input_tokens,
                 'output_tokens': obj.output_tokens,
@@ -178,7 +187,7 @@ class MessageResponse(BaseModel):
                 'is_streaming': obj.is_streaming,
                 'is_error': obj.is_error,
                 'parent_id': obj.parent_id,
-                'metadata': obj.message_metadata,  # Map message_metadata -> metadata
+                'metadata': _raw_meta,
                 'created_at': obj.created_at,
             }
             return cls(**data)

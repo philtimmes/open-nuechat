@@ -1796,6 +1796,20 @@ export default function Admin() {
                     </div>
                     
                     <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
+                        Server Timezone
+                        <span className="ml-2 text-xs text-[var(--color-text-muted)]">(fallback when browser timezone unavailable, e.g. "America/Chicago")</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={systemSettings.server_timezone || ''}
+                        onChange={(e) => setSystemSettings({ ...systemSettings, server_timezone: e.target.value })}
+                        placeholder="America/New_York"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
                       <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Title Generation Prompt</label>
                       <textarea
                         value={systemSettings.title_generation_prompt}
@@ -2171,6 +2185,9 @@ export default function Admin() {
                                 {provider.is_vision_default && (
                                   <span className="px-2 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">Vision</span>
                                 )}
+                                {systemSettings?.utility_model === provider.model_id && (
+                                  <span className="px-2 py-0.5 text-xs bg-amber-500/20 text-amber-400 rounded">Utility</span>
+                                )}
                                 {provider.is_multimodal && (
                                   <span className="px-2 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">MM</span>
                                 )}
@@ -2230,11 +2247,28 @@ export default function Admin() {
                       e.preventDefault();
                       const form = e.target as HTMLFormElement;
                       const formData = new FormData(form);
+                      const modelId = formData.get('model_id') as string;
+                      const isUtility = formData.get('is_utility') === 'on';
+                      
+                      // Update utility_model setting
+                      if (systemSettings) {
+                        const newUtility = isUtility ? modelId : (systemSettings.utility_model === modelId ? '' : systemSettings.utility_model);
+                        if (newUtility !== systemSettings.utility_model) {
+                          const updated = { ...systemSettings, utility_model: newUtility };
+                          setSystemSettings(updated);
+                          fetch('/api/admin/settings', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
+                            body: JSON.stringify(updated),
+                          });
+                        }
+                      }
+                      
                       saveProvider({
                         name: formData.get('name') as string,
                         base_url: formData.get('base_url') as string,
                         api_key: (formData.get('api_key') as string) || undefined,
-                        model_id: formData.get('model_id') as string,
+                        model_id: modelId,
                         is_multimodal: formData.get('is_multimodal') === 'on',
                         supports_tools: formData.get('supports_tools') === 'on',
                         supports_streaming: formData.get('supports_streaming') === 'on',
@@ -2347,6 +2381,10 @@ export default function Admin() {
                         <label className="flex items-center gap-2 p-3 bg-[var(--color-background)] rounded-lg cursor-pointer">
                           <input name="is_vision_default" type="checkbox" defaultChecked={editingProvider?.is_vision_default ?? false} className="w-4 h-4" />
                           <span className="text-sm text-[var(--color-text)]">Vision Model</span>
+                        </label>
+                        <label className="flex items-center gap-2 p-3 bg-[var(--color-background)] rounded-lg cursor-pointer" title="Chat titles & tool narration">
+                          <input name="is_utility" type="checkbox" defaultChecked={systemSettings?.utility_model === (editingProvider?.model_id || '')} className="w-4 h-4" />
+                          <span className="text-sm text-[var(--color-text)]">Utility</span>
                         </label>
                       </div>
                       
@@ -2509,6 +2547,28 @@ export default function Admin() {
                       />
                       <label htmlFor="llm-multimodal" className="text-sm text-[var(--color-text)]">
                         Model supports vision/images (multimodal)
+                      </label>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="llm-utility"
+                        checked={systemSettings?.utility_model === llmSettings.llm_model}
+                        onChange={(e) => {
+                          if (!systemSettings) return;
+                          const updated = { ...systemSettings, utility_model: e.target.checked ? llmSettings.llm_model : '' };
+                          setSystemSettings(updated);
+                          fetch('/api/admin/settings', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
+                            body: JSON.stringify(updated),
+                          });
+                        }}
+                        className="rounded"
+                      />
+                      <label htmlFor="llm-utility" className="text-sm text-[var(--color-text)]">
+                        Utility <span className="text-xs text-[var(--color-text-secondary)]">(chat titles & tool narration)</span>
                       </label>
                     </div>
                     
@@ -5472,7 +5532,72 @@ export default function Admin() {
                   </div>
                 </div>
                 
-                {/* Token Reset Info */}
+                {/* Tool Call Storage */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Tool Call Storage</h3>
+                  <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                    Store full tool call requests and responses in the database. Included in chat exports.
+                  </p>
+                  
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={systemSettings?.store_tool_call_log || false}
+                        onChange={(e) => {
+                          if (!systemSettings) return;
+                          const updated = { ...systemSettings, store_tool_call_log: e.target.checked };
+                          setSystemSettings(updated);
+                          // Save immediately
+                          fetch('/api/admin/settings', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
+                            body: JSON.stringify(updated),
+                          });
+                        }}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                      />
+                      <div>
+                        <div className="text-[var(--color-text)] font-medium">Store Tool Call Logs</div>
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                          Save full tool call arguments and responses in message metadata. Increases DB storage but enables debugging and export of tool interactions.
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* LLM Comm Dump */}
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">LLM Comm Dump</h3>
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={systemSettings?.llm_comm_dump || false}
+                        onChange={(e) => {
+                          if (!systemSettings) return;
+                          const updated = { ...systemSettings, llm_comm_dump: e.target.checked };
+                          setSystemSettings(updated);
+                          fetch('/api/admin/settings', {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
+                            body: JSON.stringify(updated),
+                          });
+                        }}
+                        className="w-5 h-5 rounded border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-primary)]"
+                      />
+                      <div>
+                        <div className="text-[var(--color-text)] font-medium">LLM Comm Dump</div>
+                        <div className="text-sm text-[var(--color-text-secondary)]">
+                          Dump full LLM request payloads to <code className="text-xs bg-[var(--color-background)] px-1.5 py-0.5 rounded">/app/data/llm_dumps/</code> as JSON files.
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* Web Search Configuration */}
                 <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
                   <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Web Search Configuration</h3>
                   <p className="text-sm text-[var(--color-text-secondary)] mb-6">
@@ -5548,7 +5673,7 @@ export default function Admin() {
                   </div>
                 </div>
                 
-                {/* Token Reset Info (original) */}
+                {/* Token Reset Info */}
                 <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
                   <h3 className="text-lg font-semibold text-[var(--color-text)] mb-4">Token Reset Status</h3>
                   <div className="space-y-1 text-sm text-[var(--color-text-secondary)]">

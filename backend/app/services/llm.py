@@ -129,6 +129,7 @@ class LLMService:
         prompt: str,
         system_prompt: Optional[str] = None,
         max_tokens: int = 500,
+        model_override: Optional[str] = None,
     ) -> str:
         """
         Simple non-streaming completion for filter chain decisions.
@@ -139,7 +140,7 @@ class LLMService:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         
-        model = await self._get_effective_model()
+        model = model_override or await self._get_effective_model()
         
         try:
             response = await self.client.chat.completions.create(
@@ -153,6 +154,63 @@ class LLMService:
         except Exception as e:
             logger.error(f"simple_completion error: {e}")
             return ""
+    
+    async def utility_completion(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        max_tokens: int = 500,
+        db: Optional[Any] = None,
+    ) -> str:
+        """
+        Completion using the utility model (if configured) for chat titles
+        and tool narration. Uses its own API endpoint to avoid vLLM tokenizer
+        conflicts when main model is busy with tool calls.
+        Falls back to main model if no utility model configured.
+        """
+        utility_model = None
+        utility_base_url = None
+        utility_api_key = None
+        
+        if db:
+            try:
+                from app.services.settings_service import SettingsService
+                utility_model = (await SettingsService.get(db, "utility_model") or "").strip()
+                utility_base_url = (await SettingsService.get(db, "utility_api_base_url") or "").strip()
+                utility_api_key = (await SettingsService.get(db, "utility_api_key") or "").strip()
+            except Exception:
+                pass
+        
+        if utility_model and utility_base_url:
+            # Use dedicated utility client
+            try:
+                from openai import AsyncOpenAI
+                utility_client = AsyncOpenAI(
+                    base_url=utility_base_url,
+                    api_key=utility_api_key or "not-needed",
+                )
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": prompt})
+                
+                response = await utility_client.chat.completions.create(
+                    model=utility_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.7,
+                    stream=False,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                logger.warning(f"utility_completion failed, falling back to main model: {e}")
+        
+        # Fallback to main model
+        return await self.simple_completion(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+        )
     
     async def complete(
         self,
@@ -495,6 +553,7 @@ class LLMService:
         cancel_check: Optional[Callable[[], bool]] = None,  # Returns True if generation should be cancelled
         stream_setter: Optional[Callable[[Any], None]] = None,  # Callback to set active stream for cancellation
         is_file_content: bool = False,  # True when content is user-uploaded file (skip injection filters)
+        user_timezone: Optional[str] = None,  # NC-0.8.0.13: Browser timezone (e.g. "America/Chicago")
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Stream a message response with prompt-based tool orchestration.
@@ -594,7 +653,7 @@ class LLMService:
             logger.warning(f"[LARGE_MESSAGE] User message is very large: {len(filtered_user_message)} chars. May exceed context window for some models.")
         
         # Build messages from chat history (using tree structure)
-        messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id)
+        messages = await self._build_messages(db, chat, filtered_user_message, attachments, tools, parent_id, user_timezone=user_timezone)
         
         # Import token estimation for input/output limit validation
         from app.services.history_compression import estimate_message_tokens
@@ -864,9 +923,26 @@ class LLMService:
             
             # Debug: Log the ACTUAL JSON payload size that will be sent
             import json as json_module
+            import time as _dump_time
+            dump_dir = ""
             try:
-                payload_json = json_module.dumps(api_params)
-                logger.info(f"[LLM_PAYLOAD] JSON payload size: {len(payload_json)} bytes")
+                from app.services.settings_service import SettingsService as _DumpSS
+                _dump_enabled = await _DumpSS.get(db, "llm_comm_dump")
+                if _dump_enabled in ("true", "True", "1"):
+                    dump_dir = "/app/data/llm_dumps"
+            except Exception:
+                pass
+            try:
+                payload_json = json_module.dumps(api_params, indent=2, default=str)
+                logger.info(f"[LLM_PAYLOAD] JSON payload size: {len(payload_json)} bytes, messages: {len(messages)}")
+                
+                # Always dump to file for inspection
+                if dump_dir:
+                    os.makedirs(dump_dir, exist_ok=True)
+                    dump_path = os.path.join(dump_dir, f"llm_request_{int(_dump_time.time())}.json")
+                    with open(dump_path, "w") as _df:
+                        _df.write(payload_json)
+                    logger.info(f"[LLM_PAYLOAD] Dumped to {dump_path}")
                 
                 # For very large payloads, log structure
                 if len(payload_json) > 100000:
@@ -1011,6 +1087,18 @@ class LLMService:
                                         stc["name"] = tc.function.name
                                     if tc.function.arguments:
                                         stc["arguments"] += tc.function.arguments
+                                        
+                                        # NC-0.8.0.13: Stream tool content for long-running tool calls
+                                        # so user sees content being generated in real-time
+                                        _STREAMABLE_TOOLS = {"create_file", "search_replace", "sed_files"}
+                                        if stc["name"] in _STREAMABLE_TOOLS:
+                                            yield {
+                                                "type": "tool_content_delta",
+                                                "tool_name": stc["name"],
+                                                "tool_index": tc_index,
+                                                "delta": tc.function.arguments,
+                                                "accumulated_length": len(stc["arguments"]),
+                                            }
                         
                         if hasattr(chunk, 'usage') and chunk.usage:
                             total_input_tokens = chunk.usage.prompt_tokens or 0
@@ -1052,6 +1140,21 @@ class LLMService:
                     
                     # Execute pending tool calls
                     if streaming_tool_calls and tool_executor:
+                        # NC-0.8.0.16: Drain and close stream before creating next one
+                        # This releases vLLM's tokenizer borrow (Hermes tool parser)
+                        try:
+                            if stream is not None:
+                                # Drain any remaining chunks
+                                async for _ in stream:
+                                    pass
+                                if hasattr(stream, 'close'):
+                                    await stream.close()
+                                elif hasattr(stream, 'response') and hasattr(stream.response, 'aclose'):
+                                    await stream.response.aclose()
+                                stream = None
+                        except Exception:
+                            pass
+                        
                         logger.info(f"[LLM_TOOLS] Tool calls requested (round {tool_round}), executing {len(streaming_tool_calls)} tools...")
                         
                         for tc_index, tc_data in streaming_tool_calls.items():
@@ -1227,7 +1330,7 @@ class LLMService:
                                 
                                 # Truncate very long results
                                 # Document tools get more space since their content IS the value
-                                LARGE_RESULT_TOOLS = {"fetch_document", "view_file_lines", "request_file"}
+                                LARGE_RESULT_TOOLS = {"fetch_document", "view_file_lines", "request_file", "fetch_webpage", "web_extract", "fetch_urls"}
                                 max_result_len = 80000 if tool_name in LARGE_RESULT_TOOLS else 15000
                                 if len(result_str) > max_result_len:
                                     result_str = result_str[:max_result_len] + f"\n... [truncated at {max_result_len} chars, {len(result_str)} total]"
@@ -1250,15 +1353,37 @@ class LLMService:
                                     "result": result_str[:1000] + "..." if len(result_str) > 1000 else result_str,
                                 }
                                 
+                                # NC-0.8.0.13: Notify frontend about web retrieval artifacts
+                                if isinstance(result, dict) and result.get("artifact_path"):
+                                    _art_path = result["artifact_path"]
+                                    _art_content = result.get("content", "")
+                                    yield {
+                                        "type": "web_retrieval_artifact",
+                                        "filepath": _art_path,
+                                        "url": result.get("url", ""),
+                                        "content_length": result.get("content_length", len(_art_content)),
+                                    }
+                                
                                 # NC-0.8.0.12: Emit tool_end for UI timeline
                                 tool_end_ts = _time.time()
                                 _result_summary = result_str[:80] + "..." if len(result_str) > 80 else result_str
+                                
+                                # NC-0.8.0.13: Detect error/empty results for accurate status
+                                _tool_status = "success"
+                                if isinstance(result, dict):
+                                    if result.get("error"):
+                                        _tool_status = "error"
+                                    elif tool_name in ("fetch_webpage", "web_extract", "fetch_document", "fetch_urls"):
+                                        _content = result.get("content", "")
+                                        if not _content or (isinstance(_content, str) and len(_content.strip()) < 50):
+                                            _tool_status = "empty"
+                                
                                 ui_event_end = {
                                     "ts": tool_end_ts,
                                     "type": "tool_end",
                                     "tool": tool_name,
                                     "round": tool_round,
-                                    "status": "success",
+                                    "status": _tool_status,
                                     "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
                                     "result_summary": _result_summary,
                                 }
@@ -1648,6 +1773,27 @@ class LLMService:
                             continue_params["tools"] = self._convert_tools_to_openai_format(tools)
                             continue_params["tool_choice"] = "auto"
                         
+                        # NC-0.8.0.15: Explicitly close previous stream to release vLLM tokenizer borrow
+                        try:
+                            if hasattr(stream, 'close'):
+                                await stream.close()
+                            elif hasattr(stream, 'response') and hasattr(stream.response, 'aclose'):
+                                await stream.response.aclose()
+                        except Exception:
+                            pass
+                        stream = None
+                        
+                        # Dump continuation payload if enabled
+                        if dump_dir:
+                            try:
+                                _cont_json = json_module.dumps(continue_params, indent=2, default=str)
+                                _cont_path = os.path.join(dump_dir, f"llm_continue_r{tool_round}_{int(_dump_time.time())}.json")
+                                with open(_cont_path, "w") as _cf:
+                                    _cf.write(_cont_json)
+                                logger.info(f"[LLM_PAYLOAD] Continuation dumped to {_cont_path} ({len(_cont_json)} bytes)")
+                            except Exception:
+                                pass
+                        
                         stream = await self.client.chat.completions.create(**continue_params)
                         if stream_setter:
                             stream_setter(stream)
@@ -1668,6 +1814,16 @@ class LLMService:
                 else:
                     # Re-raise if not a cancellation
                     raise
+            finally:
+                # NC-0.8.0.15: Always close stream to release vLLM tokenizer borrow
+                try:
+                    if stream is not None:
+                        if hasattr(stream, 'close'):
+                            await stream.close()
+                        elif hasattr(stream, 'response') and hasattr(stream.response, 'aclose'):
+                            await stream.response.aclose()
+                except Exception:
+                    pass
             
             # If cancelled, still save partial content and notify
             if cancelled:
@@ -1704,6 +1860,49 @@ class LLMService:
             # Don't prepend them to assistant content (causes display issues and LLM mimicry)
             content_to_save = filtered_content
             
+            # NC-0.8.0.16: Persist tool calls in DB so future turns see them in history
+            # Without this, the LLM hallucinates tool calls instead of actually invoking them
+            if tool_call_history:
+                try:
+                    # Save tool_calls JSON on the assistant message
+                    all_tool_calls = []
+                    for tc_entry in tool_call_history:
+                        tc_id = f"call_{hash(json.dumps(tc_entry['args'], sort_keys=True)) & 0xFFFFFFFF}_{len(all_tool_calls)}"
+                        all_tool_calls.append({
+                            "id": tc_id,
+                            "name": tc_entry["tool"],
+                            "arguments": tc_entry["args"],
+                        })
+                    
+                    # Update assistant message with tool_calls
+                    await db.execute(
+                        update(Message)
+                        .where(Message.id == str(assistant_message.id))
+                        .values(tool_calls=all_tool_calls)
+                    )
+                    
+                    # Create TOOL_RESULT messages for each tool call
+                    for i, tc_entry in enumerate(tool_call_history):
+                        tc_id = all_tool_calls[i]["id"]
+                        result_content = tc_entry.get("_result_str", tc_entry.get("result_preview", ""))
+                        if tc_entry.get("error"):
+                            result_content = f"Error: {tc_entry['error']}"
+                        
+                        tool_result_msg = Message(
+                            chat_id=chat.id,
+                            role=MessageRole.ASSISTANT,  # Stored as assistant but content_type distinguishes
+                            content=result_content[:50000],  # Cap at 50K to avoid bloating DB
+                            content_type=ContentType.TOOL_RESULT,
+                            tool_call_id=tc_id,
+                            parent_id=str(assistant_message.id),
+                        )
+                        db.add(tool_result_msg)
+                    
+                    await db.flush()
+                    logger.info(f"[LLM_TOOLS] Persisted {len(tool_call_history)} tool calls + results to DB")
+                except Exception as tc_save_err:
+                    logger.warning(f"[LLM_TOOLS] Failed to persist tool calls to DB: {tc_save_err}")
+            
             # Use direct SQL update instead of ORM to avoid stale object issues
             # This is more robust during long streaming sessions
             message_id = str(assistant_message.id)
@@ -1722,6 +1921,43 @@ class LLMService:
                 if generated_artifacts:
                     logger.info(f"[LLM_ARTIFACTS] Saving {len(generated_artifacts)} generated artifacts to message")
                     update_values["artifacts"] = generated_artifacts
+                
+                # NC-0.8.0.13: Save tool_groups and tool_call_log in message_metadata
+                if tool_groups or tool_call_history:
+                    _meta = {}
+                    # Try to read existing metadata
+                    try:
+                        from sqlalchemy import text as _sa_text2
+                        _meta_result = await db.execute(
+                            _sa_text2("SELECT message_metadata FROM messages WHERE id = :id"),
+                            {"id": message_id}
+                        )
+                        _meta_row = _meta_result.fetchone()
+                        if _meta_row and _meta_row[0]:
+                            _meta = json.loads(_meta_row[0]) if isinstance(_meta_row[0], str) else (_meta_row[0] or {})
+                    except Exception:
+                        pass
+                    if tool_groups:
+                        _meta["tool_groups"] = {str(k): v for k, v in tool_groups.items()}
+                    # Save full tool call log if admin has enabled it
+                    if tool_call_history:
+                        try:
+                            from app.services.settings_service import SettingsService
+                            _store_log = await SettingsService.get_bool(db, "store_tool_call_log")
+                        except Exception:
+                            _store_log = False
+                        if _store_log:
+                            # Strip internal keys, keep tool/args/result/success
+                            _meta["tool_call_log"] = [
+                                {
+                                    "tool": tc.get("tool"),
+                                    "args": tc.get("args"),
+                                    "result": tc.get("_result_str", tc.get("result_preview", "")),
+                                    "success": tc.get("success", True),
+                                }
+                                for tc in tool_call_history
+                            ]
+                    update_values["message_metadata"] = _meta
                 
                 # Update message with final content using direct SQL
                 await db.execute(
@@ -1955,6 +2191,7 @@ Search query:"""
         tools: Optional[List[Dict]] = None,
         parent_id: Optional[str] = None,  # For tree-based conversation building
         include_images: bool = True,  # NC-0.8.0.9: Whether to include images in messages
+        user_timezone: Optional[str] = None,  # NC-0.8.0.13: Browser timezone
     ) -> List[Dict]:
         """
         Build message list from chat history in OpenAI format.
@@ -2038,6 +2275,36 @@ Search query:"""
         
         # Add system message
         system_prompt = chat.system_prompt or "You are a helpful AI assistant."
+        
+        # NC-0.8.0.13: Inject current date/time into system prompt
+        try:
+            from datetime import datetime as _dt
+            import zoneinfo
+            
+            # Determine timezone: user browser > admin server setting > UTC
+            tz_name = user_timezone
+            if not tz_name:
+                try:
+                    from app.services.settings_service import SettingsService
+                    tz_name = await SettingsService.get(db, "server_timezone")
+                except Exception:
+                    pass
+            if not tz_name:
+                tz_name = "UTC"
+            
+            try:
+                tz = zoneinfo.ZoneInfo(tz_name)
+            except Exception:
+                tz = zoneinfo.ZoneInfo("UTC")
+                tz_name = "UTC"
+            
+            now = _dt.now(tz)
+            date_str = now.strftime("%A, %B %d, %Y")
+            time_str = now.strftime("%I:%M %p")
+            
+            system_prompt += f"\n\nCurrent date and time: {date_str}, {time_str} ({tz_name})"
+        except Exception as e:
+            logger.debug(f"Could not inject datetime into system prompt: {e}")
         
         # If tools are available, add guidance for when search results are provided
         if tools:

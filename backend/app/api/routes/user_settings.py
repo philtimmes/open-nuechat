@@ -167,6 +167,10 @@ async def export_user_data(
         }
     }
     
+    # NC-0.8.0.13: Check if tool call logs should be included
+    from app.services.settings_service import SettingsService
+    include_tool_logs = await SettingsService.get_bool(db, "store_tool_call_log")
+    
     # Export all chats with messages
     chats_result = await db.execute(
         select(Chat).where(Chat.owner_id == user.id).order_by(Chat.created_at.desc())
@@ -202,6 +206,9 @@ async def export_user_data(
                     "created_at": msg.created_at.isoformat() if msg.created_at else None,
                     "parent_id": msg.parent_id,
                     "attachments": msg.attachments,
+                    **({"tool_call_log": (msg.message_metadata or {}).get("tool_call_log")}
+                       if include_tool_logs and isinstance(msg.message_metadata, dict)
+                       and msg.message_metadata.get("tool_call_log") else {}),
                 }
                 for msg in messages
             ]
