@@ -2047,3 +2047,93 @@ async def reset_rag_model(
         "details": status,
         "message": "Model loaded successfully" if status["loaded"] else "Model failed to load again",
     }
+
+
+
+@router.get("/gpu/status")
+async def get_gpu_status(
+    user: User = Depends(get_current_user),
+):
+    """Get GPU VRAM status for all available GPUs."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        from app.services.gpu_manager import get_gpu_status
+        return get_gpu_status()
+    except ImportError:
+        return {"available": False, "count": 0, "gpus": [], "error": "gpu_manager not available"}
+    except Exception as e:
+        return {"available": False, "count": 0, "gpus": [], "error": str(e)}
+
+
+@router.post("/gpu/assign")
+async def set_gpu_assignment(
+    user: User = Depends(get_current_user),
+    body: dict = None,
+):
+    """Set model→GPU assignment. Body: {"model_key": "stt", "rocm_id": 2} or {"model_key": "stt", "rocm_id": null} to unassign."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    if not body:
+        raise HTTPException(status_code=400, detail="Request body required")
+    
+    model_key = body.get("model_key")
+    rocm_id = body.get("rocm_id")  # int or None
+    
+    if not model_key:
+        raise HTTPException(status_code=400, detail="model_key required")
+    
+    try:
+        from app.services.gpu_manager import set_model_assignment, MODEL_KEYS
+        
+        if model_key not in MODEL_KEYS:
+            raise HTTPException(status_code=400, detail=f"Unknown model_key '{model_key}'. Valid: {MODEL_KEYS}")
+        
+        set_model_assignment(model_key, rocm_id)
+        return {
+            "status": "ok",
+            "model_key": model_key,
+            "rocm_id": rocm_id,
+            "message": f"{'Assigned' if rocm_id is not None else 'Unassigned'} {model_key}" + (f" → GPU {rocm_id}" if rocm_id is not None else ""),
+            "note": "Changes take effect on next model load/restart.",
+        }
+    except ImportError:
+        raise HTTPException(status_code=500, detail="gpu_manager not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/gpu/assign-batch")
+async def set_gpu_assignments_batch(
+    user: User = Depends(get_current_user),
+    body: dict = None,
+):
+    """Set multiple model→GPU assignments at once. Body: {"assignments": {"stt": 2, "tts": 3, ...}}"""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    if not body or "assignments" not in body:
+        raise HTTPException(status_code=400, detail="assignments dict required")
+    
+    try:
+        from app.services.gpu_manager import set_model_assignment, MODEL_KEYS, load_assignments
+        
+        updated = []
+        for model_key, rocm_id in body["assignments"].items():
+            if model_key not in MODEL_KEYS:
+                continue
+            set_model_assignment(model_key, rocm_id)
+            updated.append(model_key)
+        
+        return {
+            "status": "ok",
+            "updated": updated,
+            "assignments": load_assignments(),
+            "note": "Changes take effect on next model load/restart.",
+        }
+    except ImportError:
+        raise HTTPException(status_code=500, detail="gpu_manager not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

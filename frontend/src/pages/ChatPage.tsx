@@ -1406,11 +1406,20 @@ The image is attached for reference. Do NOT attempt to generate a new image unle
     sendChatMessage(targetChatId, finalContent, finalAttachments.length > 0 ? finalAttachments : attachments, parentId);
   };
   
-  // Handle file uploads - add to artifacts
-  const handleFilesUploaded = useCallback((artifacts: Artifact[]) => {
+  // Handle file uploads - add to artifacts, create chat if needed
+  const handleFilesUploaded = useCallback(async (artifacts: Artifact[]) => {
     console.log('[handleFilesUploaded] Adding artifacts:', artifacts.length);
     addUploadedArtifacts(artifacts);
-  }, [addUploadedArtifacts]);
+    
+    // NC-0.8.0.21: Create chat if none exists so files can be persisted immediately
+    const { currentChat: storeChat } = useChatStore.getState();
+    if (!storeChat?.id) {
+      const modelToUse = newChatModel || defaultModel;
+      const newChat = await createChat(modelToUse);
+      window.history.pushState({}, '', `/chat/${newChat.id}`);
+      console.log('[handleFilesUploaded] Created new chat for file upload:', newChat.id);
+    }
+  }, [addUploadedArtifacts, newChatModel, defaultModel, createChat]);
   
   // Persist uploaded files to backend when we have a chat
   // This ensures files survive page refresh

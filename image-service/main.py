@@ -8,6 +8,7 @@ import io
 import logging
 import os
 import random
+import re
 import time
 import uuid
 from typing import Optional, Dict, Any
@@ -34,6 +35,58 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 # ============ Configuration ============
+
+# Apply GPU assignment BEFORE any torch imports
+def _read_gpu_assignment(model_key: str):
+    """Read GPU assignment from /app/data/gpuSelector/assignments.json."""
+    import json as _json
+    path = os.getenv("GPU_SELECTOR_DIR", "/app/data/gpuSelector") + "/assignments.json"
+    try:
+        with open(path, 'r') as f:
+            data = _json.load(f)
+        entry = data.get(model_key)
+        if entry and isinstance(entry, dict):
+            return entry.get("rocm_id")
+        elif entry is not None:
+            return int(entry)
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    return None
+
+
+def _rocm_id_to_hip_id(rocm_id: int) -> int:
+    """Translate ROCm GPU index to HIP_ID using `amd-smi list -e`."""
+    import subprocess as _sp
+    try:
+        result = _sp.run(["amd-smi", "list", "-e"], capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return rocm_id
+        current_gpu = None
+        for line in result.stdout.splitlines():
+            line_s = line.strip()
+            m = re.match(r'^GPU:\s*(\d+)', line_s)
+            if m:
+                current_gpu = int(m.group(1))
+                continue
+            if current_gpu == rocm_id and 'HIP_ID' in line_s:
+                _, _, val = line_s.partition(':')
+                try:
+                    hip_id = int(val.strip())
+                    logger.info(f"[GPU MAP] ROCm GPU {rocm_id} → HIP_ID {hip_id}")
+                    return hip_id
+                except ValueError:
+                    pass
+    except (FileNotFoundError, _sp.TimeoutExpired):
+        pass
+    return rocm_id
+
+
+_img_rocm_id = _read_gpu_assignment("image_gen")
+if _img_rocm_id is not None:
+    _img_hip_id = _rocm_id_to_hip_id(_img_rocm_id)
+    os.environ["HIP_VISIBLE_DEVICES"] = str(_img_hip_id)
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(_img_hip_id)
+    logger.info(f"[IMAGE] GPU assignment: ROCm GPU {_img_rocm_id} → HIP_ID {_img_hip_id}")
 
 MODEL_ID = os.getenv("IMAGE_GEN_MODEL", "Tongyi-MAI/Z-Image-Turbo")
 DEFAULT_WIDTH = int(os.getenv("IMAGE_GEN_DEFAULT_WIDTH", "1024"))
@@ -153,13 +206,12 @@ class ImagePipeline:
                 import torch
                 from diffusers import FluxPipeline
                 
-                # Check for GPU
+                # GPU detection — HIP_VISIBLE_DEVICES already set at module level
                 if torch.cuda.is_available():
-                    self._device = "cuda"
+                    self._device = "cuda:0"
                     device_name = torch.cuda.get_device_name(0)
                     vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                    logger.info(f"GPU detected: {device_name} ({vram_gb:.1f} GB VRAM)")
-                    
+                    logger.info(f"Image Gen using cuda:0: {device_name} ({vram_gb:.1f} GB VRAM)")
                     if hasattr(torch.version, 'hip') and torch.version.hip:
                         logger.info(f"ROCm/HIP version: {torch.version.hip}")
                 else:
@@ -242,6 +294,121 @@ class ImagePipeline:
         logger.info(f"generate_sync: image size={image.size}, mode={image.mode}")
         
         return image
+    
+    def img2img_sync(
+        self,
+        prompt: str,
+        input_image: Image.Image,
+        seed: int,
+        denoise: float = 0.3,
+        steps: int = 7,
+    ) -> Image.Image:
+        """Modify an image using img2img (encode → noise → denoise)"""
+        if self._pipe is None:
+            raise RuntimeError("Pipeline not initialized")
+        
+        import torch
+        import numpy as np
+        
+        logger.info(f"img2img_sync: prompt={prompt[:50]}..., denoise={denoise}, steps={steps}, seed={seed}")
+        
+        # Scale image to max 1300px on longest side (matching ComfyUI workflow)
+        max_dim = 1300
+        w, h = input_image.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            w, h = int(w * scale), int(h * scale)
+        # Round to 64
+        w = (w // 64) * 64
+        h = (h // 64) * 64
+        w = max(256, min(2048, w))
+        h = max(256, min(2048, h))
+        input_image = input_image.resize((w, h), Image.LANCZOS)
+        logger.info(f"img2img_sync: resized to {w}x{h}")
+        
+        generator = torch.Generator(self._device).manual_seed(seed)
+        
+        # Encode input image to latents
+        img_tensor = torch.from_numpy(
+            np.array(input_image.convert("RGB")).astype(np.float32) / 255.0
+        ).unsqueeze(0).permute(0, 3, 1, 2).to(self._device, dtype=torch.bfloat16 if self._device == "cuda" else torch.float32)
+        
+        with torch.no_grad():
+            latents = self._pipe.vae.encode(img_tensor).latent_dist.sample(generator)
+            latents = (latents - self._pipe.vae.config.shift_factor) * self._pipe.vae.config.scaling_factor
+        
+        # Calculate how many steps to skip based on denoise
+        start_step = int(steps * (1.0 - denoise))
+        actual_steps = steps - start_step
+        logger.info(f"img2img_sync: total_steps={steps}, start_step={start_step}, actual_steps={actual_steps}")
+        
+        # Add noise to latents proportional to denoise strength
+        # Use the scheduler to get the right noise level
+        self._pipe.scheduler.set_timesteps(steps, device=self._device)
+        timesteps = self._pipe.scheduler.timesteps
+        
+        if start_step < len(timesteps):
+            noise = torch.randn_like(latents, generator=generator)
+            t = timesteps[start_step]
+            # For flow matching (Flux/AuraFlow), noise is added linearly:
+            # noisy = (1 - sigma) * latents + sigma * noise
+            sigma = t / self._pipe.scheduler.config.num_train_timesteps if hasattr(self._pipe.scheduler.config, 'num_train_timesteps') else t.float()
+            if isinstance(sigma, torch.Tensor):
+                sigma = sigma.to(latents.dtype)
+            else:
+                sigma = torch.tensor(sigma, dtype=latents.dtype, device=latents.device)
+            noisy_latents = (1.0 - sigma) * latents + sigma * noise
+        else:
+            noisy_latents = latents
+        
+        # Encode prompt
+        prompt_embeds, pooled_prompt_embeds, text_ids = self._pipe.encode_prompt(
+            prompt=prompt,
+            prompt_2=None,
+        )
+        
+        # Prepare latent image ids
+        latent_h = noisy_latents.shape[2]
+        latent_w = noisy_latents.shape[3]
+        latent_image_ids = self._pipe._prepare_latent_image_ids(
+            noisy_latents.shape[0], latent_h, latent_w, self._device, torch.bfloat16 if self._device == "cuda" else torch.float32
+        )
+        
+        # Pack latents for transformer
+        packed_latents = self._pipe._pack_latents(noisy_latents, noisy_latents.shape[0], noisy_latents.shape[1], latent_h, latent_w)
+        
+        # Run denoising from start_step
+        remaining_timesteps = timesteps[start_step:]
+        
+        with torch.no_grad():
+            for i, t in enumerate(remaining_timesteps):
+                t_batch = t.expand(packed_latents.shape[0]).to(packed_latents.dtype)
+                
+                noise_pred = self._pipe.transformer(
+                    hidden_states=packed_latents,
+                    timestep=t_batch,
+                    encoder_hidden_states=prompt_embeds,
+                    pooled_projections=pooled_prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=latent_image_ids,
+                    return_dict=False,
+                )[0]
+                
+                packed_latents = self._pipe.scheduler.step(noise_pred, t, packed_latents, return_dict=False)[0]
+        
+        # Unpack and decode
+        unpacked = self._pipe._unpack_latents(packed_latents, latent_h, latent_w, self._pipe.vae_scale_factor)
+        unpacked = (unpacked / self._pipe.vae.config.scaling_factor) + self._pipe.vae.config.shift_factor
+        
+        with torch.no_grad():
+            decoded = self._pipe.vae.decode(unpacked, return_dict=False)[0]
+        
+        # Convert to PIL
+        decoded = decoded.clamp(0, 1).squeeze(0).permute(1, 2, 0).cpu().float().numpy()
+        result_image = Image.fromarray((decoded * 255).astype(np.uint8))
+        
+        logger.info(f"img2img_sync: output size={result_image.size}")
+        return result_image
     
     async def generate(
         self,
@@ -612,6 +779,76 @@ async def generate_image_async(request: ImageGenRequest):
         "width": width,
         "height": height,
     }
+
+
+class ImageModifyRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=2000)
+    image_base64: str = Field(..., description="Base64-encoded input image")
+    denoise: float = Field(default=0.3, ge=0.05, le=1.0, description="Denoise strength. 0.1=subtle, 0.3=moderate, 0.7=heavy, 1.0=full regeneration")
+    steps: int = Field(default=7, ge=2, le=30)
+    seed: Optional[int] = Field(default=None)
+
+
+@app.post("/modify", response_model=ImageGenResponse)
+async def modify_image(request: ImageModifyRequest):
+    """
+    Modify an existing image using img2img.
+    Low denoise = subtle changes, high denoise = heavy transformation.
+    """
+    start_time = time.time()
+    seed = request.seed if request.seed is not None else random.randint(0, 2**32 - 1)
+    
+    logger.info(f"Modify request: prompt='{request.prompt[:50]}...', denoise={request.denoise}, steps={request.steps}, seed={seed}")
+    
+    try:
+        # Decode input image
+        image_bytes = base64.b64decode(request.image_base64)
+        input_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        logger.info(f"Input image: {input_image.size}, {input_image.mode}")
+        
+        # Run img2img
+        loop = asyncio.get_event_loop()
+        result_image = await loop.run_in_executor(
+            None,
+            pipeline.img2img_sync,
+            request.prompt,
+            input_image,
+            seed,
+            request.denoise,
+            request.steps,
+        )
+        
+        logger.info(f"Modified image: {result_image.size}")
+        
+        # Convert to PNG base64
+        buffer = io.BytesIO()
+        result_image.save(buffer, format="PNG")
+        buffer.seek(0)
+        image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+        
+        gen_time = time.time() - start_time
+        logger.info(f"Modify complete in {gen_time:.2f}s")
+        
+        return ImageGenResponse(
+            success=True,
+            job_id=str(uuid.uuid4()),
+            image_base64=image_base64,
+            width=result_image.size[0],
+            height=result_image.size[1],
+            seed=seed,
+            prompt=request.prompt,
+            generation_time=round(gen_time, 2),
+        )
+        
+    except Exception as e:
+        import traceback
+        logger.error(f"Image modification failed: {e}")
+        logger.error(traceback.format_exc())
+        return ImageGenResponse(
+            success=False,
+            error=str(e),
+            prompt=request.prompt,
+        )
 
 
 @app.get("/job/{job_id}", response_model=JobStatusResponse)

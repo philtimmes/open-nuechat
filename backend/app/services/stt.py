@@ -27,20 +27,30 @@ _compile_attempted = False
 
 
 def _get_device_and_dtype():
-    """Get appropriate device and dtype for the platform (ROCm/HIP)"""
+    """Get appropriate device and dtype for the platform (ROCm/HIP).
+    Uses GPU assignment from admin panel if configured."""
+    
+    # Apply GPU assignment BEFORE importing torch
+    # This sets HIP_VISIBLE_DEVICES so the assigned GPU becomes cuda:0
+    try:
+        from app.services.gpu_manager import apply_gpu_assignment
+        assigned_device = apply_gpu_assignment("stt")
+        if assigned_device:
+            logger.info(f"STT GPU assignment applied: {assigned_device}")
+    except ImportError:
+        assigned_device = None
+    
     import torch
     
-    # ROCm uses the same torch.cuda API but with HIP backend
     if torch.cuda.is_available():
-        device = "cuda:0"
+        device = "cuda:0"  # Always cuda:0 — HIP_VISIBLE_DEVICES handles the mapping
         torch_dtype = torch.float16
-        # Log device info (works for both CUDA and ROCm/HIP)
         device_name = torch.cuda.get_device_name(0)
-        logger.info(f"Using GPU (ROCm/HIP): {device_name}")
+        logger.info(f"STT using {device} — {device_name}")
     else:
         device = "cpu"
         torch_dtype = torch.float32
-        logger.info("Using CPU (GPU not available)")
+        logger.info("STT using CPU (GPU not available)")
     
     return device, torch_dtype
 
@@ -99,6 +109,7 @@ def _get_pipeline():
         # Enable static cache for faster generation
         _model.generation_config.cache_implementation = "static"
         _model.generation_config.max_new_tokens = 256
+        _model.generation_config.max_length = None  # Avoid conflict with max_new_tokens
         
         # Skip torch.compile - it causes repeated CUDA graph compilation 
         # attempts with variable-length audio inputs, adding latency

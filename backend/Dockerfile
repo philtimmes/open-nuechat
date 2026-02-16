@@ -29,7 +29,6 @@ ARG FAISS_CPU=0
 
 ENV ROCM_PATH=/opt/rocm
 ENV HSA_OVERRIDE_GFX_VERSION=9.0.10
-ENV HIP_VISIBLE_DEVICES=0
 ENV PYTORCH_ROCM_ARCH=gfx90a
 
 WORKDIR /app
@@ -43,6 +42,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --fix-missing \
     libopenblas-dev \
     swig \
     ffmpeg \
+    amd-smi-lib \
     && rm -rf /var/lib/apt/lists/*
 
 # Install FAISS - either from pre-built ROCm wheel or CPU version from PyPI

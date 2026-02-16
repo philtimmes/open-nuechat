@@ -76,6 +76,7 @@ class LLMService:
             ),
         )
         self.billing_service = BillingService()
+        self._tool_name_map = {}  # short_name → original_name for hashed tool names
     
     @classmethod
     async def from_database(cls, db: AsyncSession) -> "LLMService":
@@ -264,7 +265,7 @@ class LLMService:
                         "id": tc.id,
                         "type": tc.type,
                         "function": {
-                            "name": tc.function.name,
+                            "name": self.resolve_tool_name(tc.function.name),
                             "arguments": tc.function.arguments,
                         }
                     }
@@ -494,7 +495,7 @@ class LLMService:
             for tc in choice.message.tool_calls:
                 tool_calls.append({
                     "id": tc.id,
-                    "name": tc.function.name,
+                    "name": self.resolve_tool_name(tc.function.name),
                     "arguments": json.loads(tc.function.arguments) if tc.function.arguments else {},
                 })
         
@@ -789,6 +790,12 @@ class LLMService:
             tool_groups = {}  # NC-0.8.0.13: Tool groups indexed by group ID
             current_tool_group = -1  # NC-0.8.0.13: Current active tool group (-1 = none)
             
+            # NC-0.8.0.27: Track message segments in order for proper DB persistence
+            # Each segment is either {"type": "text", "content": "..."} or {"type": "tool_call", "index": N}
+            # where index refers to position in tool_call_history
+            message_segments = []
+            _current_text_segment = ""  # Accumulates text between tool calls
+            
             # Automatic search disabled - use filter chains for web search orchestration
             # search_tools = [t for t in (tools or []) if 'search' in t.get('name', '').lower() or 'fetch' in t.get('name', '').lower()]
             # has_search = bool(search_tools) and tool_executor is not None
@@ -1055,6 +1062,7 @@ class LLMService:
                                 first_token_time = time.time()
                             
                             filtered_content += delta.content
+                            _current_text_segment += delta.content
                             
                             # Log first 500 chars of response
                             if len(first_content) < 500:
@@ -1165,352 +1173,430 @@ class LLMService:
                         logger.info(f"[LLM_TOOLS] Tool calls requested (round {tool_round}), executing {len(streaming_tool_calls)} tools...")
                         
                         for tc_index, tc_data in streaming_tool_calls.items():
-                            tool_name = tc_data["name"]
-                            try:
-                                tool_args = json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
-                            except json.JSONDecodeError as je:
-                                logger.warning(f"[LLM_TOOLS] Failed to parse tool arguments: {je}")
-                                logger.warning(f"[LLM_TOOLS] Raw arguments string: {tc_data['arguments'][:500] if tc_data['arguments'] else 'None'}")
-                                tool_args = {}
+                            tool_name = self.resolve_tool_name(tc_data["name"])
+                            raw_args = tc_data["arguments"] or ""
                             
-                            # NC-0.8.0.12: Dedup - check if exact same tool+args was already called
-                            dedup_key = f"{tool_name}:{json.dumps(tool_args, sort_keys=True)}"
-                            cached_result = None
-                            for prev in tool_call_history:
-                                if prev.get("success") and prev.get("_dedup_key") == dedup_key:
-                                    cached_result = prev.get("_result_str")
-                                    break
+                            # Detect concatenated JSON objects: {...}{...}{...}
+                            # LLMs sometimes try to batch multiple calls into one
+                            args_list = []
+                            if raw_args.strip():
+                                try:
+                                    tool_args = json.loads(raw_args)
+                                    args_list = [tool_args]
+                                except json.JSONDecodeError:
+                                    # Try splitting concatenated JSON objects
+                                    import re as _re_json
+                                    # Find all top-level JSON objects
+                                    depth = 0
+                                    start = None
+                                    for ci, ch in enumerate(raw_args):
+                                        if ch == '{':
+                                            if depth == 0:
+                                                start = ci
+                                            depth += 1
+                                        elif ch == '}':
+                                            depth -= 1
+                                            if depth == 0 and start is not None:
+                                                fragment = raw_args[start:ci+1]
+                                                try:
+                                                    parsed = json.loads(fragment)
+                                                    args_list.append(parsed)
+                                                except json.JSONDecodeError:
+                                                    pass
+                                                start = None
+                                    
+                                    if args_list:
+                                        logger.info(f"[LLM_TOOLS] Split concatenated JSON into {len(args_list)} separate calls for {tool_name}")
+                                    else:
+                                        logger.warning(f"[LLM_TOOLS] Failed to parse tool arguments: {raw_args[:500]}")
+                                        args_list = [{}]
+                            else:
+                                args_list = [{}]
                             
-                            if cached_result is not None:
-                                consecutive_dedup_hits += 1
-                                logger.info(f"[LLM_TOOLS] DEDUP: {tool_name} already called with same args (consecutive={consecutive_dedup_hits})")
+                            # Execute each split call
+                            for call_idx, tool_args in enumerate(args_list):
+                            
+                                # Generate unique ID for split calls
+                                _tc_id = tc_data["id"] if len(args_list) == 1 else f"{tc_data['id']}_{call_idx}"
+
+                                # NC-0.8.0.12: Dedup - check if exact same tool+args was already called
+                                dedup_key = f"{tool_name}:{json.dumps(tool_args, sort_keys=True)}"
+                                cached_result = None
+                                for prev in tool_call_history:
+                                    if prev.get("success") and prev.get("_dedup_key") == dedup_key:
+                                        cached_result = prev.get("_result_str")
+                                        break
+                            
+                                if cached_result is not None:
+                                    consecutive_dedup_hits += 1
+                                    logger.info(f"[LLM_TOOLS] DEDUP: {tool_name} already called with same args (consecutive={consecutive_dedup_hits})")
                                 
-                                # Remove ALL previous tool call/result pairs for this exact dedup_key
-                                cleaned_messages = []
-                                i = 0
-                                removed = 0
-                                while i < len(messages):
-                                    msg = messages[i]
-                                    if (msg.get("role") == "assistant" and msg.get("tool_calls") and
-                                        i + 1 < len(messages) and messages[i + 1].get("role") == "tool"):
-                                        tc_list = msg.get("tool_calls", [])
-                                        if len(tc_list) == 1:
-                                            fn = tc_list[0].get("function", {})
-                                            try:
-                                                prev_args = json.loads(fn.get("arguments", "{}"))
-                                                prev_key = f"{fn.get('name', '')}:{json.dumps(prev_args, sort_keys=True)}"
-                                            except:
-                                                prev_key = None
-                                            if prev_key == dedup_key:
-                                                removed += 1
-                                                i += 2
-                                                continue
-                                    cleaned_messages.append(msg)
-                                    i += 1
+                                    # Remove ALL previous tool call/result pairs for this exact dedup_key
+                                    cleaned_messages = []
+                                    i = 0
+                                    removed = 0
+                                    while i < len(messages):
+                                        msg = messages[i]
+                                        if (msg.get("role") == "assistant" and msg.get("tool_calls") and
+                                            i + 1 < len(messages) and messages[i + 1].get("role") == "tool"):
+                                            tc_list = msg.get("tool_calls", [])
+                                            if len(tc_list) == 1:
+                                                fn = tc_list[0].get("function", {})
+                                                try:
+                                                    prev_args = json.loads(fn.get("arguments", "{}"))
+                                                    prev_key = f"{fn.get('name', '')}:{json.dumps(prev_args, sort_keys=True)}"
+                                                except:
+                                                    prev_key = None
+                                                if prev_key == dedup_key:
+                                                    removed += 1
+                                                    i += 2
+                                                    continue
+                                        cleaned_messages.append(msg)
+                                        i += 1
                                 
-                                if removed > 0:
-                                    messages = cleaned_messages
-                                    logger.info(f"[LLM_TOOLS] DEDUP: Removed {removed} old pairs for {tool_name}")
+                                    if removed > 0:
+                                        messages = cleaned_messages
+                                        logger.info(f"[LLM_TOOLS] DEDUP: Removed {removed} old pairs for {tool_name}")
                                 
-                                # Add back ONE pair — but NO result content, just a pointer
-                                validated_args = json.dumps(tool_args)
-                                messages.append({
-                                    "role": "assistant",
-                                    "content": None,
-                                    "tool_calls": [{
-                                        "id": tc_data["id"],
-                                        "type": "function",
-                                        "function": {
-                                            "name": tool_name,
-                                            "arguments": validated_args,
-                                        }
-                                    }]
-                                })
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tc_data["id"],
-                                    "content": f"DUPLICATE: You already called {tool_name} with these exact arguments. The result is in TOOL_RESPONSE_HISTORY above. Use that instead of re-requesting.",
-                                })
+                                    # Add back ONE pair — but NO result content, just a pointer
+                                    validated_args = json.dumps(tool_args)
+                                    messages.append({
+                                        "role": "assistant",
+                                        "content": None,
+                                        "tool_calls": [{
+                                            "id": _tc_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": self.shorten_tool_name(tool_name),
+                                                "arguments": validated_args,
+                                            }
+                                        }]
+                                    })
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": _tc_id,
+                                        "content": f"DUPLICATE: You already called {tool_name} with these exact arguments. The result is in TOOL_RESPONSE_HISTORY above. Use that instead of re-requesting.",
+                                    })
                                 
-                                yield {
-                                    "type": "tool_call",
-                                    "tool_name": tool_name,
-                                    "arguments": tool_args,
-                                    "result": "DUPLICATE - see context",
+                                    yield {
+                                        "type": "tool_call",
+                                        "tool_name": tool_name,
+                                        "arguments": tool_args,
+                                        "result": "DUPLICATE - see context",
+                                    }
+                                    continue
+                            
+                                logger.info(f"[LLM_TOOLS] Executing tool: {tool_name} with args: {tool_args}")
+                                tool_calls_count += 1
+                                consecutive_dedup_hits = 0  # Fresh call resets the counter
+                            
+                                # NC-0.8.0.13: Emit tool_start for UI timeline with group tracking
+                                import time as _time
+                                tool_start_ts = _time.time()
+                                # Build compact args summary for display
+                                _args_parts = []
+                                for _k, _v in tool_args.items():
+                                    _vs = str(_v)
+                                    if len(_vs) > 60:
+                                        _vs = _vs[:57] + "..."
+                                    _args_parts.append(f"{_k}={_vs}")
+                                _args_summary = ", ".join(_args_parts)[:120]
+                            
+                                # Start new tool group if none active
+                                if current_tool_group == -1:
+                                    current_tool_group = len(tool_groups)
+                                    tool_groups[current_tool_group] = []
+                            
+                                ui_event_start = {
+                                    "ts": tool_start_ts,
+                                    "type": "tool_start",
+                                    "tool": tool_name,
+                                    "round": tool_round,
+                                    "args_summary": _args_summary,
+                                    "group": current_tool_group,
                                 }
-                                continue
+                                tool_groups[current_tool_group].append(ui_event_start)
+                                yield {"type": "tool_start", **ui_event_start}
                             
-                            logger.info(f"[LLM_TOOLS] Executing tool: {tool_name} with args: {tool_args}")
-                            tool_calls_count += 1
-                            consecutive_dedup_hits = 0  # Fresh call resets the counter
-                            
-                            # NC-0.8.0.13: Emit tool_start for UI timeline with group tracking
-                            import time as _time
-                            tool_start_ts = _time.time()
-                            # Build compact args summary for display
-                            _args_parts = []
-                            for _k, _v in tool_args.items():
-                                _vs = str(_v)
-                                if len(_vs) > 60:
-                                    _vs = _vs[:57] + "..."
-                                _args_parts.append(f"{_k}={_vs}")
-                            _args_summary = ", ".join(_args_parts)[:120]
-                            
-                            # Start new tool group if none active
-                            if current_tool_group == -1:
-                                current_tool_group = len(tool_groups)
-                                tool_groups[current_tool_group] = []
-                            
-                            ui_event_start = {
-                                "ts": tool_start_ts,
-                                "type": "tool_start",
-                                "tool": tool_name,
-                                "round": tool_round,
-                                "args_summary": _args_summary,
-                                "group": current_tool_group,
-                            }
-                            tool_groups[current_tool_group].append(ui_event_start)
-                            yield {"type": "tool_start", **ui_event_start}
-                            
-                            try:
-                                result = await tool_executor(tool_name, tool_args)
+                                try:
+                                    result = await tool_executor(tool_name, tool_args)
                                 
-                                # NC-0.8.0.11: Handle direct_to_chat results (images and text)
-                                # Send to frontend BEFORE stripping for LLM
-                                if isinstance(result, dict) and result.get("direct_to_chat"):
-                                    # Send single image directly to chat (explicit output_image mode)
-                                    if result.get("image_base64"):
-                                        filename = result.get("filename", "output.png")
-                                        yield {
-                                            "type": "direct_image",
-                                            "tool_name": tool_name,
-                                            "image_base64": result["image_base64"],
-                                            "mime_type": result.get("image_mime_type", "image/png"),
-                                            "filename": filename,
-                                        }
-                                        generated_artifacts.append({
-                                            "id": f"img_{len(generated_artifacts)}",
-                                            "type": "image",
-                                            "title": filename,
-                                            "filename": filename,
-                                            "content": f"data:{result.get('image_mime_type', 'image/png')};base64,{result['image_base64']}",
-                                            "source": "generated",
-                                            "created_at": datetime.now(timezone.utc).isoformat(),
-                                        })
+                                    # NC-0.8.0.11: Handle direct_to_chat results (images and text)
+                                    # Send to frontend BEFORE stripping for LLM
+                                    if isinstance(result, dict) and result.get("direct_to_chat"):
+                                        # Send single image directly to chat (explicit output_image mode)
+                                        if result.get("image_base64"):
+                                            filename = result.get("filename", "output.png")
+                                            yield {
+                                                "type": "direct_image",
+                                                "tool_name": tool_name,
+                                                "image_base64": result["image_base64"],
+                                                "mime_type": result.get("image_mime_type", "image/png"),
+                                                "filename": filename,
+                                            }
+                                            generated_artifacts.append({
+                                                "id": f"img_{len(generated_artifacts)}",
+                                                "type": "image",
+                                                "title": filename,
+                                                "filename": filename,
+                                                "content": f"data:{result.get('image_mime_type', 'image/png')};base64,{result['image_base64']}",
+                                                "source": "generated",
+                                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                            })
                                     
-                                    # NC-0.8.0.21: Send any images found in sandbox after execution
-                                    for gen_img in result.get("generated_images", []):
-                                        _img_fn = gen_img.get("filename", "output.png")
-                                        _img_mime = gen_img.get("mime", "image/png")
-                                        yield {
-                                            "type": "direct_image",
-                                            "tool_name": tool_name,
-                                            "image_base64": gen_img["base64"],
-                                            "mime_type": _img_mime,
-                                            "filename": _img_fn,
-                                        }
-                                        generated_artifacts.append({
-                                            "id": f"img_{len(generated_artifacts)}",
-                                            "type": "image",
-                                            "title": _img_fn,
-                                            "filename": _img_fn,
-                                            "content": f"data:{_img_mime};base64,{gen_img['base64']}",
-                                            "source": "generated",
-                                            "created_at": datetime.now(timezone.utc).isoformat(),
-                                        })
+                                        # NC-0.8.0.21: Send any images found in sandbox after execution
+                                        for gen_img in result.get("generated_images", []):
+                                            _img_fn = gen_img.get("filename", "output.png")
+                                            _img_mime = gen_img.get("mime", "image/png")
+                                            yield {
+                                                "type": "direct_image",
+                                                "tool_name": tool_name,
+                                                "image_base64": gen_img["base64"],
+                                                "mime_type": _img_mime,
+                                                "filename": _img_fn,
+                                            }
+                                            generated_artifacts.append({
+                                                "id": f"img_{len(generated_artifacts)}",
+                                                "type": "image",
+                                                "title": _img_fn,
+                                                "filename": _img_fn,
+                                                "content": f"data:{_img_mime};base64,{gen_img['base64']}",
+                                                "source": "generated",
+                                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                            })
                                     
-                                    # Send text directly to chat
-                                    if result.get("direct_text"):
-                                        filename = result.get("filename", "output.txt")
-                                        yield {
-                                            "type": "direct_text",
-                                            "tool_name": tool_name,
-                                            "text": result["direct_text"],
-                                            "filename": filename,
-                                        }
-                                        # NC-0.8.0.11: Collect artifact for persistence
-                                        artifact_type = "document"
-                                        if filename.endswith(".csv"): artifact_type = "csv"
-                                        elif filename.endswith(".json"): artifact_type = "json"
-                                        elif filename.endswith(".md"): artifact_type = "markdown"
-                                        generated_artifacts.append({
-                                            "id": f"txt_{len(generated_artifacts)}",
-                                            "type": artifact_type,
-                                            "title": filename,
-                                            "filename": filename,
-                                            "content": result["direct_text"],
-                                            "source": "generated",
-                                            "created_at": datetime.now(timezone.utc).isoformat(),
-                                        })
-                                        # NC-0.8.0.12: Store in session so other tools can access
-                                        try:
-                                            from app.tools.registry import store_session_file
-                                            store_session_file(str(chat.id), filename, result["direct_text"])
-                                        except Exception:
-                                            pass
+                                        # Send text directly to chat
+                                        if result.get("direct_text"):
+                                            filename = result.get("filename", "output.txt")
+                                            yield {
+                                                "type": "direct_text",
+                                                "tool_name": tool_name,
+                                                "text": result["direct_text"],
+                                                "filename": filename,
+                                            }
+                                            # NC-0.8.0.11: Collect artifact for persistence
+                                            artifact_type = "document"
+                                            if filename.endswith(".csv"): artifact_type = "csv"
+                                            elif filename.endswith(".json"): artifact_type = "json"
+                                            elif filename.endswith(".md"): artifact_type = "markdown"
+                                            generated_artifacts.append({
+                                                "id": f"txt_{len(generated_artifacts)}",
+                                                "type": artifact_type,
+                                                "title": filename,
+                                                "filename": filename,
+                                                "content": result["direct_text"],
+                                                "source": "generated",
+                                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                            })
+                                            # NC-0.8.0.12: Store in session so other tools can access
+                                            try:
+                                                from app.tools.registry import store_session_file
+                                                store_session_file(str(chat.id), filename, result["direct_text"])
+                                            except Exception:
+                                                pass
                                     
-                                    # NC-0.8.0.21: Save new text files from sandbox as artifacts
-                                    for gen_file in result.get("generated_files", []):
-                                        _gf_name = gen_file.get("filename", "output.txt")
-                                        _gf_type = "document"
-                                        if _gf_name.endswith(".csv"): _gf_type = "csv"
-                                        elif _gf_name.endswith(".json"): _gf_type = "json"
-                                        elif _gf_name.endswith(".md"): _gf_type = "markdown"
-                                        elif _gf_name.endswith(".html"): _gf_type = "html"
-                                        # Get content from session files (already stored by registry)
-                                        try:
-                                            from app.tools.registry import get_session_file
-                                            _gf_content = get_session_file(str(chat.id), _gf_name) or ""
-                                        except Exception:
-                                            _gf_content = ""
-                                        generated_artifacts.append({
-                                            "id": f"file_{len(generated_artifacts)}",
-                                            "type": _gf_type,
-                                            "title": _gf_name,
-                                            "filename": _gf_name,
-                                            "content": _gf_content,
-                                            "source": "generated",
-                                            "created_at": datetime.now(timezone.utc).isoformat(),
-                                        })
+                                        # NC-0.8.0.21: Save new text files from sandbox as artifacts
+                                        for gen_file in result.get("generated_files", []):
+                                            _gf_name = gen_file.get("filename", "output.txt")
+                                            _gf_type = "document"
+                                            if _gf_name.endswith(".csv"): _gf_type = "csv"
+                                            elif _gf_name.endswith(".json"): _gf_type = "json"
+                                            elif _gf_name.endswith(".md"): _gf_type = "markdown"
+                                            elif _gf_name.endswith(".html"): _gf_type = "html"
+                                            # Get content from session files (already stored by registry)
+                                            try:
+                                                from app.tools.registry import get_session_file
+                                                _gf_content = get_session_file(str(chat.id), _gf_name) or ""
+                                            except Exception:
+                                                _gf_content = ""
+                                            generated_artifacts.append({
+                                                "id": f"file_{len(generated_artifacts)}",
+                                                "type": _gf_type,
+                                                "title": _gf_name,
+                                                "filename": _gf_name,
+                                                "content": _gf_content,
+                                                "source": "generated",
+                                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                            })
                                     
-                                    # Strip large data from result before sending to LLM
-                                    result_for_llm = {k: v for k, v in result.items() 
-                                                      if k not in ("image_base64", "direct_text", "full_content", "generated_images", "generated_files")}
-                                    result_str = json.dumps(result_for_llm)
-                                else:
-                                    # Strip large content fields before sending to LLM
-                                    if isinstance(result, dict) and "full_content" in result:
-                                        result_for_llm = {k: v for k, v in result.items() if k != "full_content"}
+                                        # Strip large data from result before sending to LLM
+                                        result_for_llm = {k: v for k, v in result.items() 
+                                                          if k not in ("image_base64", "direct_text", "full_content", "generated_images", "generated_files")}
                                         result_str = json.dumps(result_for_llm)
                                     else:
-                                        result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                                        # Strip large content fields before sending to LLM
+                                        if isinstance(result, dict) and "full_content" in result:
+                                            result_for_llm = {k: v for k, v in result.items() if k != "full_content"}
+                                            result_str = json.dumps(result_for_llm)
+                                        else:
+                                            result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
                                 
-                                # Truncate very long results
-                                # Document tools get more space since their content IS the value
-                                LARGE_RESULT_TOOLS = {"fetch_document", "view_file_lines", "request_file", "fetch_webpage", "web_extract", "fetch_urls"}
-                                max_result_len = 80000 if tool_name in LARGE_RESULT_TOOLS else 15000
-                                if len(result_str) > max_result_len:
-                                    result_str = result_str[:max_result_len] + f"\n... [truncated at {max_result_len} chars, {len(result_str)} total]"
+                                    # Truncate very long results
+                                    # Document tools get more space since their content IS the value
+                                    LARGE_RESULT_TOOLS = {"fetch_document", "view_file_lines", "request_file", "fetch_webpage", "web_extract", "fetch_urls"}
+                                    max_result_len = 80000 if tool_name in LARGE_RESULT_TOOLS else 15000
+                                    if len(result_str) > max_result_len:
+                                        result_str = result_str[:max_result_len] + f"\n... [truncated at {max_result_len} chars, {len(result_str)} total]"
                                 
-                                # NC-0.8.0.8: Track tool call for history
-                                tool_call_history.append({
-                                    "tool": tool_name,
-                                    "args": tool_args,
-                                    "result_preview": result_str[:5000] if len(result_str) > 5000 else result_str,
-                                    "success": True,
-                                    "_dedup_key": dedup_key,
-                                    "_result_str": result_str,
-                                })
+                                    # NC-0.8.0.8: Track tool call for history
+                                    tool_call_history.append({
+                                        "tool": tool_name,
+                                        "args": tool_args,
+                                        "result_preview": result_str[:5000] if len(result_str) > 5000 else result_str,
+                                        "success": True,
+                                        "_dedup_key": dedup_key,
+                                        "_result_str": result_str,
+                                    })
+                                    
+                                    # NC-0.8.0.27: Record segments in order
+                                    if _current_text_segment.strip():
+                                        message_segments.append({"type": "text", "content": _current_text_segment})
+                                        _current_text_segment = ""
+                                    message_segments.append({"type": "tool_call", "index": len(tool_call_history) - 1})
                                 
-                                # Yield tool call event for frontend
-                                yield {
-                                    "type": "tool_call",
-                                    "tool_name": tool_name,
-                                    "arguments": tool_args,
-                                    "result": result_str[:1000] + "..." if len(result_str) > 1000 else result_str,
-                                }
-                                
-                                # NC-0.8.0.13: Notify frontend about web retrieval artifacts
-                                if isinstance(result, dict) and result.get("artifact_path"):
+                                    # Yield tool call event for frontend
                                     yield {
-                                        "type": "web_retrieval_artifact",
-                                        "filepath": result["artifact_path"],
-                                        "url": result.get("url", ""),
-                                        "content_length": result.get("content_length", 0),
+                                        "type": "tool_call",
+                                        "tool_name": tool_name,
+                                        "arguments": tool_args,
+                                        "result": result_str[:1000] + "..." if len(result_str) > 1000 else result_str,
                                     }
                                 
-                                # NC-0.8.0.12: Emit tool_end for UI timeline
-                                tool_end_ts = _time.time()
-                                _result_summary = result_str[:80] + "..." if len(result_str) > 80 else result_str
-                                
-                                # NC-0.8.0.13: Detect error/empty results for accurate status
-                                _tool_status = "success"
-                                if isinstance(result, dict):
-                                    if result.get("error"):
-                                        _tool_status = "error"
-                                    elif tool_name in ("fetch_webpage", "web_extract", "fetch_document", "fetch_urls"):
-                                        _content = result.get("content", "")
-                                        if not _content or (isinstance(_content, str) and len(_content.strip()) < 50):
-                                            _tool_status = "empty"
-                                
-                                ui_event_end = {
-                                    "ts": tool_end_ts,
-                                    "type": "tool_end",
-                                    "tool": tool_name,
-                                    "round": tool_round,
-                                    "status": _tool_status,
-                                    "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
-                                    "result_summary": _result_summary,
-                                }
-                                if current_tool_group in tool_groups:
-                                    tool_groups[current_tool_group].append(ui_event_end)
-                                yield {"type": "tool_end", **ui_event_end}
-                                
-                                # Add tool result to messages for continuation
-                                # Use validated tool_args (not raw string) to ensure valid JSON
-                                validated_args = json.dumps(tool_args)
-                                messages.append({
-                                    "role": "assistant",
-                                    "content": None,
-                                    "tool_calls": [{
-                                        "id": tc_data["id"],
-                                        "type": "function",
-                                        "function": {
-                                            "name": tool_name,
-                                            "arguments": validated_args,
+                                    # NC-0.8.0.13: Notify frontend about web retrieval artifacts
+                                    if isinstance(result, dict) and result.get("artifact_path"):
+                                        _art_url = result.get("url", "")
+                                        _art_title = result.get("title", "")
+                                        _art_content = result.get("full_content") or result.get("direct_text") or ""
+                                        
+                                        # Build a readable display name from URL/title
+                                        if _art_title:
+                                            _display_name = _art_title[:80]
+                                        elif _art_url:
+                                            from urllib.parse import urlparse as _up
+                                            _parsed = _up(_art_url)
+                                            _display_name = _parsed.netloc + (_parsed.path[:40] if _parsed.path and _parsed.path != "/" else "")
+                                        else:
+                                            _display_name = result["artifact_path"].split("/")[-1]
+                                        
+                                        yield {
+                                            "type": "web_retrieval_artifact",
+                                            "filepath": result["artifact_path"],
+                                            "url": _art_url,
+                                            "title": _display_name,
+                                            "content_length": result.get("content_length", 0),
+                                            "content": _art_content,
                                         }
-                                    }]
-                                })
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tc_data["id"],
-                                    "content": result_str,
-                                })
-                            except Exception as e:
-                                logger.error(f"[LLM_TOOLS] Tool execution failed: {e}")
+                                        
+                                        # Also track in generated_artifacts for message persistence
+                                        generated_artifacts.append({
+                                            "id": f"web_{len(generated_artifacts)}",
+                                            "type": "web_retrieval",
+                                            "filename": result["artifact_path"],
+                                            "title": _display_name,
+                                            "url": _art_url,
+                                            "content_length": result.get("content_length", 0),
+                                            "source": "web_fetch",
+                                            "created_at": datetime.now(timezone.utc).isoformat(),
+                                        })
                                 
-                                # NC-0.8.0.12: Emit tool_end (failure) for UI timeline
-                                tool_end_ts = _time.time()
-                                ui_event_end = {
-                                    "ts": tool_end_ts,
-                                    "type": "tool_end",
-                                    "tool": tool_name,
-                                    "round": tool_round,
-                                    "status": "error",
-                                    "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
-                                    "result_summary": str(e)[:80],
-                                }
-                                if current_tool_group in tool_groups:
-                                    tool_groups[current_tool_group].append(ui_event_end)
-                                yield {"type": "tool_end", **ui_event_end}
+                                    # NC-0.8.0.12: Emit tool_end for UI timeline
+                                    tool_end_ts = _time.time()
+                                    _result_summary = result_str[:80] + "..." if len(result_str) > 80 else result_str
                                 
-                                # NC-0.8.0.8: Track failed tool call
-                                tool_call_history.append({
-                                    "tool": tool_name,
-                                    "args": tool_args,
-                                    "error": str(e),
-                                    "success": False,
-                                })
+                                    # NC-0.8.0.13: Detect error/empty results for accurate status
+                                    _tool_status = "success"
+                                    if isinstance(result, dict):
+                                        if result.get("error"):
+                                            _tool_status = "error"
+                                        elif tool_name in ("fetch_webpage", "web_extract", "fetch_document", "fetch_urls"):
+                                            _content = result.get("content", "")
+                                            if not _content or (isinstance(_content, str) and len(_content.strip()) < 50):
+                                                _tool_status = "empty"
                                 
-                                # Use validated tool_args to ensure valid JSON
-                                validated_args = json.dumps(tool_args)
-                                messages.append({
-                                    "role": "assistant", 
-                                    "content": None,
-                                    "tool_calls": [{
-                                        "id": tc_data["id"],
-                                        "type": "function",
-                                        "function": {
-                                            "name": tool_name,
-                                            "arguments": validated_args,
-                                        }
-                                    }]
-                                })
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tc_data["id"],
-                                    "content": f"Error: {str(e)}",
-                                })
+                                    ui_event_end = {
+                                        "ts": tool_end_ts,
+                                        "type": "tool_end",
+                                        "tool": tool_name,
+                                        "round": tool_round,
+                                        "status": _tool_status,
+                                        "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
+                                        "result_summary": _result_summary,
+                                    }
+                                    if current_tool_group in tool_groups:
+                                        tool_groups[current_tool_group].append(ui_event_end)
+                                    yield {"type": "tool_end", **ui_event_end}
+                                
+                                    # Add tool result to messages for continuation
+                                    # Use validated tool_args (not raw string) to ensure valid JSON
+                                    validated_args = json.dumps(tool_args)
+                                    messages.append({
+                                        "role": "assistant",
+                                        "content": None,
+                                        "tool_calls": [{
+                                            "id": _tc_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": self.shorten_tool_name(tool_name),
+                                                "arguments": validated_args,
+                                            }
+                                        }]
+                                    })
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": _tc_id,
+                                        "content": result_str,
+                                    })
+                                except Exception as e:
+                                    logger.error(f"[LLM_TOOLS] Tool execution failed: {e}")
+                                
+                                    # NC-0.8.0.12: Emit tool_end (failure) for UI timeline
+                                    tool_end_ts = _time.time()
+                                    ui_event_end = {
+                                        "ts": tool_end_ts,
+                                        "type": "tool_end",
+                                        "tool": tool_name,
+                                        "round": tool_round,
+                                        "status": "error",
+                                        "duration_ms": int((tool_end_ts - tool_start_ts) * 1000),
+                                        "result_summary": str(e)[:80],
+                                    }
+                                    if current_tool_group in tool_groups:
+                                        tool_groups[current_tool_group].append(ui_event_end)
+                                    yield {"type": "tool_end", **ui_event_end}
+                                
+                                    # NC-0.8.0.8: Track failed tool call
+                                    tool_call_history.append({
+                                        "tool": tool_name,
+                                        "args": tool_args,
+                                        "error": str(e),
+                                        "success": False,
+                                    })
+                                    
+                                    # NC-0.8.0.27: Record segments in order
+                                    if _current_text_segment.strip():
+                                        message_segments.append({"type": "text", "content": _current_text_segment})
+                                        _current_text_segment = ""
+                                    message_segments.append({"type": "tool_call", "index": len(tool_call_history) - 1})
+                                
+                                    # Use validated tool_args to ensure valid JSON
+                                    validated_args = json.dumps(tool_args)
+                                    messages.append({
+                                        "role": "assistant", 
+                                        "content": None,
+                                        "tool_calls": [{
+                                            "id": _tc_id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": self.shorten_tool_name(tool_name),
+                                                "arguments": validated_args,
+                                            }
+                                        }]
+                                    })
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": _tc_id,
+                                        "content": f"Error: {str(e)}",
+                                    })
                         
                         # Clear accumulated tool calls for next round
                         streaming_tool_calls = {}
@@ -1799,6 +1885,10 @@ class LLMService:
                         
                         # Continue conversation with tool results
                         logger.info(f"[LLM_TOOLS] Continuing with tool results (round {tool_round})...")
+                        
+                        # Validate messages before continuation (shorten names, fix orphans)
+                        messages = self._validate_tool_call_pairs(messages)
+                        
                         continue_params = {
                             "model": effective_model,
                             "messages": messages,
@@ -1912,140 +2002,248 @@ class LLMService:
             logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}, tool_calls={len(tool_call_history)}")
             
             # NC-0.8.0.9: Tool call results are handled through proper tool message flow
-            # Don't prepend them to assistant content (causes display issues and LLM mimicry)
             content_to_save = filtered_content
             
-            # NC-0.8.0.16: Persist tool calls in DB so future turns see them in history
-            # Without this, the LLM hallucinates tool calls instead of actually invoking them
-            if tool_call_history:
+            # NC-0.8.0.27: Save messages as ordered segments — text, tool_call, tool_result, text, ...
+            # This ensures the DB, UI, and LLM history all see the same ordered sequence.
+            if tool_call_history and message_segments:
+                # Flush any remaining text after the last tool call
+                if _current_text_segment.strip():
+                    message_segments.append({"type": "text", "content": _current_text_segment})
+                
                 try:
-                    # Save tool_calls JSON on the assistant message
-                    all_tool_calls = []
+                    # Generate stable tool_call IDs
+                    all_tc_ids = []
                     for tc_entry in tool_call_history:
-                        tc_id = f"call_{hash(json.dumps(tc_entry['args'], sort_keys=True)) & 0xFFFFFFFF}_{len(all_tool_calls)}"
-                        all_tool_calls.append({
-                            "id": tc_id,
-                            "name": tc_entry["tool"],
-                            "arguments": tc_entry["args"],
-                        })
+                        tc_id = f"call_{hash(json.dumps(tc_entry['args'], sort_keys=True)) & 0xFFFFFFFF}_{len(all_tc_ids)}"
+                        all_tc_ids.append(tc_id)
                     
-                    # Update assistant message with tool_calls
+                    # The first assistant_message (already created) gets the first text segment
+                    first_text = ""
+                    first_seg_idx = 0
+                    if message_segments and message_segments[0]["type"] == "text":
+                        first_text = message_segments[0]["content"].strip()
+                        first_seg_idx = 1
+                    
+                    # Update the initial assistant message with first text segment (no tool_calls on it)
                     await db.execute(
                         update(Message)
                         .where(Message.id == str(assistant_message.id))
-                        .values(tool_calls=all_tool_calls)
+                        .values(
+                            content=first_text,
+                            input_tokens=total_input_tokens,
+                            output_tokens=total_output_tokens,
+                            is_streaming=False,
+                        )
                     )
                     
-                    # Create TOOL_RESULT messages for each tool call
-                    for i, tc_entry in enumerate(tool_call_history):
-                        tc_id = all_tool_calls[i]["id"]
-                        result_content = tc_entry.get("_result_str", tc_entry.get("result_preview", ""))
-                        if tc_entry.get("error"):
-                            result_content = f"Error: {tc_entry['error']}"
-                        
-                        tool_result_msg = Message(
-                            chat_id=chat.id,
-                            role=MessageRole.ASSISTANT,  # Stored as assistant but content_type distinguishes
-                            content=result_content[:50000],  # Cap at 50K to avoid bloating DB
-                            content_type=ContentType.TOOL_RESULT,
-                            tool_call_id=tc_id,
-                            parent_id=str(assistant_message.id),
-                        )
-                        db.add(tool_result_msg)
+                    # Now create subsequent messages in order
+                    last_msg_id = str(assistant_message.id)
+                    for seg in message_segments[first_seg_idx:]:
+                        if seg["type"] == "tool_call":
+                            tc_idx = seg["index"]
+                            tc_entry = tool_call_history[tc_idx]
+                            tc_id = all_tc_ids[tc_idx]
+                            
+                            # Assistant message with tool_call
+                            tc_msg = Message(
+                                chat_id=chat.id,
+                                role=MessageRole.ASSISTANT,
+                                content=None,
+                                content_type=ContentType.TOOL_CALL,
+                                tool_calls=[{
+                                    "id": tc_id,
+                                    "name": tc_entry["tool"],
+                                    "arguments": tc_entry["args"],
+                                }],
+                                parent_id=last_msg_id,
+                                model=effective_model,
+                            )
+                            db.add(tc_msg)
+                            await db.flush()
+                            last_msg_id = str(tc_msg.id)
+                            
+                            # Tool result message
+                            result_content = tc_entry.get("_result_str", tc_entry.get("result_preview", ""))
+                            if tc_entry.get("error"):
+                                result_content = f"Error: {tc_entry['error']}"
+                            
+                            tr_msg = Message(
+                                chat_id=chat.id,
+                                role=MessageRole.ASSISTANT,
+                                content=result_content[:50000],
+                                content_type=ContentType.TOOL_RESULT,
+                                tool_call_id=tc_id,
+                                parent_id=last_msg_id,
+                            )
+                            db.add(tr_msg)
+                            await db.flush()
+                            last_msg_id = str(tr_msg.id)
+                            
+                        elif seg["type"] == "text" and seg["content"].strip():
+                            # Continuation text after tool calls
+                            text_msg = Message(
+                                chat_id=chat.id,
+                                role=MessageRole.ASSISTANT,
+                                content=seg["content"].strip(),
+                                content_type=ContentType.TEXT,
+                                parent_id=last_msg_id,
+                                model=effective_model,
+                            )
+                            db.add(text_msg)
+                            await db.flush()
+                            last_msg_id = str(text_msg.id)
                     
-                    await db.flush()
-                    logger.info(f"[LLM_TOOLS] Persisted {len(tool_call_history)} tool calls + results to DB")
-                except Exception as tc_save_err:
-                    logger.warning(f"[LLM_TOOLS] Failed to persist tool calls to DB: {tc_save_err}")
-            
-            # Use direct SQL update instead of ORM to avoid stale object issues
-            # This is more robust during long streaming sessions
-            message_id = str(assistant_message.id)
-            chat_id = str(chat.id)
-            
-            try:
-                # NC-0.8.0.11: Build update values including artifacts if any
-                update_values = {
-                    "content": content_to_save,
-                    "input_tokens": total_input_tokens,
-                    "output_tokens": total_output_tokens,
-                    "is_streaming": False,
-                }
-                
-                # Add generated artifacts if any
-                if generated_artifacts:
-                    logger.info(f"[LLM_ARTIFACTS] Saving {len(generated_artifacts)} generated artifacts to message")
-                    update_values["artifacts"] = generated_artifacts
-                
-                # NC-0.8.0.13: Save tool_groups and tool_call_log in message_metadata
-                if tool_groups or tool_call_history:
-                    _meta = {}
-                    # Try to read existing metadata
-                    try:
-                        from sqlalchemy import text as _sa_text2
-                        _meta_result = await db.execute(
-                            _sa_text2("SELECT message_metadata FROM messages WHERE id = :id"),
-                            {"id": message_id}
+                    # Add artifacts to the last message if any
+                    if generated_artifacts:
+                        await db.execute(
+                            update(Message)
+                            .where(Message.id == last_msg_id)
+                            .values(artifacts=generated_artifacts)
                         )
-                        _meta_row = _meta_result.fetchone()
-                        if _meta_row and _meta_row[0]:
-                            _meta = json.loads(_meta_row[0]) if isinstance(_meta_row[0], str) else (_meta_row[0] or {})
-                    except Exception:
-                        pass
-                    if tool_groups:
-                        _meta["tool_groups"] = {str(k): v for k, v in tool_groups.items()}
-                    # Save full tool call log if admin has enabled it
-                    if tool_call_history:
-                        try:
-                            from app.services.settings_service import SettingsService
-                            _store_log = await SettingsService.get_bool(db, "store_tool_call_log")
-                        except Exception:
-                            _store_log = False
-                        if _store_log:
-                            # Strip internal keys, keep tool/args/result/success
+                    
+                    # Save tool_groups metadata on the initial message for backward compat
+                    if tool_groups or tool_call_history:
+                        _meta = {}
+                        if tool_groups:
+                            _meta["tool_groups"] = {str(k): v for k, v in tool_groups.items()}
+                        if tool_call_history:
                             _meta["tool_call_log"] = [
-                                {
-                                    "tool": tc.get("tool"),
-                                    "args": tc.get("args"),
-                                    "result": tc.get("_result_str", tc.get("result_preview", "")),
-                                    "success": tc.get("success", True),
-                                }
+                                {"tool": tc.get("tool"), "args": tc.get("args"), "success": tc.get("success", False)}
                                 for tc in tool_call_history
                             ]
-                    update_values["message_metadata"] = _meta
-                
-                # Update message with final content using direct SQL
-                await db.execute(
-                    update(Message)
-                    .where(Message.id == message_id)
-                    .values(**update_values)
-                )
-                
-                # Update chat stats using direct SQL
-                await db.execute(
-                    update(Chat)
-                    .where(Chat.id == chat_id)
-                    .values(
-                        total_input_tokens=Chat.total_input_tokens + total_input_tokens,
-                        total_output_tokens=Chat.total_output_tokens + total_output_tokens,
-                        updated_at=datetime.now(timezone.utc),
+                        await db.execute(
+                            update(Message)
+                            .where(Message.id == str(assistant_message.id))
+                            .values(message_metadata=json.dumps(_meta))
+                        )
+                    
+                    await db.commit()
+                    logger.info(f"[LLM_TOOLS] Persisted {len(message_segments)} ordered segments ({len(tool_call_history)} tool calls) to DB")
+                    
+                    # Update chat stats
+                    await db.execute(
+                        update(Chat)
+                        .where(Chat.id == str(chat.id))
+                        .values(
+                            total_input_tokens=Chat.total_input_tokens + total_input_tokens,
+                            total_output_tokens=Chat.total_output_tokens + total_output_tokens,
+                            updated_at=datetime.now(timezone.utc),
+                        )
                     )
-                )
+                    await self._track_usage(
+                        db=db, user=user, chat=chat, model=effective_model,
+                        input_tokens=total_input_tokens, output_tokens=total_output_tokens,
+                        message_id=str(assistant_message.id),
+                    )
+                    await db.commit()
+                    
+                except Exception as seg_save_err:
+                    logger.error(f"[LLM_TOOLS] Failed to persist segments: {seg_save_err}", exc_info=True)
+                    # Fallback: save everything as one message
+                    try:
+                        await db.rollback()
+                        content_to_save = filtered_content
+                        if '<!--tools:' in content_to_save:
+                            import re as _re_fb
+                            content_to_save = _re_fb.sub(r'\n?<!--tools:\d+-->\n?', '\n', content_to_save).strip()
+                        await db.execute(
+                            update(Message)
+                            .where(Message.id == str(assistant_message.id))
+                            .values(content=content_to_save, is_streaming=False)
+                        )
+                        await db.commit()
+                    except Exception:
+                        pass
+            else:
+                # No tool calls — simple single-message save
+                # Use direct SQL update instead of ORM to avoid stale object issues
+                message_id = str(assistant_message.id)
+                chat_id = str(chat.id)
+            
+                try:
+                    # NC-0.8.0.11: Build update values including artifacts if any
+                    update_values = {
+                        "content": content_to_save,
+                        "input_tokens": total_input_tokens,
+                        "output_tokens": total_output_tokens,
+                        "is_streaming": False,
+                    }
                 
-                # Track usage (uses separate queries, should be safe)
-                await self._track_usage(
-                    db=db,
-                    user=user,
-                    chat=chat,
-                    model=effective_model,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    message_id=message_id,
-                )
+                    # Add generated artifacts if any
+                    if generated_artifacts:
+                        logger.info(f"[LLM_ARTIFACTS] Saving {len(generated_artifacts)} generated artifacts to message")
+                        update_values["artifacts"] = generated_artifacts
                 
-            except Exception as update_err:
-                logger.warning(f"Failed to update message (may have been deleted): {update_err}")
-                # Don't rollback here - let the caller handle it
+                    # NC-0.8.0.13: Save tool_groups and tool_call_log in message_metadata
+                    if tool_groups or tool_call_history:
+                        _meta = {}
+                        # Try to read existing metadata
+                        try:
+                            from sqlalchemy import text as _sa_text2
+                            _meta_result = await db.execute(
+                                _sa_text2("SELECT message_metadata FROM messages WHERE id = :id"),
+                                {"id": message_id}
+                            )
+                            _meta_row = _meta_result.fetchone()
+                            if _meta_row and _meta_row[0]:
+                                _meta = json.loads(_meta_row[0]) if isinstance(_meta_row[0], str) else (_meta_row[0] or {})
+                        except Exception:
+                            pass
+                        if tool_groups:
+                            _meta["tool_groups"] = {str(k): v for k, v in tool_groups.items()}
+                        # Save full tool call log if admin has enabled it
+                        if tool_call_history:
+                            try:
+                                from app.services.settings_service import SettingsService
+                                _store_log = await SettingsService.get_bool(db, "store_tool_call_log")
+                            except Exception:
+                                _store_log = False
+                            if _store_log:
+                                # Strip internal keys, keep tool/args/result/success
+                                _meta["tool_call_log"] = [
+                                    {
+                                        "tool": tc.get("tool"),
+                                        "args": tc.get("args"),
+                                        "result": tc.get("_result_str", tc.get("result_preview", "")),
+                                        "success": tc.get("success", True),
+                                    }
+                                    for tc in tool_call_history
+                                ]
+                        update_values["message_metadata"] = _meta
+                
+                    # Update message with final content using direct SQL
+                    await db.execute(
+                        update(Message)
+                        .where(Message.id == message_id)
+                        .values(**update_values)
+                    )
+                
+                    # Update chat stats using direct SQL
+                    await db.execute(
+                        update(Chat)
+                        .where(Chat.id == chat_id)
+                        .values(
+                            total_input_tokens=Chat.total_input_tokens + total_input_tokens,
+                            total_output_tokens=Chat.total_output_tokens + total_output_tokens,
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                    )
+                
+                    # Track usage (uses separate queries, should be safe)
+                    await self._track_usage(
+                        db=db,
+                        user=user,
+                        chat=chat,
+                        model=effective_model,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        message_id=message_id,
+                    )
+                
+                except Exception as update_err:
+                    logger.warning(f"Failed to update message (may have been deleted): {update_err}")
+                    # Don't rollback here - let the caller handle it
             
             # Log LLM request metrics
             duration_ms = (time.time() - stream_start_time) * 1000
@@ -2205,18 +2403,99 @@ Search query:"""
             return None
     
     def _convert_tools_to_openai_format(self, tools: List[Dict]) -> List[Dict]:
-        """Convert tools to OpenAI function calling format"""
+        """Convert tools to OpenAI function calling format.
+        
+        Cleans schemas for strict OpenAI validation:
+        - Strips 'required' from individual property dicts (must be top-level array only)
+        - Removes 'additionalProperties' booleans (OpenAI rejects True/False values)
+        - Hashes tool names > 63 chars (OpenAI max is 64)
+        """
+        import hashlib
+        
+        # Reset the name map for this request
+        self._tool_name_map = {}  # short_name → original_name
+        
         openai_tools = []
         for tool in tools:
+            schema = tool.get("input_schema", tool.get("parameters", {}))
+            cleaned = self._clean_schema_for_openai(schema)
+            
+            original_name = tool.get("name", "")
+            if len(original_name) > 63:
+                # Keep a recognizable prefix + hash suffix
+                h = hashlib.md5(original_name.encode()).hexdigest()[:12]
+                short_name = original_name[:50] + "_" + h
+                self._tool_name_map[short_name] = original_name
+            else:
+                short_name = original_name
+            
             openai_tools.append({
                 "type": "function",
                 "function": {
-                    "name": tool.get("name"),
+                    "name": short_name,
                     "description": tool.get("description", ""),
-                    "parameters": tool.get("input_schema", tool.get("parameters", {})),
+                    "parameters": cleaned,
                 }
             })
         return openai_tools
+    
+    def resolve_tool_name(self, name: str) -> str:
+        """Resolve a potentially hashed tool name back to the original.
+        Called by execute_tool when the LLM returns a tool call."""
+        if hasattr(self, '_tool_name_map') and name in self._tool_name_map:
+            return self._tool_name_map[name]
+        return name
+    
+    def shorten_tool_name(self, name: str) -> str:
+        """Shorten a tool name for OpenAI message history (max 64 chars).
+        Uses the same hash map built by _convert_tools_to_openai_format."""
+        if len(name) <= 63:
+            return name
+        # Check if we already have a mapping
+        if hasattr(self, '_tool_name_map'):
+            for short, original in self._tool_name_map.items():
+                if original == name:
+                    return short
+        # Generate on the fly
+        import hashlib
+        h = hashlib.md5(name.encode()).hexdigest()[:12]
+        short = name[:50] + "_" + h
+        self._tool_name_map[short] = name
+        return short
+    
+    @staticmethod
+    def _clean_schema_for_openai(schema: Dict) -> Dict:
+        """Clean a JSON schema for OpenAI strict validation."""
+        if not isinstance(schema, dict):
+            return schema
+        
+        cleaned = {}
+        for key, val in schema.items():
+            # Strip boolean additionalProperties (OpenAI rejects True/False)
+            if key == "additionalProperties" and isinstance(val, bool):
+                continue
+            
+            if key == "properties" and isinstance(val, dict):
+                # Clean each property: strip 'required' field (it's top-level only)
+                clean_props = {}
+                for prop_name, prop_val in val.items():
+                    if isinstance(prop_val, dict):
+                        clean_prop = {k: v for k, v in prop_val.items() if k != "required"}
+                        clean_props[prop_name] = clean_prop
+                    else:
+                        clean_props[prop_name] = prop_val
+                cleaned[key] = clean_props
+            elif isinstance(val, dict):
+                cleaned[key] = LLMService._clean_schema_for_openai(val)
+            elif isinstance(val, list):
+                cleaned[key] = [
+                    LLMService._clean_schema_for_openai(item) if isinstance(item, dict) else item
+                    for item in val
+                ]
+            else:
+                cleaned[key] = val
+        
+        return cleaned
     
     def _estimate_tokens(self, content: Any) -> int:
         """Estimate token count for content"""
@@ -2286,7 +2565,32 @@ Search query:"""
             
             # Reverse to get root-to-current order
             path_ids.reverse()
-            history = [all_messages[mid] for mid in path_ids if mid in all_messages]
+            path_id_set = set(path_ids)
+            
+            # NC-0.8.0.27: Include TOOL_RESULT messages that are children of assistant messages in the path
+            # These are siblings in the tree (not in the parent chain) but essential for proper tool history
+            tool_results_by_parent = {}
+            for msg in all_messages.values():
+                if (msg.content_type == ContentType.TOOL_RESULT and 
+                    msg.parent_id and msg.parent_id in path_id_set and
+                    str(msg.id) not in path_id_set):
+                    if msg.parent_id not in tool_results_by_parent:
+                        tool_results_by_parent[msg.parent_id] = []
+                    tool_results_by_parent[msg.parent_id].append(msg)
+            
+            # Sort tool results by created_at within each parent
+            for results in tool_results_by_parent.values():
+                results.sort(key=lambda m: m.created_at)
+            
+            # Build history with tool results injected after their parent assistant message
+            history = []
+            for mid in path_ids:
+                msg = all_messages.get(mid)
+                if msg:
+                    history.append(msg)
+                    # Inject TOOL_RESULT children right after the assistant message
+                    if mid in tool_results_by_parent:
+                        history.extend(tool_results_by_parent[mid])
         else:
             # Fallback: use chronological order with selected_versions
             # This handles legacy chats without parent_id
@@ -2411,9 +2715,26 @@ When you receive search results or external data in the conversation, follow the
                 })
             
             elif msg.role == MessageRole.ASSISTANT:
+                assistant_content = msg.content or ""
+                # Backward compat: strip legacy <!--tools:N--> markers from old messages
+                if '<!--tools:' in assistant_content:
+                    import re as _re_clean
+                    assistant_content = _re_clean.sub(r'\n?<!--tools:\d+-->\n?', '\n', assistant_content)
+                    assistant_content = _re_clean.sub(r'\n{3,}', '\n\n', assistant_content).strip()
+                # Strip fake tool call text from old LLM responses
+                if '[TOOL' in assistant_content:
+                    import re as _re_clean2
+                    assistant_content = _re_clean2.sub(
+                        r'\[TOOL[_ ]CALL[_ ]?(?:RESULT)?[\s\S]*?\]\s*', '', assistant_content, flags=_re_clean2.IGNORECASE
+                    ).strip()
+                
+                # Skip empty assistant messages (artifact of old marker-only content)
+                if not assistant_content and not msg.tool_calls:
+                    continue
+                
                 message_dict = {
                     "role": "assistant",
-                    "content": msg.content or "",
+                    "content": assistant_content if assistant_content else None,
                 }
                 
                 # Add tool calls if present
@@ -2440,10 +2761,83 @@ When you receive search results or external data in the conversation, follow the
             "content": content,
         })
         
+        # Validate tool call / tool result pairing
+        # OpenAI requires every tool_call_id in assistant messages to have a matching tool response
+        messages = self._validate_tool_call_pairs(messages)
+        
         # Apply history compression if needed (pass chat_id for agent memory)
         messages = await self._maybe_compress_history(db, messages, chat_id=str(chat.id))
         
         return messages
+    
+    def _validate_tool_call_pairs(self, messages: List[Dict]) -> List[Dict]:
+        """Ensure every tool_call_id in assistant messages has a matching tool response,
+        and shorten any tool names > 63 chars to match the hashed names sent in tools param.
+        
+        OpenAI rejects requests where an assistant message has tool_calls 
+        without corresponding tool role messages, or where function names exceed 64 chars.
+        """
+        import hashlib
+        
+        # Collect all tool response IDs
+        tool_response_ids = set()
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                tool_response_ids.add(msg["tool_call_id"])
+        
+        def _shorten_name(name: str) -> str:
+            """Shorten tool name to fit OpenAI's 64 char limit."""
+            if not name or len(name) <= 63:
+                return name
+            h = hashlib.md5(name.encode()).hexdigest()[:12]
+            return name[:50] + "_" + h
+        
+        # Fix assistant messages with orphaned tool_calls and long names
+        cleaned = []
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                # Filter to only tool_calls that have matching responses
+                valid_tcs = [
+                    tc for tc in msg["tool_calls"]
+                    if tc.get("id") in tool_response_ids
+                ]
+                
+                if len(valid_tcs) != len(msg["tool_calls"]):
+                    orphaned = len(msg["tool_calls"]) - len(valid_tcs)
+                    logger.warning(f"[MSG_VALIDATE] Stripped {orphaned} orphaned tool_calls from assistant message")
+                
+                # Shorten function names in tool_calls
+                for tc in valid_tcs:
+                    fn = tc.get("function", {})
+                    if fn.get("name"):
+                        fn["name"] = _shorten_name(fn["name"])
+                
+                if valid_tcs:
+                    msg = {**msg, "tool_calls": valid_tcs}
+                    cleaned.append(msg)
+                elif msg.get("content"):
+                    cleaned.append({k: v for k, v in msg.items() if k != "tool_calls"})
+                else:
+                    logger.warning("[MSG_VALIDATE] Dropping empty assistant message with no valid tool_calls")
+            else:
+                cleaned.append(msg)
+        
+        # Also remove tool responses with no matching assistant tool_call
+        assistant_tc_ids = set()
+        for msg in cleaned:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    assistant_tc_ids.add(tc.get("id"))
+        
+        final = []
+        for msg in cleaned:
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                if msg["tool_call_id"] not in assistant_tc_ids:
+                    logger.warning(f"[MSG_VALIDATE] Dropping orphaned tool response: {msg['tool_call_id']}")
+                    continue
+            final.append(msg)
+        
+        return final
     
     async def _maybe_compress_history(
         self,

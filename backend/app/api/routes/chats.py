@@ -721,7 +721,6 @@ async def list_messages(
     
     query = select(Message).where(
         Message.chat_id == chat_id,
-        Message.content_type != ContentType.TOOL_RESULT,
     )
     
     if before:

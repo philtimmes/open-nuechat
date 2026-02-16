@@ -1316,6 +1316,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           message_id: string;
           filepath: string;
           url: string;
+          title: string;
           content_length: number;
           content?: string;
         };
@@ -1323,17 +1324,27 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         if (wra.chat_id && currentChat?.id && wra.chat_id !== currentChat.id) break;
         
         if (wra.filepath) {
+          // Use title from backend, fall back to URL domain, then filename
+          let displayTitle = wra.title || '';
+          if (!displayTitle && wra.url) {
+            try {
+              const u = new URL(wra.url);
+              displayTitle = u.hostname + (u.pathname !== '/' ? u.pathname.substring(0, 40) : '');
+            } catch { displayTitle = wra.filepath.split('/').pop() || wra.filepath; }
+          }
+          if (!displayTitle) displayTitle = wra.filepath.split('/').pop() || wra.filepath;
+          
           const artifact: Artifact = {
             id: `web_${Date.now()}_${wra.filepath}`,
             type: 'code',
-            title: wra.filepath.split('/').pop() || wra.filepath,
+            title: displayTitle,
             filename: wra.filepath,
-            content: wra.content || '',
+            content: wra.content || `[Content from ${wra.url || wra.filepath} — ${wra.content_length || 0} chars]`,
             source: 'upload',
             created_at: new Date().toISOString(),
           };
           updateArtifact(wra.filepath, artifact);
-          console.log(`[web_retrieval] Artifact created: ${wra.filepath} (${wra.content?.length || 0} chars)`);
+          console.log(`[web_retrieval] Artifact created: ${wra.filepath} — "${displayTitle}" (${wra.content?.length || 0} chars)`);
         }
         break;
       }

@@ -1946,6 +1946,7 @@ Current: **NC-0.8.0.8**
 Migrations run automatically on startup in `backend/app/main.py`.
 
 Key tables added/modified:
+- NC-0.8.0.21: No schema changes. Live tool call streaming (all tools), interrupted reply persistence (partial content saved to DB), sandbox file detection for execute_python (images to chat, all files to artifacts), web fetch content pipeline fix (raw content to artifacts, full_content over WebSocket, stripped from LLM), CSV URL detection, TOOL_RESULT filtered from UI API, remark-breaks for shift+enter newlines, Whisper model.generate() for long audio, Rumble CSP/proxy/impersonation fixes.
 - NC-0.8.0.8: New columns on `knowledge_stores`: `force_trigger_enabled`, `force_trigger_keywords`, `force_trigger_max_chunks`.
 - NC-0.8.0.7: No schema changes. Admin settings stored in `system_settings` table for image generation. Image metadata stored in `messages.message_metadata`.
 - NC-0.8.0.6: No schema changes (Smart RAG Compression is code-only)

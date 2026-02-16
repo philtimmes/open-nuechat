@@ -448,13 +448,35 @@ async def handle_chat_message(
         save_user_message = payload.get("save_user_message", True)
         logger.info(f"[SAVE_USER_MSG] Override from payload: {save_user_message}")
     
-    if not chat_id or not content:
-        logger.warning(f"Missing chat_id or content")
+    if not chat_id or (not content and not attachments):
+        logger.warning(f"Missing chat_id or content/attachments")
         await ws_manager.send_to_connection(connection, {
             "type": "error",
             "payload": {"error": "Missing chat_id or content"},
         })
         return
+    
+    # NC-0.8.0.21: If user uploaded files without text, set minimal content
+    if not content and attachments:
+        content = "Refer to the following materials."
+    
+    # NC-0.8.0.21: Build upload context for attached files so LLM knows what was uploaded
+    _upload_context = None
+    if attachments:
+        _file_list = []
+        for att in attachments:
+            _fn = att.get("filename", "unknown")
+            _type = att.get("type", "file")
+            _size = len(att.get("content", "")) if att.get("content") else len(att.get("data", "")) if att.get("data") else 0
+            if _type == "youtube":
+                _file_list.append(f"  - {_fn} (YouTube transcript, {_size:,} chars)")
+            elif _type == "image":
+                _file_list.append(f"  - {_fn} (image)")
+            else:
+                _ext = _fn.rsplit('.', 1)[-1].lower() if '.' in _fn else 'unknown'
+                _file_list.append(f"  - {_fn} (.{_ext}, {_size:,} chars)")
+        if _file_list:
+            _upload_context = "[UPLOADED_FILES]\nThe user has uploaded the following files with this message:\n" + "\n".join(_file_list) + "\n\nFile contents are included as attachments. Use view_file_lines or request_file tools to access full content if truncated.\n[/UPLOADED_FILES]"
     
     async with async_session_maker() as db:
         # Get user and chat
@@ -1355,6 +1377,12 @@ The following is relevant information from your previous conversations:
         if attachment_manifest:
             system_prompt = f"{system_prompt}\n\n{attachment_manifest}"
             logger.info(f"[ATTACH_PROC] Added manifest to system prompt ({len(attachment_manifest)} chars)")
+        
+        # ==== INJECT UPLOAD CONTEXT ====
+        # NC-0.8.0.21: Notify LLM about uploaded files
+        if _upload_context:
+            system_prompt = f"{system_prompt}\n\n{_upload_context}"
+            logger.info(f"[UPLOAD_CTX] Added upload context to system prompt ({len(_upload_context)} chars)")
         
         # ==== VISION ROUTING ====
         # If attachments contain images and primary model isn't multimodal,

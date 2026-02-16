@@ -35,26 +35,88 @@ logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 # ============ GPU Detection ============
 
+def _read_gpu_assignment(model_key: str):
+    """Read GPU assignment from /app/data/gpuSelector/assignments.json.
+    Returns ROCm GPU ID or None."""
+    import json
+    assignments_path = os.getenv("GPU_SELECTOR_DIR", "/app/data/gpuSelector") + "/assignments.json"
+    try:
+        with open(assignments_path, 'r') as f:
+            data = json.load(f)
+        entry = data.get(model_key)
+        if entry and isinstance(entry, dict):
+            return entry.get("rocm_id")
+        elif entry is not None:
+            return int(entry)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError, OSError):
+        pass
+    return None
+
+
+def _rocm_id_to_hip_id(rocm_id: int) -> int:
+    """Translate ROCm GPU index to HIP_ID using `amd-smi list -e`.
+    HIP_VISIBLE_DEVICES needs HIP_ID, NOT the rocm-smi GPU index."""
+    import subprocess, re
+    try:
+        result = subprocess.run(
+            ["amd-smi", "list", "-e"], capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return rocm_id  # Fallback: assume 1:1
+        
+        current_gpu = None
+        for line in result.stdout.splitlines():
+            line_s = line.strip()
+            m = re.match(r'^GPU:\s*(\d+)', line_s)
+            if m:
+                current_gpu = int(m.group(1))
+                continue
+            if current_gpu == rocm_id and 'HIP_ID' in line_s:
+                _, _, val = line_s.partition(':')
+                try:
+                    hip_id = int(val.strip())
+                    print(f"[GPU MAP] ROCm GPU {rocm_id} → HIP_ID {hip_id}", flush=True)
+                    return hip_id
+                except ValueError:
+                    pass
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return rocm_id  # Fallback
+
+
 def detect_device():
     """
-    Detect available compute device.
-    ROCm uses torch.cuda namespace (maps to HIP backend).
+    Detect compute device for TTS.
+    Reads admin GPU assignment, translates to HIP_ID, sets HIP_VISIBLE_DEVICES before torch import.
     """
+    use_gpu = os.getenv("TTS_USE_GPU", "true").lower() in ("true", "1", "yes")
+    if not use_gpu:
+        print("[TTS] GPU disabled, using CPU", flush=True)
+        return "cpu"
+    
+    # Check admin GPU assignment BEFORE importing torch
+    rocm_id = _read_gpu_assignment("tts")
+    if rocm_id is not None:
+        hip_id = _rocm_id_to_hip_id(rocm_id)
+        os.environ["HIP_VISIBLE_DEVICES"] = str(hip_id)
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(hip_id)
+        print(f"[TTS] GPU assignment: ROCm GPU {rocm_id} → HIP_ID {hip_id} (HIP_VISIBLE_DEVICES={hip_id})", flush=True)
+    
+    # Check env override
+    forced = os.getenv("TTS_GPU_DEVICE")
+    if forced:
+        print(f"[TTS] Using forced device: {forced}", flush=True)
+        return forced
+    
     import torch
     
-    use_gpu = os.getenv("TTS_USE_GPU", "true").lower() in ("true", "1", "yes")
-    
-    if use_gpu and torch.cuda.is_available():
+    if torch.cuda.is_available():
         device_name = torch.cuda.get_device_name(0)
-        device_props = torch.cuda.get_device_properties(0)
-        vram_gb = device_props.total_memory / (1024**3)
-        print(f"[TTS] GPU: {device_name} ({vram_gb:.1f} GB)", flush=True)
-        return "cuda"
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        print(f"[TTS] Using cuda:0 — {device_name} ({vram_gb:.1f} GB)", flush=True)
+        return "cuda:0"
     else:
-        if use_gpu:
-            print("[TTS] GPU not available, using CPU", flush=True)
-        else:
-            print("[TTS] GPU disabled, using CPU", flush=True)
+        print("[TTS] GPU not available, using CPU", flush=True)
         return "cpu"
 
 # Detect device at module load

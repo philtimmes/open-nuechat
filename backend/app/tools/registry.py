@@ -32,13 +32,22 @@ class ToolRegistry:
         handler: Callable,
     ):
         """Register a tool"""
+        # Build required array from property flags, then strip the flags
+        required = [k for k, v in parameters.items() if v.get("required", False)]
+        clean_props = {}
+        for k, v in parameters.items():
+            if isinstance(v, dict):
+                clean_props[k] = {pk: pv for pk, pv in v.items() if pk != "required"}
+            else:
+                clean_props[k] = v
+        
         self._tools[name] = {
             "name": name,
             "description": description,
             "input_schema": {
                 "type": "object",
-                "properties": parameters,
-                "required": [k for k, v in parameters.items() if v.get("required", False)],
+                "properties": clean_props,
+                "required": required,
             }
         }
         self._handlers[name] = handler
@@ -239,6 +248,35 @@ plt.bar(df['name'], df['value'])
             handler=self._image_gen_handler,
         )
         
+        # Image modification tool (img2img)
+        self.register(
+            name="modify_image",
+            description="Modify an existing image using AI img2img. Takes an image file from artifacts and transforms it based on a text prompt. Use when the user wants to change, enhance, restyle, or transform an uploaded or generated image. The image must already exist in chat artifacts.",
+            parameters={
+                "prompt": {
+                    "type": "string",
+                    "description": "Description of the desired output image. Be specific about what to change or the target style.",
+                    "required": True,
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Filename of the source image in artifacts (e.g. 'uploaded_photo.png', 'z-image_00001_.png')",
+                    "required": True,
+                },
+                "denoise": {
+                    "type": "number",
+                    "description": "How much to change the image. 0.1=subtle tweaks, 0.3=moderate changes (default), 0.5=significant restyle, 0.7=heavy transformation, 1.0=full regeneration keeping only composition",
+                    "required": False,
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": "Random seed for reproducibility. Omit for random.",
+                    "required": False,
+                },
+            },
+            handler=self._image_modify_handler,
+        )
+        
         # Web page fetcher
         self.register(
             name="fetch_webpage",
@@ -258,6 +296,11 @@ plt.bar(df['name'], df['value'])
                 "extract_main_content": {
                     "type": "boolean",
                     "description": "If true, attempts to extract just the main content (article text). If false, returns all text. Default: true",
+                    "required": False,
+                },
+                "include_images": {
+                    "type": "boolean",
+                    "description": "If true, extracts image URLs from the page and returns them. Useful when the user wants to see images from the page. Default: false",
                     "required": False,
                 }
             },
@@ -1743,7 +1786,8 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
             return {
                 "status": "queued",
                 "task_id": task_id,
-                "message": f"Image generation started. The image will appear in the chat when ready.",
+                "message": f"Image is being generated and will appear in the chat shortly.",
+                "tool_call": f"generate_image(prompt='{prompt}', width={width}, height={height})",
                 "prompt": prompt,
                 "width": width,
                 "height": height,
@@ -1752,6 +1796,111 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
         except Exception as e:
             logger.error(f"[IMAGE_TOOL] Failed to queue: {e}")
             return {"error": f"Failed to queue image generation: {str(e)}"}
+    
+    async def _image_modify_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
+        """Modify an existing image using img2img via the image generation service."""
+        import base64 as _b64
+        
+        prompt = args.get("prompt", "")
+        filename = args.get("filename", "")
+        denoise = args.get("denoise", 0.3)
+        seed = args.get("seed")
+        
+        if not prompt:
+            return {"error": "Prompt is required"}
+        if not filename:
+            return {"error": "Filename is required — specify the image file from artifacts"}
+        
+        chat_id = context.get("chat_id") if context else None
+        if not chat_id:
+            return {"error": "Missing chat context"}
+        
+        # Find the image — check session files first, then sandbox, then uploads
+        image_data = None
+        sandbox_dir = get_session_sandbox(chat_id)
+        
+        # Check sandbox directory
+        img_path = os.path.join(sandbox_dir, filename)
+        if os.path.exists(img_path):
+            with open(img_path, 'rb') as f:
+                image_data = f.read()
+            logger.info(f"[MODIFY_IMAGE] Found image in sandbox: {img_path} ({len(image_data)} bytes)")
+        
+        # Check common subdirectories
+        if not image_data:
+            for subdir in ['', 'retrievedFromWeb', 'uploads']:
+                check_path = os.path.join(sandbox_dir, subdir, filename) if subdir else os.path.join(sandbox_dir, filename)
+                if os.path.exists(check_path):
+                    with open(check_path, 'rb') as f:
+                        image_data = f.read()
+                    logger.info(f"[MODIFY_IMAGE] Found image at: {check_path}")
+                    break
+        
+        # Check uploads directory
+        if not image_data:
+            uploads_dir = os.environ.get("UPLOADS_DIR", "/app/uploads")
+            for root, dirs, files in os.walk(uploads_dir):
+                if filename in files:
+                    with open(os.path.join(root, filename), 'rb') as f:
+                        image_data = f.read()
+                    logger.info(f"[MODIFY_IMAGE] Found image in uploads: {os.path.join(root, filename)}")
+                    break
+        
+        # Check generated images
+        if not image_data:
+            gen_dir = "/app/uploads/generated"
+            gen_path = os.path.join(gen_dir, filename)
+            if os.path.exists(gen_path):
+                with open(gen_path, 'rb') as f:
+                    image_data = f.read()
+                logger.info(f"[MODIFY_IMAGE] Found generated image: {gen_path}")
+        
+        if not image_data:
+            return {"error": f"Image '{filename}' not found in artifacts, uploads, or generated images"}
+        
+        # Send to image service
+        try:
+            from app.services.image_gen import get_image_gen_client
+            
+            client = get_image_gen_client()
+            image_b64 = _b64.b64encode(image_data).decode()
+            
+            payload = {
+                "prompt": prompt,
+                "image_base64": image_b64,
+                "denoise": denoise,
+                "steps": 7,
+            }
+            if seed is not None:
+                payload["seed"] = seed
+            
+            logger.info(f"[MODIFY_IMAGE] Sending to image service: prompt={prompt[:50]}..., denoise={denoise}")
+            response = await client.client.post("/modify", json=payload)
+            response.raise_for_status()
+            result = response.json()
+            
+            if result.get("success") and result.get("image_base64"):
+                # Return as direct_to_chat image
+                out_filename = f"modified_{filename}"
+                return {
+                    "success": True,
+                    "image_base64": result["image_base64"],
+                    "image_mime_type": "image/png",
+                    "filename": out_filename,
+                    "direct_to_chat": True,
+                    "image_displayed": True,
+                    "message": f"Image modified and displayed. Denoise={denoise}, seed={result.get('seed')}, time={result.get('generation_time')}s",
+                    "width": result.get("width"),
+                    "height": result.get("height"),
+                    "seed": result.get("seed"),
+                    "generation_time": result.get("generation_time"),
+                }
+            else:
+                return {"error": result.get("error", "Image modification failed")}
+                
+        except Exception as e:
+            logger.error(f"[MODIFY_IMAGE] Failed: {e}")
+            return {"error": f"Image modification failed: {str(e)}"}
     
     async def _webpage_fetch_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Fetch and extract content from web pages. Supports single URL or array of URLs."""
@@ -1763,6 +1912,7 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
         url = args.get("url", "")
         urls = args.get("urls", [])
         extract_main = args.get("extract_main_content", True)
+        include_images = args.get("include_images", False)
         
         # Build list of URLs to fetch
         url_list = []
@@ -1779,11 +1929,11 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
         
         # If single URL, return single result (backward compatible)
         if len(url_list) == 1:
-            return await self._fetch_single_url(url_list[0], extract_main, context=context)
+            return await self._fetch_single_url(url_list[0], extract_main, context=context, include_images=include_images)
         
         # Multiple URLs - fetch concurrently
         async def fetch_one(u):
-            return await self._fetch_single_url(u, extract_main, context=context)
+            return await self._fetch_single_url(u, extract_main, context=context, include_images=include_images)
         
         tasks = [fetch_one(u) for u in url_list[:10]]  # Limit to 10
         results = await asyncio.gather(*tasks)
@@ -1796,7 +1946,7 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
             "error_count": sum(1 for r in results if "error" in r),
         }
     
-    async def _fetch_single_url(self, url: str, extract_main: bool = True, context: Dict = None) -> Dict[str, Any]:
+    async def _fetch_single_url(self, url: str, extract_main: bool = True, context: Dict = None, include_images: bool = False) -> Dict[str, Any]:
         """Fetch a single URL with video detection and subtitle extraction."""
         import httpx
         from urllib.parse import urlparse
@@ -1903,9 +2053,20 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
                     
                     full_text = text_content
                     title = self._extract_title(html)
+                    
+                    # Extract images if requested
+                    page_images = []
+                    if include_images:
+                        page_images = self._extract_images_from_html(html, str(response.url))
                 else:
                     full_text = response.text
                     title = ""
+                    page_images = []
+                
+                # Guard against empty content
+                if not full_text or not full_text.strip():
+                    _fetch_logger.warning(f"[FETCH] Empty content extracted from {url}")
+                    full_text = f"[Page fetched but no readable text content extracted from {url}]"
                 
                 # Save it
                 artifact_path = await self._save_web_retrieval_artifact(url, full_text, context, suffix=_suffix)
@@ -1926,6 +2087,9 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
                 }
                 if artifact_path:
                     result["artifact_path"] = artifact_path
+                if page_images:
+                    result["images"] = page_images[:20]  # Cap at 20 images
+                    result["image_count"] = len(page_images)
                 return result
                 
         except httpx.TimeoutException:
@@ -1942,6 +2106,86 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
         if match:
             return match.group(1).strip()
         return ""
+    
+    def _extract_images_from_html(self, html: str, page_url: str) -> list:
+        """Extract image URLs from HTML page. Returns list of {url, alt, width, height}."""
+        from urllib.parse import urljoin
+        images = []
+        seen = set()
+        
+        try:
+            from bs4 import BeautifulSoup
+            try:
+                soup = BeautifulSoup(html, 'lxml')
+            except Exception:
+                soup = BeautifulSoup(html, 'html.parser')
+            
+            # Find all <img> tags
+            for img in soup.find_all('img'):
+                src = img.get('src') or img.get('data-src') or img.get('data-lazy-src') or ''
+                if not src or src.startswith('data:'):
+                    continue
+                
+                # Make absolute URL
+                abs_url = urljoin(page_url, src)
+                
+                # Skip tiny icons, trackers, spacer gifs
+                if any(skip in abs_url.lower() for skip in [
+                    'pixel', 'tracking', 'spacer', '1x1', 'blank.gif', 'favicon',
+                    'logo', 'icon', 'badge', 'button', 'ad_', 'ads/', '/ads',
+                    'analytics', 'beacon', '.svg',
+                ]):
+                    continue
+                
+                if abs_url in seen:
+                    continue
+                seen.add(abs_url)
+                
+                alt = img.get('alt', '')
+                width = img.get('width', '')
+                height = img.get('height', '')
+                
+                # Skip very small images (likely icons)
+                try:
+                    if width and int(width) < 50:
+                        continue
+                    if height and int(height) < 50:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+                
+                images.append({
+                    "url": abs_url,
+                    "alt": alt[:200] if alt else "",
+                    "width": width,
+                    "height": height,
+                })
+            
+            # Also check <meta property="og:image"> for main article image
+            og_img = soup.find('meta', property='og:image')
+            if og_img:
+                og_url = og_img.get('content', '')
+                if og_url and og_url not in seen:
+                    abs_og = urljoin(page_url, og_url)
+                    images.insert(0, {
+                        "url": abs_og,
+                        "alt": "Open Graph image",
+                        "width": "",
+                        "height": "",
+                    })
+            
+        except ImportError:
+            # Fallback: regex
+            import re
+            for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE):
+                src = m.group(1)
+                if not src.startswith('data:'):
+                    abs_url = urljoin(page_url, src)
+                    if abs_url not in seen:
+                        seen.add(abs_url)
+                        images.append({"url": abs_url, "alt": "", "width": "", "height": ""})
+        
+        return images
     
     def _extract_text_from_html(self, html: str, extract_main: bool = True) -> str:
         """Extract readable text from HTML"""
@@ -2940,12 +3184,18 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
         from urllib.parse import urlparse
         logger = logging.getLogger(__name__)
         
-        if not context or not content:
+        if not context:
+            logger.warning(f"[WEB_RETRIEVAL] No context provided for {url}")
+            return None
+        
+        if not content or not content.strip():
+            logger.warning(f"[WEB_RETRIEVAL] Empty content for {url}, skipping artifact save")
             return None
         
         chat_id = context.get("chat_id")
         db = context.get("db")
         if not chat_id or not db:
+            logger.warning(f"[WEB_RETRIEVAL] Missing chat_id or db in context for {url}")
             return None
         
         try:
@@ -3368,9 +3618,13 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
                     notice += f"\n\n⚠ This file is {len(full_text):,} chars. Loading it all at once would consume most of your context window."
                     notice += f"\n  Use grep_files to find relevant sections first, then view_file_lines to read them."
                 result["content"] = full_text[:LLM_PREVIEW_LIMIT] + notice
-                result["artifact_path"] = artifact_ref
             else:
                 result["content"] = full_text
+            
+            # Always set artifact_path and full_content for frontend artifact display
+            if artifact_path:
+                result["artifact_path"] = artifact_path
+            result["full_content"] = full_text
             
             return result
             

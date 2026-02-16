@@ -170,6 +170,8 @@ class FAISSIndexManager:
         # GPU resources
         self.gpu_resources = None
         self.gpu_available = False
+        self._faiss_gpu_id = 0
+        self._faiss_gpu_free_gb = 0.0
         self._init_gpu()
         
         # In-memory index cache
@@ -177,17 +179,35 @@ class FAISSIndexManager:
         self._id_maps: Dict[str, Dict[int, str]] = {}  # faiss_id -> chunk_id
     
     def _init_gpu(self):
-        """Initialize FAISS GPU resources (skipped if RAG_FORCE_CPU=true)"""
+        """Initialize FAISS GPU resources with admin GPU assignment and VRAM safety."""
         import os
         force_cpu = os.environ.get("RAG_FORCE_CPU", "false").lower() in ("true", "1", "yes")
         if force_cpu:
             logger.info("FAISS GPU skipped — RAG_FORCE_CPU=true")
             self.gpu_available = False
             return
+        
         try:
+            # Apply admin GPU assignment (sets HIP_VISIBLE_DEVICES)
+            try:
+                from app.services.gpu_manager import apply_gpu_assignment, get_model_assignment
+                assigned = apply_gpu_assignment("faiss")
+                rocm_id = get_model_assignment("faiss")
+                if assigned:
+                    self._faiss_gpu_id = 0  # HIP_VISIBLE_DEVICES makes it cuda:0
+                    logger.info(f"FAISS assigned to ROCm GPU {rocm_id} (cuda:0 via HIP_VISIBLE_DEVICES)")
+                else:
+                    self._faiss_gpu_id = 0
+                    logger.info("FAISS no GPU assignment, using default cuda:0")
+            except ImportError:
+                self._faiss_gpu_id = 0
+            
+            self._faiss_gpu_free_gb = float('inf')  # VRAM check happens in _to_gpu
+            
             self.gpu_resources = faiss.StandardGpuResources()
+            self.gpu_resources.setTempMemory(256 * 1024 * 1024)  # 256 MB temp
             self.gpu_available = True
-            logger.info("FAISS GPU initialized successfully")
+            logger.info(f"FAISS GPU resources initialized (gpu_id={self._faiss_gpu_id})")
         except Exception as e:
             logger.warning(f"FAISS GPU not available, using CPU: {e}")
             self.gpu_available = False
@@ -235,14 +255,67 @@ class FAISSIndexManager:
         
         return index
     
+    def _estimate_index_gpu_bytes(self, index: faiss.Index) -> int:
+        """Estimate how much GPU VRAM a FAISS index will consume."""
+        ntotal = index.ntotal
+        dim = self.EMBEDDING_DIM
+        
+        # Base: vectors stored as float32
+        base_bytes = ntotal * dim * 4  # float32
+        
+        # IVF indexes have centroid overhead
+        if hasattr(index, 'nlist'):
+            base_bytes += index.nlist * dim * 4  # centroids
+        
+        # PQ compresses, so override the vector storage estimate
+        if hasattr(index, 'pq'):
+            # PQ stores codes of m bytes per vector instead of dim*4
+            base_bytes = ntotal * index.pq.M + index.nlist * dim * 4
+        
+        # GPU overhead: ~1.5x for internal buffers, temp memory, etc.
+        return int(base_bytes * 1.5)
+    
     def _to_gpu(self, index: faiss.Index) -> faiss.Index:
-        """Move index to GPU if available"""
-        if self.gpu_available and self.gpu_resources:
-            try:
-                return faiss.index_cpu_to_gpu(self.gpu_resources, 0, index)
-            except Exception as e:
-                logger.warning(f"Failed to move index to GPU: {e}")
-        return index
+        """Move index to GPU if available AND it fits in VRAM."""
+        if not self.gpu_available or not self.gpu_resources:
+            return index
+        
+        # Estimate index size
+        estimated_bytes = self._estimate_index_gpu_bytes(index)
+        estimated_gb = estimated_bytes / (1024**3)
+        
+        # Get current free VRAM on our target GPU
+        free_gb = self._faiss_gpu_free_gb
+        try:
+            from app.services.gpu_manager import get_gpu_info
+            gpus = get_gpu_info()
+            gpu_id = getattr(self, '_faiss_gpu_id', 0)
+            if gpu_id < len(gpus):
+                free_gb = gpus[gpu_id]["free_gb"]
+        except ImportError:
+            pass
+        
+        # Safety margin: need at least 1 GB headroom beyond the index
+        safety_margin_gb = 1.0
+        if estimated_gb + safety_margin_gb > free_gb:
+            logger.warning(
+                f"[FAISS] Index too large for GPU: ~{estimated_gb:.2f} GB estimated, "
+                f"{free_gb:.1f} GB free (need {safety_margin_gb} GB headroom). "
+                f"Keeping on CPU. ntotal={index.ntotal}"
+            )
+            return index
+        
+        try:
+            gpu_id = getattr(self, '_faiss_gpu_id', 0)
+            gpu_index = faiss.index_cpu_to_gpu(self.gpu_resources, gpu_id, index)
+            logger.info(
+                f"[FAISS] Moved index to GPU {gpu_id}: ~{estimated_gb:.2f} GB, "
+                f"{free_gb:.1f} GB was free, ntotal={index.ntotal}"
+            )
+            return gpu_index
+        except Exception as e:
+            logger.warning(f"[FAISS] Failed to move index to GPU (falling back to CPU): {e}")
+            return index
     
     def _to_cpu(self, index: faiss.Index) -> faiss.Index:
         """Move index to CPU for saving"""
@@ -564,13 +637,22 @@ class RAGService:
                 force_cpu = os.environ.get("RAG_FORCE_CPU", "false").lower() in ("true", "1", "yes")
                 
                 if not force_cpu:
+                    # Apply admin GPU assignment for RAG embeddings
+                    try:
+                        from app.services.gpu_manager import apply_gpu_assignment
+                        assigned = apply_gpu_assignment("rag")
+                        if assigned:
+                            logger.info(f"RAG embedding model assigned to GPU via HIP_VISIBLE_DEVICES")
+                    except ImportError:
+                        pass
+                    
                     target_device = "cuda" if torch.cuda.is_available() else "cpu"
                     if target_device == "cuda" and model is not None:
                         try:
-                            model = model.to("cuda")
-                            logger.info("Moved model to GPU")
+                            model = model.to("cuda:0")
+                            logger.info("Moved RAG model to GPU (cuda:0)")
                         except Exception as e:
-                            logger.warning(f"Could not move model to GPU, using CPU: {e}")
+                            logger.warning(f"Could not move RAG model to GPU, using CPU: {e}")
                 else:
                     logger.info("RAG_FORCE_CPU=true — keeping embedding model on CPU")
                 

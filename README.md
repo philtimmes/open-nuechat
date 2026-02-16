@@ -432,7 +432,20 @@ Full API documentation at `/docs` when running.
 
 ## Schema Version
 
-**Current: NC-0.8.0.7**
+**Current: NC-0.8.0.21**
+
+### NC-0.8.0.21 Changes
+- **Live Tool Call Streaming**: Tool bubbles appear immediately as LLM starts generating a tool call, with arguments streaming in real-time (all tools, not just file tools). Spinner icon for generating state, pulse for executing.
+- **Interrupted Reply Persistence**: Stopping generation saves partial content to the message tree — next user message has proper parent, preserving conversation history.
+- **Sandbox File Detection**: `execute_python` detects all new files created during execution. Images rendered inline in chat, text files saved to session. All new files saved as artifacts.
+- **Web Fetch Content Fix**: Fetched web content now properly saved to artifacts (raw content, no header prepended). Full content sent over WebSocket for artifact panel display. `full_content` stripped from LLM context to avoid blowing context window.
+- **CSV/Data URL Detection**: URLs containing `export_csv`, `csv_file=`, `.csv` detected and saved with proper `.csv` suffix regardless of server content-type.
+- **Tool Result UI Fix**: `TOOL_RESULT` messages filtered from chat history API (no longer render as assistant messages on page reload). Still included in LLM conversation history.
+- **Shift+Enter Newlines**: User messages preserve line breaks via `remark-breaks` plugin.
+- **Whisper Long Audio Fix**: Replaced pipeline chunking (returns None for seq2seq) with direct `model.generate()` using 30-second chunks with 5-second overlap stride.
+- **Rumble CSP**: Added `https://rumble.com` to `frame-src` CSP directive for embed playback.
+- **Rumble Proxy Retry**: Proxy fetched before embed page request, retry up to 5 different proxies, `--impersonate chrome` via curl-cffi for browser impersonation.
+- **Logging Fix**: `app.tools.registry` logger set to INFO level.
 
 ### NC-0.8.0.7 Changes
 - **Admin Image Gen Settings**: New tab in Admin panel for default resolution, aspect ratio, and available resolutions

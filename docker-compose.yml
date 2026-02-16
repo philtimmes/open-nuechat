@@ -373,6 +373,8 @@ services:
       - HSA_OVERRIDE_GFX_VERSION=9.0.10
       - PYTORCH_ROCM_ARCH=gfx90a
       - MIOPEN_FIND_MODE=FAST
+    volumes:
+      - /opt/nuechat/_data/gpuSelector:/app/data/gpuSelector:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${TTS_PORT:-8033}/health"]
       interval: 30s
@@ -448,6 +450,7 @@ services:
       - HF_HOME=/app/hf_cache
     volumes:
       - /opt/nuechat/_data/hf_cache:/app/hf_cache
+      - /opt/nuechat/_data/gpuSelector:/app/data/gpuSelector:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${IMAGE_GEN_PORT:-8034}/health"]
       interval: 30s
