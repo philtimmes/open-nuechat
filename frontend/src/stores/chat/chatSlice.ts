@@ -66,7 +66,10 @@ export const createChatSlice: SliceCreator<ChatSlice> = (set, get) => ({
         const isGroupedView = ['source', 'modified', 'created'].includes(currentSortBy);
         
         let chatsValue;
-        if (isGroupedView) {
+        if (searchQuery) {
+          // NC-0.8.0.27: When searching, always use returned chats (flat results)
+          chatsValue = loadMore ? [...state.chats, ...newChats] : newChats;
+        } else if (isGroupedView) {
           // For grouped views: only clear chats when sort explicitly changes
           // Otherwise keep existing chats (preserves newly created chats)
           chatsValue = sortChanged ? [] : state.chats;

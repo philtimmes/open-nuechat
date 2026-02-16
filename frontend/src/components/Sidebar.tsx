@@ -24,7 +24,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
   const [isImporting, setIsImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ success: number; failed: number } | null>(null);
   const [showSortDropdown, setShowSortDropdown] = useState(false);
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['Today', 'Local', 'All Chats']));
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['Today', 'Local', 'All Chats', 'Search Results']));
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const sortDropdownRef = useRef<HTMLDivElement>(null);
@@ -74,6 +74,19 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     };
     loadChats();
   }, [chatSortBy]);
+  
+  // NC-0.8.0.27: Debounced search — trigger fetchChats when searchQuery changes
+  useEffect(() => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    searchTimeoutRef.current = setTimeout(() => {
+      fetchChats(false, searchQuery, chatSortBy);
+    }, 300);
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    };
+  }, [searchQuery]);
   
   // When group counts arrive, fetch chats for each group (grouped views only)
   useEffect(() => {
@@ -292,6 +305,16 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     const groups: Record<string, Chat[]> = {};
     let order: string[] = [];
     
+    // NC-0.8.0.27: When searching, show flat results regardless of sort mode
+    if (searchQuery) {
+      groups['Search Results'] = [...safeChats].sort((a, b) => 
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      );
+      order = ['Search Results'];
+      const activeOrder = order.filter(g => groups[g] && groups[g].length > 0);
+      return { groupedChats: groups, groupOrder: activeOrder };
+    }
+    
     if (chatSortBy === 'alphabetical') {
       groups['All Chats'] = [...safeChats].sort((a, b) => a.title.localeCompare(b.title));
       order = ['All Chats'];
@@ -334,7 +357,7 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
     );
     
     return { groupedChats: groups, groupOrder: activeOrder };
-  }, [safeChats, chatSortBy, chatGroupCounts]);
+  }, [safeChats, chatSortBy, chatGroupCounts, searchQuery]);
   
   const sortOptions = [
     { value: 'modified' as const, label: 'Date Modified' },
@@ -428,13 +451,25 @@ export default function Sidebar({ isOpen, onToggle, isMobile = false, onClose }:
         
         {/* Search */}
         <div className="mt-3 flex items-center gap-2">
-          <input
-            type="text"
-            placeholder="Search chats..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="flex-1 px-3 py-3 md:py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-zinc-500/50 text-base md:text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-transparent"
-          />
+          <div className="flex-1 relative">
+            <input
+              type="text"
+              placeholder="Search chats..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full px-3 py-3 md:py-2 pr-8 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] placeholder-zinc-500/50 text-base md:text-sm focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-transparent"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] hover:text-[var(--color-text)]"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
           <svg className="w-5 h-5 md:w-4 md:h-4 text-[var(--color-text-secondary)] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>

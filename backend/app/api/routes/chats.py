@@ -179,6 +179,39 @@ async def list_chats(
     
     # For grouped views (source, period), just return counts
     # Frontend fetches each group via /chats/group/{type}/{name}
+    # NC-0.8.0.27: When searching, return flat results across all groups
+    if search:
+        message_search = (
+            select(Message.chat_id)
+            .join(Chat, Message.chat_id == Chat.id)
+            .where(Chat.owner_id == user.id)
+            .where(Message.content.ilike(f"%{search}%"))
+            .distinct()
+        )
+        message_result = await db.execute(message_search)
+        matching_chat_ids = [row[0] for row in message_result.all()]
+        
+        search_filter = or_(
+            Chat.title.ilike(f"%{search}%"),
+            Chat.id.in_(matching_chat_ids) if matching_chat_ids else False
+        )
+        query = select(Chat).where(base_filter, search_filter).order_by(Chat.updated_at.desc())
+        count_query = select(func.count(Chat.id)).where(base_filter, search_filter)
+        
+        total_result = await db.execute(count_query)
+        total = total_result.scalar()
+        query = query.offset((page - 1) * page_size).limit(page_size)
+        result = await db.execute(query)
+        chats = result.scalars().all()
+        
+        return ChatListResponse(
+            chats=[ChatResponse.model_validate(c) for c in chats],
+            total=total,
+            page=page,
+            page_size=page_size,
+            group_counts={"Search Results": total} if total else {},
+        )
+    
     total_result = await db.execute(select(func.count(Chat.id)).where(base_filter))
     total = total_result.scalar()
     
@@ -567,6 +600,7 @@ async def get_chats_by_group(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     date_field: str = Query("updated_at", description="For period type: 'updated_at' (modified) or 'created_at'"),
+    search: Optional[str] = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -616,6 +650,26 @@ async def get_chats_by_group(
         count_query = select(func.count(Chat.id)).where(base_filter, group_filter)
     else:
         raise HTTPException(status_code=400, detail="Invalid group_type. Use 'source' or 'period'")
+    
+    # NC-0.8.0.27: Apply search filter if provided
+    if search:
+        search_title_filter = Chat.title.ilike(f"%{search}%")
+        # Also search message content
+        message_search = (
+            select(Message.chat_id)
+            .join(Chat, Message.chat_id == Chat.id)
+            .where(Chat.owner_id == user.id)
+            .where(Message.content.ilike(f"%{search}%"))
+            .distinct()
+        )
+        msg_result = await db.execute(message_search)
+        matching_ids = [row[0] for row in msg_result.all()]
+        combined_filter = or_(
+            search_title_filter,
+            Chat.id.in_(matching_ids) if matching_ids else False
+        )
+        query = query.where(combined_filter)
+        count_query = count_query.where(combined_filter)
     
     # Get total count for this group
     total_result = await db.execute(count_query)
