@@ -12,7 +12,7 @@ import {
   isToolCall, isToolResult, isImageGeneration, isMessageSaved,
   extractErrorMessage
 } from '../lib/wsTypes';
-import type { Message, StreamChunk, WSMessage, ZipFileResponse, Artifact } from '../types';
+import type { Message, StreamChunk, WSMessage, ZipFileResponse, Artifact, Attachment } from '../types';
 
 // Regex patterns to detect file request tags in LLM responses
 // Supports multiple formats LLMs might output:
@@ -2545,6 +2545,18 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       
       // Generate a proper UUID for the user message (used by both frontend and backend)
       const messageId = crypto.randomUUID();
+      
+      // NC-0.8.0.27: Convert ProcessedAttachment[] to Attachment[] for display
+      const messageAttachments: Attachment[] | undefined = attachments && (attachments as any[]).length > 0 
+        ? (attachments as any[]).filter(a => a).map(a => ({
+            type: a.type === 'image' ? 'image' : 'file',
+            name: a.filename || a.name || 'file',
+            mime_type: a.mime_type || 'application/octet-stream',
+            data: a.data,
+            url: a.url,
+          } as Attachment))
+        : undefined;
+      
       const userMessage: Message = {
         id: messageId,
         chat_id: chatId,
@@ -2552,8 +2564,27 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         content,
         parent_id: parentId,
         created_at: new Date().toISOString(),
+        attachments: messageAttachments,
       };
       addMessage(userMessage);
+      
+      // NC-0.8.0.27: Add uploaded images to artifacts panel immediately
+      if (messageAttachments) {
+        for (const att of messageAttachments) {
+          if (att.type === 'image' && att.data) {
+            const imgContent = att.data.startsWith('data:') ? att.data : `data:${att.mime_type || 'image/png'};base64,${att.data}`;
+            useChatStore.getState().updateArtifact(att.name || 'uploaded_image.png', {
+              id: `img_att_${messageId}_${att.name || 'image'}`,
+              type: 'image',
+              title: att.name || 'Uploaded Image',
+              filename: att.name || 'uploaded_image.png',
+              content: imgContent,
+              source: 'upload',
+              created_at: new Date().toISOString(),
+            });
+          }
+        }
+      }
       
       setIsSending(true);
       

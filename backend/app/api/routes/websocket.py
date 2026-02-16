@@ -23,7 +23,8 @@ from app.services.procedural_memory import ProceduralMemoryService, get_procedur
 from app.services.tool_service import ToolService
 from app.services.image_gen import detect_image_request, detect_image_request_async
 from app.services.task_queue import TaskQueueService
-from app.tools.registry import tool_registry, store_session_file
+from app.tools.registry import tool_registry, store_session_file, get_session_sandbox
+import os
 from app.models.models import User, Chat, Message, MessageRole, ContentType, AssistantConversation, CustomAssistant
 from app.core.config import settings
 from app.core.logging import log_websocket_event
@@ -442,6 +443,23 @@ async def handle_chat_message(
             if att.get("type") == "file" and att.get("filename") and att.get("content"):
                 store_session_file(chat_id, att["filename"], att["content"])
                 logger.info(f"[ATTACHMENTS] Stored for tools: {att['filename']} ({len(att['content'])} chars)")
+            # NC-0.8.0.27: Store image attachments as binary files in sandbox
+            elif att.get("type") == "image" and att.get("data") and att.get("filename"):
+                try:
+                    import base64 as b64
+                    img_data = att["data"]
+                    # Strip data: URL prefix if present
+                    if img_data.startswith("data:"):
+                        img_data = img_data.split(",", 1)[1] if "," in img_data else img_data
+                    binary = b64.b64decode(img_data)
+                    sandbox = get_session_sandbox(chat_id)
+                    os.makedirs(sandbox, exist_ok=True)
+                    img_path = os.path.join(sandbox, att["filename"])
+                    with open(img_path, "wb") as f:
+                        f.write(binary)
+                    logger.info(f"[ATTACHMENTS] Stored image: {att['filename']} ({len(binary)} bytes)")
+                except Exception as e:
+                    logger.warning(f"[ATTACHMENTS] Failed to store image {att.get('filename')}: {e}")
     
     # Allow payload to override save_user_message (for file content continuation)
     if "save_user_message" in payload:

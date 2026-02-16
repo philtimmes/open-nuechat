@@ -1097,12 +1097,12 @@ function MessageBubbleInner({
         {/* Attachments */}
         {message.attachments && message.attachments.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-2">
-            {message.attachments.map((att, idx) => (
+            {message.attachments.map((att: any, idx: number) => (
               <div key={idx}>
                 {att.type === 'image' ? (
                   <img
-                    src={att.url || `data:${att.mime_type};base64,${att.data}`}
-                    alt={att.name}
+                    src={att.url || (att.data ? (att.data.startsWith('data:') ? att.data : `data:${att.mime_type || 'image/png'};base64,${att.data}`) : '')}
+                    alt={att.name || att.filename || 'image'}
                     className="max-w-sm max-h-64 rounded border border-[var(--color-border)]"
                   />
                 ) : (
@@ -1110,7 +1110,7 @@ function MessageBubbleInner({
                     <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
-                    <span className="truncate max-w-[200px] text-[var(--color-text)]">{att.name}</span>
+                    <span className="truncate max-w-[200px] text-[var(--color-text)]">{att.name || att.filename || 'file'}</span>
                   </div>
                 )}
               </div>

@@ -1800,6 +1800,7 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
     async def _image_modify_handler(self, args: Dict[str, Any], context: Dict = None) -> Dict[str, Any]:
         """Modify an existing image using img2img via the image generation service."""
         import base64 as _b64
+        import os
         
         prompt = args.get("prompt", "")
         filename = args.get("filename", "")

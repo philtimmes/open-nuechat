@@ -30,7 +30,17 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
         
         if (msg.artifacts && msg.artifacts.length > 0) {
           // Use stored artifacts (they have correct timestamps)
-          // They should match extracted artifacts by content
+          // NC-0.8.0.27: Fix image artifacts - restore data: URL from base64 content
+          for (const art of msg.artifacts) {
+            if (art.type === 'image' && art.content && !art.content.startsWith('data:')) {
+              // Content is raw base64 or got mangled - restore data URL
+              const mime = art.mime_type || 'image/png';
+              // Check if content looks like base64 (no spaces, no HTML/code markers)
+              if (art.content.length > 100 && !art.content.includes('<') && !art.content.includes('{')) {
+                art.content = `data:${mime};base64,${art.content}`;
+              }
+            }
+          }
           allArtifacts.push(...msg.artifacts);
         } else if (extractedArtifacts.length > 0) {
           // No stored artifacts - use extracted with message timestamp
@@ -38,6 +48,24 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set, get) => ({
             art.created_at = msg.created_at || art.created_at;
           }
           allArtifacts.push(...extractedArtifacts);
+        }
+        
+        // NC-0.8.0.27: Convert image attachments to artifacts so they show in Artifacts panel
+        if (msg.attachments && msg.attachments.length > 0) {
+          for (const att of msg.attachments) {
+            if (att.type === 'image' && (att.data || att.url)) {
+              const imgContent = att.url || (att.data?.startsWith('data:') ? att.data : `data:${att.mime_type || 'image/png'};base64,${att.data}`);
+              allArtifacts.push({
+                id: `img_att_${msg.id}_${att.name || 'image'}`,
+                type: 'image',
+                title: att.name || 'Uploaded Image',
+                filename: att.name || 'uploaded_image.png',
+                content: imgContent,
+                source: 'upload',
+                created_at: msg.created_at,
+              });
+            }
+          }
         }
         
         // NC-0.8.0.7: Load generated images from message metadata
