@@ -1123,6 +1123,45 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setStreamingToolCall(null);
         break;
       
+      // NC-0.8.0.21: Tool generating — LLM is producing a tool call, show bubble early
+      case 'tool_generating': {
+        const tgPayload = message.payload as {
+          chat_id: string;
+          message_id: string;
+          tool_name: string;
+          tool_index: number;
+          round: number;
+        };
+        
+        const genEvent = {
+          ts: Date.now() / 1000,
+          type: 'tool_start' as const,
+          tool: tgPayload.tool_name,
+          round: tgPayload.round,
+          args_summary: '',
+          status: 'generating',
+          toolIndex: tgPayload.tool_index,
+        };
+        
+        // Create tool group if none active
+        const genGroups: Record<number, any[]> = (window as any).__toolGroups || {};
+        const genActiveGroup: number = (window as any).__activeToolGroup ?? -1;
+        let genGroupId = genActiveGroup;
+        
+        if (genActiveGroup === -1) {
+          genGroupId = Object.keys(genGroups).length;
+          (window as any).__activeToolGroup = genGroupId;
+          genGroups[genGroupId] = [];
+          streamingBufferRef.current?.append(`\n<!--tools:${genGroupId}-->\n`);
+        }
+        
+        genGroups[genGroupId].push(genEvent);
+        (window as any).__toolGroups = genGroups;
+        
+        useChatStore.getState().setToolTimelineEvent(genEvent);
+        break;
+      }
+      
       // NC-0.8.0.13: Tool activity timeline events — inline markers in content
       case 'tool_start': {
         const tsPayload = message.payload as {
@@ -1140,6 +1179,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           tool: tsPayload.tool,
           round: tsPayload.round,
           args_summary: tsPayload.args_summary,
+          status: 'running',
         };
         
         // Determine current tool group — new group if no active one
@@ -1155,7 +1195,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           streamingBufferRef.current?.append(`\n<!--tools:${groupId}-->\n`);
         }
         
-        groups[groupId].push(startEvent);
+        // Check if tool_generating already added this tool — update it instead of duplicating
+        const existingIdx = groups[groupId].findIndex(
+          (e: any) => e.type === 'tool_start' && e.tool === tsPayload.tool && e.status === 'generating'
+        );
+        if (existingIdx >= 0) {
+          groups[groupId][existingIdx] = startEvent;
+        } else {
+          groups[groupId].push(startEvent);
+        }
         (window as any).__toolGroups = groups;
         
         // Update store for live rendering
@@ -1269,6 +1317,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           filepath: string;
           url: string;
           content_length: number;
+          content?: string;
         };
         const { currentChat, updateArtifact } = useChatStore.getState();
         if (wra.chat_id && currentChat?.id && wra.chat_id !== currentChat.id) break;
@@ -1279,12 +1328,12 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             type: 'code',
             title: wra.filepath.split('/').pop() || wra.filepath,
             filename: wra.filepath,
-            content: `[Retrieved from ${wra.url}]\n[${wra.content_length} characters — use view_file_lines to read]`,
+            content: wra.content || '',
             source: 'upload',
             created_at: new Date().toISOString(),
           };
           updateArtifact(wra.filepath, artifact);
-          console.log(`[web_retrieval] Artifact created: ${wra.filepath} (${wra.content_length} chars)`);
+          console.log(`[web_retrieval] Artifact created: ${wra.filepath} (${wra.content?.length || 0} chars)`);
         }
         break;
       }

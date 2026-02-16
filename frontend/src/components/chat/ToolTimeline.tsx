@@ -13,8 +13,7 @@ interface ToolTimelineProps {
   isLive?: boolean;
 }
 
-// Tools that stream their content
-const STREAMABLE_TOOLS = new Set(['create_file', 'search_replace', 'sed_files']);
+// All tools now stream their content during generation
 
 /** Extract the "content" field value from partially-streamed JSON args */
 function extractStreamedContent(rawJson: string): { filename: string; content: string } | null {
@@ -120,7 +119,7 @@ function pairEvents(events: ToolTimelineEvent[]) {
       tool: startEvt.tool,
       round: startEvt.round,
       args_summary: startEvt.args_summary || '',
-      status: 'running',
+      status: (startEvt as any).status || 'running',
       duration_ms: 0,
       result_summary: '',
       startTs: startEvt.ts,
@@ -214,9 +213,10 @@ const MAX_VISIBLE = 4;
 const ROW_HEIGHT = 40;
 
 /** Live streaming content preview for a tool */
+const FILE_TOOLS = new Set(['create_file', 'search_replace', 'sed_files']);
+
 const ToolContentPreview: React.FC<{ toolName: string; toolIndex: number }> = ({ toolName, toolIndex }) => {
   const scrollRef = useRef<HTMLPreElement>(null);
-  const [collapsed, setCollapsed] = useState(false);
   const [content, setContent] = useState('');
   const [filename, setFilename] = useState('');
   
@@ -227,10 +227,15 @@ const ToolContentPreview: React.FC<{ toolName: string; toolIndex: number }> = ({
     const poll = () => {
       const raw = (window as any).__toolContentStream?.[streamKey] || '';
       if (raw) {
-        const parsed = extractStreamedContent(raw);
-        if (parsed) {
-          setContent(parsed.content);
-          if (parsed.filename) setFilename(parsed.filename);
+        if (FILE_TOOLS.has(toolName)) {
+          const parsed = extractStreamedContent(raw);
+          if (parsed) {
+            setContent(parsed.content);
+            if (parsed.filename) setFilename(parsed.filename);
+          }
+        } else {
+          // For all other tools, show the raw JSON args as they stream in
+          setContent(raw);
         }
       }
       frame = requestAnimationFrame(poll);
@@ -241,57 +246,27 @@ const ToolContentPreview: React.FC<{ toolName: string; toolIndex: number }> = ({
   
   // Auto-scroll to bottom
   useEffect(() => {
-    if (scrollRef.current && !collapsed) {
+    if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [content, collapsed]);
+  }, [content]);
   
   if (!content) return null;
   
-  const lines = content.split('\n');
-  const lineCount = lines.length;
-  
-  if (collapsed) {
-    return (
-      <div
-        onClick={() => setCollapsed(false)}
-        className="mt-1 px-2 py-1 rounded bg-gray-100 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700/40
-                   cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-700/50 transition-colors"
-      >
-        <div className="flex items-center gap-1.5 text-[10px] text-gray-500 dark:text-gray-400">
-          <span className="font-mono">{filename || toolName}</span>
-          <span>·</span>
-          <span>{lineCount} lines</span>
-          <span>·</span>
-          <span>{content.length.toLocaleString()} chars</span>
-          <span className="ml-auto">▸</span>
-        </div>
-      </div>
-    );
-  }
-  
   return (
-    <div className="mt-1 rounded bg-gray-100 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700/40 overflow-hidden">
-      <div
-        onClick={() => setCollapsed(true)}
-        className="flex items-center gap-1.5 px-2 py-0.5 text-[10px] text-gray-500 dark:text-gray-400
-                   cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-700/50 select-none"
-      >
-        <span className="font-mono">{filename || 'Writing...'}</span>
-        <span>·</span>
-        <span>{lineCount} lines</span>
-        <span className="ml-auto">▾</span>
-      </div>
-      <pre
-        ref={scrollRef}
-        className="px-2 pb-1 text-[10px] leading-relaxed font-mono text-gray-600 dark:text-gray-300
-                   overflow-y-auto whitespace-pre-wrap break-all"
-        style={{ maxHeight: 160 }}
-      >
-        {content}
-        <span className="inline-block w-1 h-3 bg-blue-400 animate-pulse ml-0.5 align-middle" />
-      </pre>
-    </div>
+    <pre
+      ref={scrollRef}
+      className="mt-1 px-2 py-1 rounded bg-gray-100 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700/40
+                 text-[10px] leading-relaxed font-mono text-gray-600 dark:text-gray-300
+                 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all"
+      style={{ maxHeight: 72 }}
+    >
+      {FILE_TOOLS.has(toolName) && filename && (
+        <span className="text-gray-400 dark:text-gray-500">{filename}{'\n'}</span>
+      )}
+      {content}
+      <span className="inline-block w-1 h-3 bg-blue-400 animate-pulse ml-0.5 align-middle" />
+    </pre>
   );
 };
 
@@ -322,7 +297,9 @@ const TimelineScroller: React.FC<{ pairs: ReturnType<typeof pairEvents> }> = ({ 
                       ${i < pairs.length - 1 ? 'border-b border-gray-100 dark:border-gray-700/30' : ''}`}
         >
           <span className="mt-0.5 flex-shrink-0">
-            {pair.status === 'running' ? (
+            {pair.status === 'generating' ? (
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
+            ) : pair.status === 'running' ? (
               <span className="inline-block w-3 h-3 rounded-full bg-blue-400 animate-pulse" />
             ) : pair.status === 'error' ? (
               <span className="text-red-500">✗</span>
@@ -344,7 +321,7 @@ const TimelineScroller: React.FC<{ pairs: ReturnType<typeof pairEvents> }> = ({ 
                   {pair.tool}
                 </span>
               )}
-              {pair.status === 'running' && !pair.narrator && (
+              {(pair.status === 'running' || pair.status === 'generating') && !pair.narrator && (
                 <span className="text-gray-400 dark:text-gray-500 animate-pulse">…</span>
               )}
               {pair.duration_ms > 0 && (
@@ -368,8 +345,8 @@ const TimelineScroller: React.FC<{ pairs: ReturnType<typeof pairEvents> }> = ({ 
                 {pair.status === 'empty' ? 'No content extracted' : pair.result_summary}
               </div>
             )}
-            {/* NC-0.8.0.13: Live content preview for streamable tools */}
-            {pair.status === 'running' && STREAMABLE_TOOLS.has(pair.tool) && (
+            {/* NC-0.8.0.21: Live content preview for all tools during generation/execution */}
+            {(pair.status === 'running' || pair.status === 'generating') && (
               <ToolContentPreview toolName={pair.tool} toolIndex={pair.toolIndex} />
             )}
           </div>

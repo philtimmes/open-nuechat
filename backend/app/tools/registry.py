@@ -1212,6 +1212,12 @@ Example:
             except Exception as e:
                 logger.warning(f"[EXECUTE_PYTHON] Failed to materialize session files: {e}")
         
+        # Snapshot existing files before execution
+        _pre_files = set()
+        for root, dirs, files in os.walk(sandbox_dir):
+            for fn in files:
+                _pre_files.add(os.path.join(root, fn))
+        
         # Create GUID-based venv for this execution
         pip_cache_dir = "/app/data/python/packages/cache"
         os.makedirs(pip_cache_dir, exist_ok=True)
@@ -1434,6 +1440,44 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
                 "result": exec_result.get("result"),
             }
             
+            # Detect new files created during execution
+            _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
+            _new_files = []
+            _new_images = []
+            for root, dirs, files in os.walk(sandbox_dir):
+                for fn in files:
+                    fpath = os.path.join(root, fn)
+                    if fpath not in _pre_files and not fn.startswith('_result_') and not fn.startswith('_exec_'):
+                        rel = os.path.relpath(fpath, sandbox_dir)
+                        ext = os.path.splitext(fn)[1].lower()
+                        if ext in _IMAGE_EXTS:
+                            try:
+                                with open(fpath, 'rb') as imgf:
+                                    import base64 as _b64
+                                    img_data = _b64.b64encode(imgf.read()).decode()
+                                mime = 'image/svg+xml' if ext == '.svg' else f'image/{ext.lstrip(".")}'
+                                if ext == '.jpg': mime = 'image/jpeg'
+                                _new_images.append({"filename": rel, "base64": img_data, "mime": mime})
+                                logger.info(f"[EXECUTE_PYTHON] New image: {rel}")
+                            except Exception as e:
+                                logger.warning(f"[EXECUTE_PYTHON] Failed to read image {rel}: {e}")
+                        else:
+                            try:
+                                with open(fpath, 'r', encoding='utf-8') as tf:
+                                    text = tf.read()
+                                if chat_id:
+                                    store_session_file(chat_id, rel, text)
+                                _new_files.append({"filename": rel, "size": len(text)})
+                                logger.info(f"[EXECUTE_PYTHON] New file: {rel} ({len(text)} chars)")
+                            except Exception:
+                                pass  # Binary non-image file, skip
+            
+            if _new_images:
+                response["generated_images"] = _new_images
+                response["direct_to_chat"] = True
+            if _new_files:
+                response["generated_files"] = _new_files
+            
             # Handle image output
             if output_image and exec_result.get("image_b64"):
                 response["image_base64"] = exec_result["image_b64"]
@@ -1462,9 +1506,12 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
             return {"success": False, "error": str(e), "traceback": tb}
         
         finally:
-            # Clean up venv
+            # Clean up venv — remove symlink first to avoid nuking sandbox
             if os.path.exists(venv_dir):
                 try:
+                    artifacts_link = os.path.join(venv_dir, "artifacts")
+                    if os.path.islink(artifacts_link):
+                        os.unlink(artifacts_link)
                     shutil.rmtree(venv_dir)
                 except Exception:
                     pass
@@ -1800,80 +1847,68 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
                 response.raise_for_status()
                 
                 content_type = response.headers.get("content-type", "")
+                _body_len = len(response.text)
+                import logging as _flog
+                _fetch_logger = _flog.getLogger(__name__)
+                _fetch_logger.info(f"[FETCH] url={url[:100]}, status={response.status_code}, content-type='{content_type}', body={_body_len}")
                 
-                # Handle non-HTML content
-                if "application/json" in content_type:
-                    full_text = response.text
-                    artifact_path = await self._save_web_retrieval_artifact(url, full_text, context, suffix=".json")
-                    preview = full_text[:LLM_PREVIEW_LIMIT]
-                    result = {"type": "json", "url": str(response.url), "content_type": "json"}
-                    if len(full_text) > LLM_PREVIEW_LIMIT:
-                        ref = artifact_path or "retrievedFromWeb/"
-                        preview += _build_truncation_notice(len(full_text), ref)
-                    result["content"] = preview
-                    result["content_length"] = len(full_text)
-                    if artifact_path:
-                        result["artifact_path"] = artifact_path
-                    return result
+                # Determine file suffix from content-type or URL
+                _ct_lower = content_type.lower().split(';')[0].strip()
+                _url_lower = url.lower()
+                if "json" in _ct_lower or _url_lower.endswith('.json'):
+                    _suffix = ".json"
+                    _type = "json"
+                elif "csv" in _ct_lower or any(x in _url_lower for x in ['export_csv', 'csv_file=', '.csv']):
+                    _suffix = ".csv"
+                    _type = "csv"
+                elif "xml" in _ct_lower or _url_lower.endswith('.xml'):
+                    _suffix = ".xml"
+                    _type = "xml"
+                elif "text/plain" in _ct_lower:
+                    _suffix = ".txt"
+                    _type = "text"
+                elif "text/html" in _ct_lower or "application/xhtml" in _ct_lower:
+                    _suffix = ".txt"
+                    _type = "webpage"
+                else:
+                    _suffix = ".txt"
+                    _type = "text"
+                
+                # For HTML, extract readable text; for everything else, use raw response
+                if _type == "webpage":
+                    html = response.text
+                    text_content = self._extract_text_from_html(html, extract_main)
                     
-                elif "text/plain" in content_type:
-                    full_text = response.text
-                    artifact_path = await self._save_web_retrieval_artifact(url, full_text, context, suffix=".txt")
-                    preview = full_text[:LLM_PREVIEW_LIMIT]
-                    result = {"type": "text", "url": str(response.url), "content_type": "text"}
-                    if len(full_text) > LLM_PREVIEW_LIMIT:
-                        ref = artifact_path or "retrievedFromWeb/"
-                        preview += _build_truncation_notice(len(full_text), ref)
-                    result["content"] = preview
-                    result["content_length"] = len(full_text)
-                    if artifact_path:
-                        result["artifact_path"] = artifact_path
-                    return result
+                    if extract_main and len(text_content.strip()) < 50:
+                        text_content = self._extract_text_from_html(html, False)
                     
-                elif "text/html" not in content_type and "application/xhtml" not in content_type:
-                    return {
-                        "type": "unknown",
-                        "url": str(response.url),
-                        "content_type": content_type,
-                        "error": "Content type not supported for text extraction",
-                    }
+                    html_len = len(html)
+                    text_len = len(text_content.strip())
+                    needs_js = (text_len < 200 and html_len > 5000) or (text_len < 500 and html_len > 50000)
+                    if not needs_js and html_len > 2000:
+                        spa_indicators = ('id="__next"', 'id="app"', 'id="root"', 'ng-app',
+                                        'data-reactroot', 'nuxt', '__nuxt', '__NEXT_DATA__')
+                        if any(ind in html for ind in spa_indicators) and text_len < 1000:
+                            needs_js = True
+                    
+                    if needs_js:
+                        _fetch_logger.info(f"[FETCH] Sparse content ({text_len} chars), trying Playwright for {url}")
+                        rendered_html = await self._render_with_playwright(url)
+                        if rendered_html:
+                            rendered_text = self._extract_text_from_html(rendered_html, True)
+                            if len(rendered_text.strip()) < 50:
+                                rendered_text = self._extract_text_from_html(rendered_html, False)
+                            if len(rendered_text.strip()) > text_len:
+                                text_content = rendered_text
+                    
+                    full_text = text_content
+                    title = self._extract_title(html)
+                else:
+                    full_text = response.text
+                    title = ""
                 
-                html = response.text
-                
-                # NC-0.8.0.13: Smart extraction — try main content first, fallback to full page,
-                # and only invoke Playwright once if needed
-                text_content = self._extract_text_from_html(html, extract_main)
-                
-                # If main extraction is empty, try full page from static HTML
-                if extract_main and len(text_content.strip()) < 50:
-                    text_content = self._extract_text_from_html(html, False)
-                
-                # If still sparse, try Playwright (JS-rendered SPA)
-                html_len = len(html)
-                text_len = len(text_content.strip())
-                needs_js = (text_len < 200 and html_len > 5000) or (text_len < 500 and html_len > 50000)
-                if not needs_js and html_len > 2000:
-                    spa_indicators = ('id="__next"', 'id="app"', 'id="root"', 'ng-app',
-                                    'data-reactroot', 'nuxt', '__nuxt', '__NEXT_DATA__')
-                    if any(ind in html for ind in spa_indicators) and text_len < 1000:
-                        needs_js = True
-                
-                if needs_js:
-                    import logging as _flog
-                    _flog.getLogger(__name__).info(f"[FETCH] Sparse content ({text_len} chars), trying Playwright for {url}")
-                    rendered_html = await self._render_with_playwright(url)
-                    if rendered_html:
-                        # Try main content from rendered HTML first
-                        rendered_text = self._extract_text_from_html(rendered_html, True)
-                        if len(rendered_text.strip()) < 50:
-                            rendered_text = self._extract_text_from_html(rendered_html, False)
-                        if len(rendered_text.strip()) > text_len:
-                            text_content = rendered_text
-                
-                full_text = text_content
-                
-                # NC-0.8.0.13: Always save to retrievedFromWeb/
-                artifact_path = await self._save_web_retrieval_artifact(url, full_text, context, suffix=".txt")
+                # Save it
+                artifact_path = await self._save_web_retrieval_artifact(url, full_text, context, suffix=_suffix)
                 
                 preview = full_text[:LLM_PREVIEW_LIMIT]
                 if len(full_text) > LLM_PREVIEW_LIMIT:
@@ -1881,12 +1916,13 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
                     preview += _build_truncation_notice(len(full_text), ref)
                 
                 result = {
-                    "type": "webpage",
+                    "type": _type,
                     "url": str(response.url),
-                    "title": self._extract_title(html),
-                    "content_type": "html",
+                    "title": title if _type == "webpage" else "",
+                    "content_type": _type,
                     "content": preview,
                     "content_length": len(full_text),
+                    "full_content": full_text,
                 }
                 if artifact_path:
                     result["artifact_path"] = artifact_path
@@ -2934,8 +2970,7 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
                 import time
                 filepath = f"retrievedFromWeb/{stem}_{int(time.time())}{suffix}"
             
-            header = f"# Retrieved from: {url}\n# Date: {__import__('datetime').datetime.utcnow().isoformat()}Z\n\n"
-            full_content = header + content
+            full_content = content
             
             new_file = UploadedFile(
                 chat_id=chat_id,
@@ -2951,6 +2986,10 @@ with open({repr(os.path.join(sandbox_dir, f"_result_{exec_id}.json"))}, "w") as 
             )
             db.add(new_file)
             await db.flush()
+            
+            # Also store in session memory for immediate access by view_file_lines
+            store_session_file(chat_id, filepath, full_content)
+            
             logger.info(f"[WEB_RETRIEVAL] Saved artifact: {filepath} ({len(full_content)} chars)")
             return filepath
         except Exception as e:

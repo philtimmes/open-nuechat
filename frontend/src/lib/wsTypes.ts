@@ -265,7 +265,7 @@ export function parseServerEvent(data: string): ServerMessage | null {
     // Validate known types
     const knownTypes = [
       'stream_start', 'stream_chunk', 'stream_end', 'stream_error',
-      'tool_call', 'tool_result', 'image_generation', 'message_saved',
+      'tool_call', 'tool_result', 'tool_generating', 'image_generation', 'message_saved',
       'pong', 'error', 'subscribed', 'unsubscribed'
     ];
     

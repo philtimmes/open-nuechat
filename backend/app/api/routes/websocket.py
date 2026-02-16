@@ -1780,6 +1780,7 @@ The following is relevant information from your previous conversations:
                 logger.debug(f"[LLM_CALL] Content head: {content[:100]}")
                 logger.debug(f"[LLM_CALL] Content tail: {content[-100:]}")
             
+            _accumulated_content = ""  # Track streamed content for partial save on cancel
             async for event in llm.stream_message(
                 db=db,
                 user=user,
@@ -1797,6 +1798,29 @@ The following is relevant information from your previous conversations:
                 # Check if stop was requested (backup check)
                 if streaming_handler.is_stop_requested():
                     logger.debug(f"Stopping generation for chat {chat_id}")
+                    # Save partial content to DB so the message persists in the tree
+                    _msg_id = streaming_handler._current_message_id
+                    if _msg_id and _accumulated_content:
+                        try:
+                            await db.execute(
+                                update(Message)
+                                .where(Message.id == _msg_id)
+                                .values(content=_accumulated_content, is_streaming=False)
+                            )
+                            await db.commit()
+                            logger.info(f"[CANCEL] Saved partial content ({len(_accumulated_content)} chars) for message {_msg_id[:8]}")
+                        except Exception as save_err:
+                            logger.warning(f"[CANCEL] Failed to save partial content: {save_err}")
+                    elif _msg_id:
+                        try:
+                            await db.execute(
+                                update(Message)
+                                .where(Message.id == _msg_id)
+                                .values(is_streaming=False)
+                            )
+                            await db.commit()
+                        except Exception:
+                            pass
                     # Send stream_stopped with partial content
                     await ws_manager.send_to_connection(connection, {
                         "type": "stream_stopped",
@@ -1815,9 +1839,11 @@ The following is relevant information from your previous conversations:
                 
                 if event_type == "message_start":
                     await streaming_handler.start_stream(event["message_id"], chat_id)
+                    _accumulated_content = ""  # Track content for partial save on cancel
                 
                 elif event_type == "text_delta":
                     await streaming_handler.send_chunk(event["text"])
+                    _accumulated_content += event["text"]
                 
                 elif event_type == "message_end":
                     logger.debug(f"LLM stream complete: input={event.get('input_tokens', 0)}, output={event.get('output_tokens', 0)}")
@@ -1936,6 +1962,19 @@ The following is relevant information from your previous conversations:
                         },
                     })
                 
+                # NC-0.8.0.21: Tool generating — LLM has started producing a tool call
+                elif event_type == "tool_generating":
+                    await ws_manager.send_to_connection(connection, {
+                        "type": "tool_generating",
+                        "payload": {
+                            "chat_id": chat_id,
+                            "message_id": streaming_handler._current_message_id,
+                            "tool_name": event.get("tool_name", ""),
+                            "tool_index": event.get("tool_index", 0),
+                            "round": event.get("round", 0),
+                        },
+                    })
+                
                 # NC-0.8.0.12: Forward tool_call events to frontend
                 # For file-modifying tools, include updated file content so browser stays in sync
                 elif event_type == "tool_call":
@@ -2021,6 +2060,29 @@ The following is relevant information from your previous conversations:
                     
         except asyncio.CancelledError:
             logger.debug(f"Streaming task cancelled for chat {chat_id}")
+            # Save partial content to DB so the message persists in the tree
+            _msg_id = streaming_handler._current_message_id
+            if _msg_id and _accumulated_content:
+                try:
+                    await db.execute(
+                        update(Message)
+                        .where(Message.id == _msg_id)
+                        .values(content=_accumulated_content, is_streaming=False)
+                    )
+                    await db.commit()
+                    logger.info(f"[CANCEL] Saved partial content ({len(_accumulated_content)} chars) for message {_msg_id[:8]}")
+                except Exception as save_err:
+                    logger.warning(f"[CANCEL] Failed to save partial content: {save_err}")
+            elif _msg_id:
+                try:
+                    await db.execute(
+                        update(Message)
+                        .where(Message.id == _msg_id)
+                        .values(is_streaming=False)
+                    )
+                    await db.commit()
+                except Exception:
+                    pass
             await ws_manager.send_to_connection(connection, {
                 "type": "stream_stopped",
                 "payload": {

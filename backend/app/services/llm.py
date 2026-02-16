@@ -1086,20 +1086,26 @@ class LLMService:
                                 if hasattr(tc, 'function'):
                                     if tc.function.name:
                                         stc["name"] = tc.function.name
+                                        # Emit tool_generating as soon as we know the tool name
+                                        if not stc.get("_gen_emitted"):
+                                            stc["_gen_emitted"] = True
+                                            yield {
+                                                "type": "tool_generating",
+                                                "tool_name": stc["name"],
+                                                "tool_index": tc_index,
+                                                "round": tool_round,
+                                            }
                                     if tc.function.arguments:
                                         stc["arguments"] += tc.function.arguments
                                         
-                                        # NC-0.8.0.13: Stream tool content for long-running tool calls
-                                        # so user sees content being generated in real-time
-                                        _STREAMABLE_TOOLS = {"create_file", "search_replace", "sed_files"}
-                                        if stc["name"] in _STREAMABLE_TOOLS:
-                                            yield {
-                                                "type": "tool_content_delta",
-                                                "tool_name": stc["name"],
-                                                "tool_index": tc_index,
-                                                "delta": tc.function.arguments,
-                                                "accumulated_length": len(stc["arguments"]),
-                                            }
+                                        # Stream tool args for ALL tools so user sees progress
+                                        yield {
+                                            "type": "tool_content_delta",
+                                            "tool_name": stc["name"],
+                                            "tool_index": tc_index,
+                                            "delta": tc.function.arguments,
+                                            "accumulated_length": len(stc["arguments"]),
+                                        }
                         
                         if hasattr(chunk, 'usage') and chunk.usage:
                             total_input_tokens = chunk.usage.prompt_tokens or 0
@@ -1272,7 +1278,7 @@ class LLMService:
                                 # NC-0.8.0.11: Handle direct_to_chat results (images and text)
                                 # Send to frontend BEFORE stripping for LLM
                                 if isinstance(result, dict) and result.get("direct_to_chat"):
-                                    # Send image directly to chat
+                                    # Send single image directly to chat (explicit output_image mode)
                                     if result.get("image_base64"):
                                         filename = result.get("filename", "output.png")
                                         yield {
@@ -1282,7 +1288,6 @@ class LLMService:
                                             "mime_type": result.get("image_mime_type", "image/png"),
                                             "filename": filename,
                                         }
-                                        # NC-0.8.0.11: Collect artifact for persistence
                                         generated_artifacts.append({
                                             "id": f"img_{len(generated_artifacts)}",
                                             "type": "image",
@@ -1292,6 +1297,28 @@ class LLMService:
                                             "source": "generated",
                                             "created_at": datetime.now(timezone.utc).isoformat(),
                                         })
+                                    
+                                    # NC-0.8.0.21: Send any images found in sandbox after execution
+                                    for gen_img in result.get("generated_images", []):
+                                        _img_fn = gen_img.get("filename", "output.png")
+                                        _img_mime = gen_img.get("mime", "image/png")
+                                        yield {
+                                            "type": "direct_image",
+                                            "tool_name": tool_name,
+                                            "image_base64": gen_img["base64"],
+                                            "mime_type": _img_mime,
+                                            "filename": _img_fn,
+                                        }
+                                        generated_artifacts.append({
+                                            "id": f"img_{len(generated_artifacts)}",
+                                            "type": "image",
+                                            "title": _img_fn,
+                                            "filename": _img_fn,
+                                            "content": f"data:{_img_mime};base64,{gen_img['base64']}",
+                                            "source": "generated",
+                                            "created_at": datetime.now(timezone.utc).isoformat(),
+                                        })
+                                    
                                     # Send text directly to chat
                                     if result.get("direct_text"):
                                         filename = result.get("filename", "output.txt")
@@ -1322,12 +1349,41 @@ class LLMService:
                                         except Exception:
                                             pass
                                     
+                                    # NC-0.8.0.21: Save new text files from sandbox as artifacts
+                                    for gen_file in result.get("generated_files", []):
+                                        _gf_name = gen_file.get("filename", "output.txt")
+                                        _gf_type = "document"
+                                        if _gf_name.endswith(".csv"): _gf_type = "csv"
+                                        elif _gf_name.endswith(".json"): _gf_type = "json"
+                                        elif _gf_name.endswith(".md"): _gf_type = "markdown"
+                                        elif _gf_name.endswith(".html"): _gf_type = "html"
+                                        # Get content from session files (already stored by registry)
+                                        try:
+                                            from app.tools.registry import get_session_file
+                                            _gf_content = get_session_file(str(chat.id), _gf_name) or ""
+                                        except Exception:
+                                            _gf_content = ""
+                                        generated_artifacts.append({
+                                            "id": f"file_{len(generated_artifacts)}",
+                                            "type": _gf_type,
+                                            "title": _gf_name,
+                                            "filename": _gf_name,
+                                            "content": _gf_content,
+                                            "source": "generated",
+                                            "created_at": datetime.now(timezone.utc).isoformat(),
+                                        })
+                                    
                                     # Strip large data from result before sending to LLM
                                     result_for_llm = {k: v for k, v in result.items() 
-                                                      if k not in ("image_base64", "direct_text")}
+                                                      if k not in ("image_base64", "direct_text", "full_content", "generated_images", "generated_files")}
                                     result_str = json.dumps(result_for_llm)
                                 else:
-                                    result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                                    # Strip large content fields before sending to LLM
+                                    if isinstance(result, dict) and "full_content" in result:
+                                        result_for_llm = {k: v for k, v in result.items() if k != "full_content"}
+                                        result_str = json.dumps(result_for_llm)
+                                    else:
+                                        result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
                                 
                                 # Truncate very long results
                                 # Document tools get more space since their content IS the value
@@ -1356,13 +1412,11 @@ class LLMService:
                                 
                                 # NC-0.8.0.13: Notify frontend about web retrieval artifacts
                                 if isinstance(result, dict) and result.get("artifact_path"):
-                                    _art_path = result["artifact_path"]
-                                    _art_content = result.get("content", "")
                                     yield {
                                         "type": "web_retrieval_artifact",
-                                        "filepath": _art_path,
+                                        "filepath": result["artifact_path"],
                                         "url": result.get("url", ""),
-                                        "content_length": result.get("content_length", len(_art_content)),
+                                        "content_length": result.get("content_length", 0),
                                     }
                                 
                                 # NC-0.8.0.12: Emit tool_end for UI timeline
