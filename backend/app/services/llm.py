@@ -790,12 +790,6 @@ class LLMService:
             tool_groups = {}  # NC-0.8.0.13: Tool groups indexed by group ID
             current_tool_group = -1  # NC-0.8.0.13: Current active tool group (-1 = none)
             
-            # NC-0.8.0.27: Track message segments in order for proper DB persistence
-            # Each segment is either {"type": "text", "content": "..."} or {"type": "tool_call", "index": N}
-            # where index refers to position in tool_call_history
-            message_segments = []
-            _current_text_segment = ""  # Accumulates text between tool calls
-            
             # Automatic search disabled - use filter chains for web search orchestration
             # search_tools = [t for t in (tools or []) if 'search' in t.get('name', '').lower() or 'fetch' in t.get('name', '').lower()]
             # has_search = bool(search_tools) and tool_executor is not None
@@ -838,23 +832,60 @@ class LLMService:
                             
                             result = await tool_executor(tool_name, tool_args)
                             
-                            # Truncate result if too long
                             result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
-                            if len(result_str) > 15000:
-                                result_str = result_str[:15000] + "... [truncated]"
                             
-                            tool_results.append({
-                                "tool": tool_name,
-                                "query": search_query,
-                                "result": result_str,
-                            })
-                            # NC-0.8.0.8: Also track in tool_call_history
-                            tool_call_history.append({
-                                "tool": tool_name,
-                                "args": {"query": search_query},
-                                "result": result_str[:5000] if len(result_str) > 5000 else result_str,
-                                "success": True,
-                            })
+                            # NC-0.8.0.27: Save large results to file instead of truncating
+                            _context_tokens_ns = effective_max_input_tokens or 200000
+                            _max_result_chars_ns = _context_tokens_ns
+                            
+                            if len(result_str) > _max_result_chars_ns:
+                                from datetime import datetime as _dt_ns
+                                _ts_ns = _dt_ns.now().strftime("%Y%m%d_%H%M%S")
+                                _safe_ns = tool_name.replace("/", "_")[:40]
+                                _fname_ns = f"toolResults/{_safe_ns}_{_ts_ns}.txt"
+                                
+                                from app.tools.registry import get_session_sandbox, store_session_file
+                                _sandbox_ns = get_session_sandbox(str(chat.id))
+                                _full_path_ns = os.path.join(_sandbox_ns, _fname_ns)
+                                os.makedirs(os.path.dirname(_full_path_ns), exist_ok=True)
+                                with open(_full_path_ns, 'w', encoding='utf-8') as _f:
+                                    _f.write(result_str)
+                                store_session_file(str(chat.id), _fname_ns, result_str)
+                                
+                                _preview_ns = min(len(result_str), 2000)
+                                result_str_for_llm = (
+                                    result_str[:_preview_ns] +
+                                    f"\n\n[Full result ({len(result_str):,} chars) saved to: {_fname_ns}]"
+                                    f"\n[Use view_file_lines to read the full content]"
+                                )
+                                logger.info(f"[TOOL_RESULT_FILE] {tool_name} result saved to {_fname_ns} ({len(result_str):,} chars)")
+                                
+                                tool_results.append({
+                                    "tool": tool_name,
+                                    "query": search_query,
+                                    "result": result_str_for_llm,
+                                })
+                                tool_call_history.append({
+                                    "tool": tool_name,
+                                    "args": {"query": search_query},
+                                    "result": result_str[:5000],
+                                    "success": True,
+                                    "_result_str": result_str,
+                                    "_artifact_file": _fname_ns,
+                                })
+                            else:
+                                tool_results.append({
+                                    "tool": tool_name,
+                                    "query": search_query,
+                                    "result": result_str,
+                                })
+                                tool_call_history.append({
+                                    "tool": tool_name,
+                                    "args": {"query": search_query},
+                                    "result": result_str[:5000] if len(result_str) > 5000 else result_str,
+                                    "success": True,
+                                    "_result_str": result_str,
+                                })
                             logger.debug(f"Tool result length: {len(result_str)}")
                             
                         except Exception as e:
@@ -1062,7 +1093,6 @@ class LLMService:
                                 first_token_time = time.time()
                             
                             filtered_content += delta.content
-                            _current_text_segment += delta.content
                             
                             # Log first 500 chars of response
                             if len(first_content) < 500:
@@ -1419,41 +1449,66 @@ class LLMService:
                                                 "created_at": datetime.now(timezone.utc).isoformat(),
                                             })
                                     
-                                        # Strip large data from result before sending to LLM
+                                        # Strip binary data from result before sending to LLM (not text history)
                                         result_for_llm = {k: v for k, v in result.items() 
-                                                          if k not in ("image_base64", "direct_text", "full_content", "generated_images", "generated_files")}
+                                                          if k not in ("image_base64", "generated_images", "generated_files")}
                                         result_str = json.dumps(result_for_llm)
                                     else:
-                                        # Strip large content fields before sending to LLM
-                                        if isinstance(result, dict) and "full_content" in result:
-                                            result_for_llm = {k: v for k, v in result.items() if k != "full_content"}
-                                            result_str = json.dumps(result_for_llm)
-                                        else:
-                                            result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                                        result_str = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
                                 
-                                    # Truncate very long results
-                                    # Document tools get more space since their content IS the value
-                                    LARGE_RESULT_TOOLS = {"fetch_document", "view_file_lines", "request_file", "fetch_webpage", "web_extract", "fetch_urls"}
-                                    max_result_len = 80000 if tool_name in LARGE_RESULT_TOOLS else 15000
-                                    if len(result_str) > max_result_len:
-                                        result_str = result_str[:max_result_len] + f"\n... [truncated at {max_result_len} chars, {len(result_str)} total]"
-                                
-                                    # NC-0.8.0.8: Track tool call for history
-                                    tool_call_history.append({
-                                        "tool": tool_name,
-                                        "args": tool_args,
-                                        "result_preview": result_str[:5000] if len(result_str) > 5000 else result_str,
-                                        "success": True,
-                                        "_dedup_key": dedup_key,
-                                        "_result_str": result_str,
-                                    })
+                                    # NC-0.8.0.27: Save large results to file instead of truncating
+                                    # If result exceeds 25% of context window, save full result as artifact
+                                    # and give LLM a summary + file reference
+                                    _context_tokens = effective_max_input_tokens or 200000  # fallback 200K
+                                    _max_result_chars = _context_tokens  # 25% of context in chars (~4 chars/token * 0.25)
                                     
-                                    # NC-0.8.0.27: Record segments in order
-                                    if _current_text_segment.strip():
-                                        message_segments.append({"type": "text", "content": _current_text_segment})
-                                        _current_text_segment = ""
-                                    message_segments.append({"type": "tool_call", "index": len(tool_call_history) - 1})
-                                
+                                    if len(result_str) > _max_result_chars:
+                                        # Save full result to toolResults/ on disk
+                                        from datetime import datetime as _dt_file
+                                        _ts = _dt_file.now().strftime("%Y%m%d_%H%M%S")
+                                        _safe_name = tool_name.replace("/", "_")[:40]
+                                        _filename = f"toolResults/{_safe_name}_{_ts}.txt"
+                                        
+                                        from app.tools.registry import get_session_sandbox, store_session_file
+                                        _sandbox = get_session_sandbox(str(chat.id))
+                                        _full_path = os.path.join(_sandbox, _filename)
+                                        os.makedirs(os.path.dirname(_full_path), exist_ok=True)
+                                        with open(_full_path, 'w', encoding='utf-8') as _f:
+                                            _f.write(result_str)
+                                        # Also store in memory for same-session access
+                                        store_session_file(str(chat.id), _filename, result_str)
+                                        
+                                        # Keep first portion as preview + file reference for LLM
+                                        _preview_len = min(len(result_str), 2000)
+                                        result_str_for_llm = (
+                                            result_str[:_preview_len] +
+                                            f"\n\n[Full result ({len(result_str):,} chars) saved to: {_filename}]"
+                                            f"\n[Use view_file_lines to read the full content]"
+                                        )
+                                        logger.info(f"[TOOL_RESULT_FILE] {tool_name} result too large ({len(result_str):,} chars > {_max_result_chars:,} limit), saved to {_filename}")
+                                        
+                                        # tool_call_history gets the full result for DB storage
+                                        tool_call_history.append({
+                                            "tool": tool_name,
+                                            "args": tool_args,
+                                            "result_preview": result_str[:5000] if len(result_str) > 5000 else result_str,
+                                            "success": True,
+                                            "_dedup_key": dedup_key,
+                                            "_result_str": result_str,
+                                            "_artifact_file": _filename,
+                                        })
+                                        result_str = result_str_for_llm
+                                    else:
+                                        # NC-0.8.0.8: Track tool call for history
+                                        tool_call_history.append({
+                                            "tool": tool_name,
+                                            "args": tool_args,
+                                            "result_preview": result_str[:5000] if len(result_str) > 5000 else result_str,
+                                            "success": True,
+                                            "_dedup_key": dedup_key,
+                                            "_result_str": result_str,
+                                        })
+                                    
                                     # Yield tool call event for frontend
                                     yield {
                                         "type": "tool_call",
@@ -1571,12 +1626,6 @@ class LLMService:
                                         "error": str(e),
                                         "success": False,
                                     })
-                                    
-                                    # NC-0.8.0.27: Record segments in order
-                                    if _current_text_segment.strip():
-                                        message_segments.append({"type": "text", "content": _current_text_segment})
-                                        _current_text_segment = ""
-                                    message_segments.append({"type": "tool_call", "index": len(tool_call_history) - 1})
                                 
                                     # Use validated tool_args to ensure valid JSON
                                     validated_args = json.dumps(tool_args)
@@ -2001,249 +2050,120 @@ class LLMService:
             # Log stream completion summary
             logger.info(f"[LLM_COMPLETE] chunks={chunk_count}, response_len={len(filtered_content)}, input_tokens={total_input_tokens}, output_tokens={total_output_tokens}, tool_calls={len(tool_call_history)}")
             
-            # NC-0.8.0.9: Tool call results are handled through proper tool message flow
+            # Save assistant content and tool call history — unaltered
             content_to_save = filtered_content
             
-            # NC-0.8.0.27: Save messages as ordered segments — text, tool_call, tool_result, text, ...
-            # This ensures the DB, UI, and LLM history all see the same ordered sequence.
-            if tool_call_history and message_segments:
-                # Flush any remaining text after the last tool call
-                if _current_text_segment.strip():
-                    message_segments.append({"type": "text", "content": _current_text_segment})
-                
+            # Persist tool calls in DB so future turns see them in history
+            if tool_call_history:
                 try:
-                    # Generate stable tool_call IDs
-                    all_tc_ids = []
+                    all_tool_calls = []
                     for tc_entry in tool_call_history:
-                        tc_id = f"call_{hash(json.dumps(tc_entry['args'], sort_keys=True)) & 0xFFFFFFFF}_{len(all_tc_ids)}"
-                        all_tc_ids.append(tc_id)
+                        tc_id = f"call_{hash(json.dumps(tc_entry['args'], sort_keys=True)) & 0xFFFFFFFF}_{len(all_tool_calls)}"
+                        all_tool_calls.append({
+                            "id": tc_id,
+                            "name": tc_entry["tool"],
+                            "arguments": tc_entry["args"],
+                        })
                     
-                    # The first assistant_message (already created) gets the first text segment
-                    first_text = ""
-                    first_seg_idx = 0
-                    if message_segments and message_segments[0]["type"] == "text":
-                        first_text = message_segments[0]["content"].strip()
-                        first_seg_idx = 1
-                    
-                    # Update the initial assistant message with first text segment (no tool_calls on it)
                     await db.execute(
                         update(Message)
                         .where(Message.id == str(assistant_message.id))
-                        .values(
-                            content=first_text,
-                            input_tokens=total_input_tokens,
-                            output_tokens=total_output_tokens,
-                            is_streaming=False,
-                        )
+                        .values(tool_calls=all_tool_calls)
                     )
                     
-                    # Now create subsequent messages in order
-                    last_msg_id = str(assistant_message.id)
-                    for seg in message_segments[first_seg_idx:]:
-                        if seg["type"] == "tool_call":
-                            tc_idx = seg["index"]
-                            tc_entry = tool_call_history[tc_idx]
-                            tc_id = all_tc_ids[tc_idx]
-                            
-                            # Assistant message with tool_call
-                            tc_msg = Message(
-                                chat_id=chat.id,
-                                role=MessageRole.ASSISTANT,
-                                content=None,
-                                content_type=ContentType.TOOL_CALL,
-                                tool_calls=[{
-                                    "id": tc_id,
-                                    "name": tc_entry["tool"],
-                                    "arguments": tc_entry["args"],
-                                }],
-                                parent_id=last_msg_id,
-                                model=effective_model,
-                            )
-                            db.add(tc_msg)
-                            await db.flush()
-                            last_msg_id = str(tc_msg.id)
-                            
-                            # Tool result message
-                            result_content = tc_entry.get("_result_str", tc_entry.get("result_preview", ""))
-                            if tc_entry.get("error"):
-                                result_content = f"Error: {tc_entry['error']}"
-                            
-                            tr_msg = Message(
-                                chat_id=chat.id,
-                                role=MessageRole.ASSISTANT,
-                                content=result_content[:50000],
-                                content_type=ContentType.TOOL_RESULT,
-                                tool_call_id=tc_id,
-                                parent_id=last_msg_id,
-                            )
-                            db.add(tr_msg)
-                            await db.flush()
-                            last_msg_id = str(tr_msg.id)
-                            
-                        elif seg["type"] == "text" and seg["content"].strip():
-                            # Continuation text after tool calls
-                            text_msg = Message(
-                                chat_id=chat.id,
-                                role=MessageRole.ASSISTANT,
-                                content=seg["content"].strip(),
-                                content_type=ContentType.TEXT,
-                                parent_id=last_msg_id,
-                                model=effective_model,
-                            )
-                            db.add(text_msg)
-                            await db.flush()
-                            last_msg_id = str(text_msg.id)
-                    
-                    # Add artifacts to the last message if any
-                    if generated_artifacts:
-                        await db.execute(
-                            update(Message)
-                            .where(Message.id == last_msg_id)
-                            .values(artifacts=generated_artifacts)
+                    for i, tc_entry in enumerate(tool_call_history):
+                        tc_id = all_tool_calls[i]["id"]
+                        result_content = tc_entry.get("_result_str", tc_entry.get("result_preview", ""))
+                        if tc_entry.get("error"):
+                            result_content = f"Error: {tc_entry['error']}"
+                        
+                        tool_result_msg = Message(
+                            chat_id=chat.id,
+                            role=MessageRole.ASSISTANT,
+                            content=result_content[:50000],
+                            content_type=ContentType.TOOL_RESULT,
+                            tool_call_id=tc_id,
+                            parent_id=str(assistant_message.id),
                         )
+                        db.add(tool_result_msg)
                     
-                    # Save tool_groups metadata on the initial message for backward compat
-                    if tool_groups or tool_call_history:
-                        _meta = {}
-                        if tool_groups:
-                            _meta["tool_groups"] = {str(k): v for k, v in tool_groups.items()}
-                        if tool_call_history:
-                            _meta["tool_call_log"] = [
-                                {"tool": tc.get("tool"), "args": tc.get("args"), "success": tc.get("success", False)}
-                                for tc in tool_call_history
-                            ]
-                        await db.execute(
-                            update(Message)
-                            .where(Message.id == str(assistant_message.id))
-                            .values(message_metadata=json.dumps(_meta))
-                        )
-                    
-                    await db.commit()
-                    logger.info(f"[LLM_TOOLS] Persisted {len(message_segments)} ordered segments ({len(tool_call_history)} tool calls) to DB")
-                    
-                    # Update chat stats
-                    await db.execute(
-                        update(Chat)
-                        .where(Chat.id == str(chat.id))
-                        .values(
-                            total_input_tokens=Chat.total_input_tokens + total_input_tokens,
-                            total_output_tokens=Chat.total_output_tokens + total_output_tokens,
-                            updated_at=datetime.now(timezone.utc),
-                        )
-                    )
-                    await self._track_usage(
-                        db=db, user=user, chat=chat, model=effective_model,
-                        input_tokens=total_input_tokens, output_tokens=total_output_tokens,
-                        message_id=str(assistant_message.id),
-                    )
-                    await db.commit()
-                    
-                except Exception as seg_save_err:
-                    logger.error(f"[LLM_TOOLS] Failed to persist segments: {seg_save_err}", exc_info=True)
-                    # Fallback: save everything as one message
+                    await db.flush()
+                    logger.info(f"[LLM_TOOLS] Persisted {len(tool_call_history)} tool calls + results to DB")
+                except Exception as tc_save_err:
+                    logger.warning(f"[LLM_TOOLS] Failed to persist tool calls to DB: {tc_save_err}")
+            
+            message_id = str(assistant_message.id)
+            chat_id = str(chat.id)
+            
+            try:
+                update_values = {
+                    "content": content_to_save,
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "is_streaming": False,
+                }
+                
+                if generated_artifacts:
+                    logger.info(f"[LLM_ARTIFACTS] Saving {len(generated_artifacts)} generated artifacts to message")
+                    update_values["artifacts"] = generated_artifacts
+                
+                if tool_groups or tool_call_history:
+                    _meta = {}
                     try:
-                        await db.rollback()
-                        content_to_save = filtered_content
-                        if '<!--tools:' in content_to_save:
-                            import re as _re_fb
-                            content_to_save = _re_fb.sub(r'\n?<!--tools:\d+-->\n?', '\n', content_to_save).strip()
-                        await db.execute(
-                            update(Message)
-                            .where(Message.id == str(assistant_message.id))
-                            .values(content=content_to_save, is_streaming=False)
+                        from sqlalchemy import text as _sa_text2
+                        _meta_result = await db.execute(
+                            _sa_text2("SELECT message_metadata FROM messages WHERE id = :id"),
+                            {"id": message_id}
                         )
-                        await db.commit()
+                        _meta_row = _meta_result.fetchone()
+                        if _meta_row and _meta_row[0]:
+                            _meta = json.loads(_meta_row[0]) if isinstance(_meta_row[0], str) else (_meta_row[0] or {})
                     except Exception:
                         pass
-            else:
-                # No tool calls — simple single-message save
-                # Use direct SQL update instead of ORM to avoid stale object issues
-                message_id = str(assistant_message.id)
-                chat_id = str(chat.id)
-            
-                try:
-                    # NC-0.8.0.11: Build update values including artifacts if any
-                    update_values = {
-                        "content": content_to_save,
-                        "input_tokens": total_input_tokens,
-                        "output_tokens": total_output_tokens,
-                        "is_streaming": False,
-                    }
-                
-                    # Add generated artifacts if any
-                    if generated_artifacts:
-                        logger.info(f"[LLM_ARTIFACTS] Saving {len(generated_artifacts)} generated artifacts to message")
-                        update_values["artifacts"] = generated_artifacts
-                
-                    # NC-0.8.0.13: Save tool_groups and tool_call_log in message_metadata
-                    if tool_groups or tool_call_history:
-                        _meta = {}
-                        # Try to read existing metadata
+                    if tool_groups:
+                        _meta["tool_groups"] = {str(k): v for k, v in tool_groups.items()}
+                    if tool_call_history:
                         try:
-                            from sqlalchemy import text as _sa_text2
-                            _meta_result = await db.execute(
-                                _sa_text2("SELECT message_metadata FROM messages WHERE id = :id"),
-                                {"id": message_id}
-                            )
-                            _meta_row = _meta_result.fetchone()
-                            if _meta_row and _meta_row[0]:
-                                _meta = json.loads(_meta_row[0]) if isinstance(_meta_row[0], str) else (_meta_row[0] or {})
+                            from app.services.settings_service import SettingsService
+                            _store_log = await SettingsService.get_bool(db, "store_tool_call_log")
                         except Exception:
-                            pass
-                        if tool_groups:
-                            _meta["tool_groups"] = {str(k): v for k, v in tool_groups.items()}
-                        # Save full tool call log if admin has enabled it
-                        if tool_call_history:
-                            try:
-                                from app.services.settings_service import SettingsService
-                                _store_log = await SettingsService.get_bool(db, "store_tool_call_log")
-                            except Exception:
-                                _store_log = False
-                            if _store_log:
-                                # Strip internal keys, keep tool/args/result/success
-                                _meta["tool_call_log"] = [
-                                    {
-                                        "tool": tc.get("tool"),
-                                        "args": tc.get("args"),
-                                        "result": tc.get("_result_str", tc.get("result_preview", "")),
-                                        "success": tc.get("success", True),
-                                    }
-                                    for tc in tool_call_history
-                                ]
-                        update_values["message_metadata"] = _meta
+                            _store_log = False
+                        if _store_log:
+                            _meta["tool_call_log"] = [
+                                {
+                                    "tool": tc.get("tool"),
+                                    "args": tc.get("args"),
+                                    "result": tc.get("_result_str", tc.get("result_preview", "")),
+                                    "success": tc.get("success", True),
+                                }
+                                for tc in tool_call_history
+                            ]
+                    update_values["message_metadata"] = _meta
                 
-                    # Update message with final content using direct SQL
-                    await db.execute(
-                        update(Message)
-                        .where(Message.id == message_id)
-                        .values(**update_values)
+                await db.execute(
+                    update(Message)
+                    .where(Message.id == message_id)
+                    .values(**update_values)
+                )
+                
+                await db.execute(
+                    update(Chat)
+                    .where(Chat.id == chat_id)
+                    .values(
+                        total_input_tokens=Chat.total_input_tokens + total_input_tokens,
+                        total_output_tokens=Chat.total_output_tokens + total_output_tokens,
+                        updated_at=datetime.now(timezone.utc),
                     )
+                )
                 
-                    # Update chat stats using direct SQL
-                    await db.execute(
-                        update(Chat)
-                        .where(Chat.id == chat_id)
-                        .values(
-                            total_input_tokens=Chat.total_input_tokens + total_input_tokens,
-                            total_output_tokens=Chat.total_output_tokens + total_output_tokens,
-                            updated_at=datetime.now(timezone.utc),
-                        )
-                    )
+                await self._track_usage(
+                    db=db, user=user, chat=chat, model=effective_model,
+                    input_tokens=total_input_tokens, output_tokens=total_output_tokens,
+                    message_id=message_id,
+                )
                 
-                    # Track usage (uses separate queries, should be safe)
-                    await self._track_usage(
-                        db=db,
-                        user=user,
-                        chat=chat,
-                        model=effective_model,
-                        input_tokens=total_input_tokens,
-                        output_tokens=total_output_tokens,
-                        message_id=message_id,
-                    )
-                
-                except Exception as update_err:
-                    logger.warning(f"Failed to update message (may have been deleted): {update_err}")
-                    # Don't rollback here - let the caller handle it
+            except Exception as update_err:
+                logger.warning(f"Failed to update message (may have been deleted): {update_err}")
             
             # Log LLM request metrics
             duration_ms = (time.time() - stream_start_time) * 1000
@@ -2715,26 +2635,9 @@ When you receive search results or external data in the conversation, follow the
                 })
             
             elif msg.role == MessageRole.ASSISTANT:
-                assistant_content = msg.content or ""
-                # Backward compat: strip legacy <!--tools:N--> markers from old messages
-                if '<!--tools:' in assistant_content:
-                    import re as _re_clean
-                    assistant_content = _re_clean.sub(r'\n?<!--tools:\d+-->\n?', '\n', assistant_content)
-                    assistant_content = _re_clean.sub(r'\n{3,}', '\n\n', assistant_content).strip()
-                # Strip fake tool call text from old LLM responses
-                if '[TOOL' in assistant_content:
-                    import re as _re_clean2
-                    assistant_content = _re_clean2.sub(
-                        r'\[TOOL[_ ]CALL[_ ]?(?:RESULT)?[\s\S]*?\]\s*', '', assistant_content, flags=_re_clean2.IGNORECASE
-                    ).strip()
-                
-                # Skip empty assistant messages (artifact of old marker-only content)
-                if not assistant_content and not msg.tool_calls:
-                    continue
-                
                 message_dict = {
                     "role": "assistant",
-                    "content": assistant_content if assistant_content else None,
+                    "content": msg.content or "",
                 }
                 
                 # Add tool calls if present

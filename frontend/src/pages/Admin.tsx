@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
+import { useBrandingStore } from '../stores/brandingStore';
 import api from '../lib/api';
 
 // Import admin tab components and types
@@ -51,6 +52,20 @@ export default function Admin() {
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags | null>(null);
   const [apiRateLimits, setApiRateLimits] = useState<APIRateLimits | null>(null);
   const [tiers, setTiers] = useState<TierConfig[]>([]);
+  
+  // NC-0.8.0.27: Branding settings
+  const [brandingSettings, setBrandingSettings] = useState<{
+    site_name: string;
+    tagline: string;
+    main_url: string;
+    tos_url: string;
+    user_agreement_url: string;
+    branding_image_url: string;
+    copyright: string;
+    favicon_url: string;
+  } | null>(null);
+  const [faviconFile, setFaviconFile] = useState<File | null>(null);
+  const [brandingImageFile, setBrandingImageFile] = useState<File | null>(null);
   
   // Dev settings (stored in localStorage)
   const [debugVoiceMode, setDebugVoiceMode] = useState(() => {
@@ -270,6 +285,13 @@ export default function Admin() {
     }
   }, [user, navigate]);
   
+  // NC-0.8.0.27: Set page title
+  const appName = useBrandingStore((state) => state.config?.app_name || 'Open-NueChat');
+  useEffect(() => {
+    document.title = `${appName} - Admin`;
+    return () => { document.title = appName; };
+  }, [appName]);
+  
   // Fetch initial data
   useEffect(() => {
     fetchData();
@@ -293,6 +315,35 @@ export default function Admin() {
   useEffect(() => {
     if (activeTab === 'categories') {
       fetchCategories();
+    }
+  }, [activeTab]);
+  
+  // NC-0.8.0.27: Fetch branding settings when that tab is activated
+  useEffect(() => {
+    if (activeTab === 'branding' && !brandingSettings) {
+      (async () => {
+        try {
+          const res = await api.get('/admin/settings/raw');
+          const rawList: Array<{key: string; value: string}> = res.data || [];
+          const raw: Record<string, string> = {};
+          for (const item of rawList) raw[item.key] = item.value || '';
+          setBrandingSettings({
+            site_name: raw.branding_site_name || '',
+            tagline: raw.branding_tagline || '',
+            main_url: raw.branding_main_url || '',
+            tos_url: raw.branding_tos_url || '',
+            user_agreement_url: raw.branding_user_agreement_url || '',
+            branding_image_url: raw.branding_image_url || '',
+            copyright: raw.branding_copyright || '',
+            favicon_url: raw.branding_favicon_url || '',
+          });
+        } catch (err) {
+          setBrandingSettings({
+            site_name: '', tagline: '', main_url: '', tos_url: '',
+            user_agreement_url: '', branding_image_url: '', copyright: '', favicon_url: '',
+          });
+        }
+      })();
     }
   }, [activeTab]);
   
@@ -702,6 +753,61 @@ export default function Admin() {
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to save settings');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  
+  // NC-0.8.0.27: Save branding settings
+  const saveBrandingSettings = async () => {
+    if (!brandingSettings) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      // Save each setting individually via the raw settings endpoint
+      const settingsToSave: Record<string, string> = {
+        branding_site_name: brandingSettings.site_name,
+        branding_tagline: brandingSettings.tagline,
+        branding_main_url: brandingSettings.main_url,
+        branding_tos_url: brandingSettings.tos_url,
+        branding_user_agreement_url: brandingSettings.user_agreement_url,
+        branding_image_url: brandingSettings.branding_image_url,
+        branding_copyright: brandingSettings.copyright,
+        branding_favicon_url: brandingSettings.favicon_url,
+      };
+      // Save each setting via individual PUT
+      for (const [key, value] of Object.entries(settingsToSave)) {
+        await api.put('/admin/setting', { key, value });
+      }
+      
+      // Upload favicon file if changed
+      if (faviconFile) {
+        const formData = new FormData();
+        formData.append('file', faviconFile);
+        await api.post('/admin/branding/favicon', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        setFaviconFile(null);
+      }
+      
+      // Upload branding image if changed
+      if (brandingImageFile) {
+        const formData = new FormData();
+        formData.append('file', brandingImageFile);
+        await api.post('/admin/branding/image', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        setBrandingImageFile(null);
+      }
+      
+      // Reload branding config for the entire app
+      const { useBrandingStore } = await import('../stores/brandingStore');
+      useBrandingStore.getState().loadConfig(true);
+      
+      setSuccess('Branding settings saved successfully');
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to save branding settings');
     } finally {
       setIsSaving(false);
     }
@@ -1671,6 +1777,8 @@ export default function Admin() {
     switch (type) {
       case 'system':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>;
+      case 'branding':
+        return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" /></svg>;
       case 'oauth':
         return <svg className={iconClass} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>;
       case 'llm':
@@ -1708,6 +1816,7 @@ export default function Admin() {
 
   const tabs: { id: TabId; label: string; iconType: string }[] = [
     { id: 'system', label: 'System', iconType: 'system' },
+    { id: 'branding', label: 'Branding', iconType: 'branding' },
     { id: 'oauth', label: 'OAuth', iconType: 'oauth' },
     { id: 'llm', label: 'LLM', iconType: 'llm' },
     { id: 'image_gen', label: 'Image Gen', iconType: 'image' },  // NC-0.8.0.7
@@ -2034,6 +2143,156 @@ export default function Admin() {
                   className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
                 >
                   {isSaving ? 'Saving...' : 'Save System Settings'}
+                </button>
+              </div>
+            )}
+            
+            {/* NC-0.8.0.27: BRANDING SETTINGS TAB */}
+            {activeTab === 'branding' && brandingSettings && (
+              <div className="space-y-6">
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">🎨 Site Branding</h2>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Site Name</label>
+                      <input
+                        type="text"
+                        value={brandingSettings.site_name}
+                        onChange={(e) => setBrandingSettings({ ...brandingSettings, site_name: e.target.value })}
+                        placeholder="Open-NueChat"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">Appears in page titles, sidebar, and browser tab</p>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Tagline</label>
+                      <input
+                        type="text"
+                        value={brandingSettings.tagline}
+                        onChange={(e) => setBrandingSettings({ ...brandingSettings, tagline: e.target.value })}
+                        placeholder="AI-Powered Chat Platform"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Main URL</label>
+                      <input
+                        type="text"
+                        value={brandingSettings.main_url}
+                        onChange={(e) => setBrandingSettings({ ...brandingSettings, main_url: e.target.value })}
+                        placeholder="https://chat.example.com"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Terms of Service URL</label>
+                      <input
+                        type="text"
+                        value={brandingSettings.tos_url}
+                        onChange={(e) => setBrandingSettings({ ...brandingSettings, tos_url: e.target.value })}
+                        placeholder="https://example.com/tos"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">User Agreement URL</label>
+                      <input
+                        type="text"
+                        value={brandingSettings.user_agreement_url}
+                        onChange={(e) => setBrandingSettings({ ...brandingSettings, user_agreement_url: e.target.value })}
+                        placeholder="https://example.com/user-agreement"
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Copyright</label>
+                      <input
+                        type="text"
+                        value={brandingSettings.copyright}
+                        onChange={(e) => setBrandingSettings({ ...brandingSettings, copyright: e.target.value })}
+                        placeholder="© 2026 Your Company. All rights reserved."
+                        className="w-full px-3 py-2 rounded-lg bg-[var(--color-background)] border border-[var(--color-border)] text-[var(--color-text)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+                      />
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-[var(--color-surface)] rounded-xl p-6 border border-[var(--color-border)]">
+                  <h2 className="text-lg font-semibold text-[var(--color-text)] mb-4">🖼 Visual Assets</h2>
+                  
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Favicon</label>
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded border border-[var(--color-border)] bg-[var(--color-background)] flex items-center justify-center overflow-hidden">
+                          {faviconFile ? (
+                            <img src={URL.createObjectURL(faviconFile)} className="w-8 h-8 object-contain" alt="new favicon" />
+                          ) : brandingSettings.favicon_url ? (
+                            <img src={brandingSettings.favicon_url} className="w-8 h-8 object-contain" alt="favicon" />
+                          ) : (
+                            <span className="text-xs text-[var(--color-text-secondary)]">None</span>
+                          )}
+                        </div>
+                        <label className="px-3 py-1.5 text-sm rounded-lg border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-hover)] cursor-pointer">
+                          Choose File
+                          <input
+                            type="file"
+                            accept="image/png,image/x-icon,image/ico"
+                            className="hidden"
+                            onChange={(e) => {
+                              const f = e.target.files?.[0];
+                              if (f) setFaviconFile(f);
+                            }}
+                          />
+                        </label>
+                        {faviconFile && <span className="text-xs text-[var(--color-success)]">{faviconFile.name}</span>}
+                      </div>
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">PNG recommended, saved to /app/data/favicon.png</p>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm text-[var(--color-text-secondary)] mb-1">Branding Image</label>
+                      <div className="flex items-center gap-3">
+                        <div className="w-24 h-12 rounded border border-[var(--color-border)] bg-[var(--color-background)] flex items-center justify-center overflow-hidden">
+                          {brandingImageFile ? (
+                            <img src={URL.createObjectURL(brandingImageFile)} className="max-w-full max-h-full object-contain" alt="new branding" />
+                          ) : brandingSettings.branding_image_url ? (
+                            <img src={brandingSettings.branding_image_url} className="max-w-full max-h-full object-contain" alt="branding" />
+                          ) : (
+                            <span className="text-xs text-[var(--color-text-secondary)]">None</span>
+                          )}
+                        </div>
+                        <label className="px-3 py-1.5 text-sm rounded-lg border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-hover)] cursor-pointer">
+                          Choose File
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const f = e.target.files?.[0];
+                              if (f) setBrandingImageFile(f);
+                            }}
+                          />
+                        </label>
+                        {brandingImageFile && <span className="text-xs text-[var(--color-success)]">{brandingImageFile.name}</span>}
+                      </div>
+                      <p className="text-xs text-[var(--color-text-secondary)] mt-1">Logo or banner image for the site</p>
+                    </div>
+                  </div>
+                </div>
+                
+                <button
+                  onClick={saveBrandingSettings}
+                  disabled={isSaving}
+                  className="px-6 py-2 bg-[var(--color-button)] text-[var(--color-button-text)] rounded-lg hover:opacity-90 disabled:opacity-50"
+                >
+                  {isSaving ? 'Saving...' : 'Save Branding Settings'}
                 </button>
               </div>
             )}

@@ -227,7 +227,7 @@ plt.bar(df['name'], df['value'])
         # NC-0.8.0.7: Image generation tool
         self.register(
             name="generate_image",
-            description="Generate an image based on a text prompt. Use this when the user asks you to create, draw, generate, or make an image, picture, illustration, or artwork.",
+            description="Generate an image based on a text prompt. Use this when the user asks you to create, draw, generate, or make an image, picture, illustration, or artwork. Default resolution is set in admin settings — omit width and height to use it. Only specify dimensions if the user requests a specific size.",
             parameters={
                 "prompt": {
                     "type": "string",
@@ -236,12 +236,12 @@ plt.bar(df['name'], df['value'])
                 },
                 "width": {
                     "type": "integer",
-                    "description": "Width of the image in pixels. Default: 1024. Common sizes: 512, 768, 1024, 1536",
+                    "description": "Width in pixels. Omit to use admin default. Common sizes: 512, 768, 1024, 1536",
                     "required": False,
                 },
                 "height": {
                     "type": "integer",
-                    "description": "Height of the image in pixels. Default: 1024. Common sizes: 512, 768, 1024, 1536",
+                    "description": "Height in pixels. Omit to use admin default. Common sizes: 512, 768, 1024, 1536",
                     "required": False,
                 }
             },

@@ -8,6 +8,7 @@ These endpoints do not require authentication.
 from fastapi import APIRouter, Depends
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+import os as import_os
 
 from app.core.config import settings
 from app.db.database import get_db
@@ -24,11 +25,43 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
     This endpoint exposes branding and feature flags that the frontend
     needs to render the UI correctly. No authentication required.
     
-    Returns all customizable branding settings, with OAuth and feature flags
-    read from the database (falling back to .env values).
+    Returns all customizable branding settings, with DB overrides for
+    site name, tagline, URLs, favicon, copyright, and branding image.
     """
-    # Get base branding from config
+    # Get base branding from config (.env defaults)
     branding = settings.get_branding()
+    
+    # NC-0.8.0.27: Override with DB-stored branding settings
+    from app.api.routes.admin import get_system_setting
+    
+    db_site_name = await get_system_setting(db, "branding_site_name")
+    db_tagline = await get_system_setting(db, "branding_tagline")
+    db_main_url = await get_system_setting(db, "branding_main_url")
+    db_tos_url = await get_system_setting(db, "branding_tos_url")
+    db_user_agreement_url = await get_system_setting(db, "branding_user_agreement_url")
+    db_branding_image = await get_system_setting(db, "branding_image_url")
+    db_copyright = await get_system_setting(db, "branding_copyright")
+    db_favicon = await get_system_setting(db, "branding_favicon_url")
+    
+    if db_site_name:
+        branding["app_name"] = db_site_name
+        branding["logo_text"] = db_site_name
+    if db_tagline:
+        branding["app_tagline"] = db_tagline
+    if db_main_url:
+        branding["main_url"] = db_main_url
+    if db_tos_url:
+        branding["terms_url"] = db_tos_url
+    if db_user_agreement_url:
+        branding["user_agreement_url"] = db_user_agreement_url
+    if db_branding_image:
+        branding["branding_image_url"] = db_branding_image
+    if db_copyright:
+        branding["footer_text"] = db_copyright
+    if db_favicon:
+        branding["favicon_url"] = db_favicon
+    elif import_os.path.exists("/app/data/favicon.png"):
+        branding["favicon_url"] = "/api/branding/favicon.png"
     
     # Override feature flags with database values
     google_settings = await SettingsService.get_google_oauth_settings(db)
@@ -57,6 +90,30 @@ async def get_public_config(db: AsyncSession = Depends(get_db)):
     }
     
     return branding
+
+
+@router.get("/favicon.png")
+async def serve_favicon():
+    """Serve the custom favicon from /app/data/favicon.png"""
+    from fastapi.responses import FileResponse
+    favicon_path = "/app/data/favicon.png"
+    if import_os.path.exists(favicon_path):
+        return FileResponse(favicon_path, media_type="image/png")
+    from fastapi import HTTPException
+    raise HTTPException(status_code=404, detail="No custom favicon")
+
+
+@router.get("/image/{filename}")
+async def serve_branding_image(filename: str):
+    """Serve a branding image from /app/data/"""
+    from fastapi.responses import FileResponse
+    from fastapi import HTTPException
+    # Sanitize
+    safe = filename.replace("..", "").replace("/", "").replace("\\", "")
+    path = f"/app/data/{safe}"
+    if import_os.path.exists(path):
+        return FileResponse(path)
+    raise HTTPException(status_code=404, detail="Image not found")
 
 
 @router.get("/manifest.json")

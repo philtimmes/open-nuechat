@@ -332,7 +332,7 @@ export interface ImageGenSettings {
   image_gen_available_resolutions: ImageResolutionOption[];
 }
 
-export type TabId = 'system' | 'oauth' | 'llm' | 'image_gen' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'categories' | 'modes' | 'gpu' | 'dev';
+export type TabId = 'system' | 'branding' | 'oauth' | 'llm' | 'image_gen' | 'features' | 'tiers' | 'users' | 'chats' | 'tools' | 'filters' | 'filter_chains' | 'global_kb' | 'categories' | 'modes' | 'gpu' | 'dev';
 
 // Common props for tab components
 export interface TabProps {

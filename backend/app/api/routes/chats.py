@@ -1597,6 +1597,107 @@ async def upload_zip(
         )
 
 
+# NC-0.8.0.27: Artifact file management endpoints
+
+@router.delete("/{chat_id}/artifact-file")
+async def delete_artifact_file(
+    chat_id: str,
+    path: str = Query(..., description="Relative path within the sandbox"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a file or empty folder from the chat's artifact sandbox."""
+    import shutil
+    await _get_user_chat(db, user, chat_id)
+    
+    from app.tools.registry import get_session_sandbox
+    sandbox = get_session_sandbox(chat_id)
+    full_path = os.path.realpath(os.path.join(sandbox, path.lstrip("/")))
+    
+    # Security: must be within sandbox
+    if not full_path.startswith(os.path.realpath(sandbox) + os.sep):
+        raise HTTPException(status_code=400, detail="Path escapes sandbox")
+    
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    if os.path.isdir(full_path):
+        shutil.rmtree(full_path)
+    else:
+        os.remove(full_path)
+    
+    return {"ok": True, "deleted": path}
+
+
+@router.post("/{chat_id}/artifact-copy")
+async def copy_artifact_file(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    body: dict = None,
+):
+    """Copy a file within the chat's artifact sandbox."""
+    import shutil
+    await _get_user_chat(db, user, chat_id)
+    
+    if not body:
+        raise HTTPException(status_code=400, detail="Body required with src and dst")
+    
+    src = body.get("src", "").lstrip("/")
+    dst = body.get("dst", "").lstrip("/")
+    if not src or not dst:
+        raise HTTPException(status_code=400, detail="src and dst required")
+    
+    from app.tools.registry import get_session_sandbox
+    sandbox = get_session_sandbox(chat_id)
+    real_sandbox = os.path.realpath(sandbox)
+    
+    full_src = os.path.realpath(os.path.join(sandbox, src))
+    full_dst = os.path.realpath(os.path.join(sandbox, dst))
+    
+    if not full_src.startswith(real_sandbox + os.sep) or not full_dst.startswith(real_sandbox + os.sep):
+        raise HTTPException(status_code=400, detail="Path escapes sandbox")
+    
+    if not os.path.exists(full_src):
+        raise HTTPException(status_code=404, detail="Source file not found")
+    
+    os.makedirs(os.path.dirname(full_dst), exist_ok=True)
+    
+    if os.path.isdir(full_src):
+        shutil.copytree(full_src, full_dst)
+    else:
+        shutil.copy2(full_src, full_dst)
+    
+    return {"ok": True, "src": src, "dst": dst}
+
+
+@router.post("/{chat_id}/artifact-mkdir")
+async def create_artifact_folder(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    body: dict = None,
+):
+    """Create a new folder in the chat's artifact sandbox."""
+    await _get_user_chat(db, user, chat_id)
+    
+    if not body or not body.get("path"):
+        raise HTTPException(status_code=400, detail="path required")
+    
+    folder_path = body["path"].lstrip("/")
+    
+    from app.tools.registry import get_session_sandbox
+    sandbox = get_session_sandbox(chat_id)
+    full_path = os.path.realpath(os.path.join(sandbox, folder_path))
+    
+    if not full_path.startswith(os.path.realpath(sandbox) + os.sep):
+        raise HTTPException(status_code=400, detail="Path escapes sandbox")
+    
+    os.makedirs(full_path, exist_ok=True)
+    
+    return {"ok": True, "path": folder_path}
+
+
 @router.get("/{chat_id}/zip-file")
 async def get_zip_file(
     chat_id: str,

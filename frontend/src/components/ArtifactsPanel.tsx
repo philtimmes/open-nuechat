@@ -32,6 +32,11 @@ export default function ArtifactsPanel({
   const [isExportingPng, setIsExportingPng] = useState(false);
   const [currentPath, setCurrentPath] = useState<string[]>([]);  // NC-0.8.0.7: Folder navigation
   const [revertConfirm, setRevertConfirm] = useState<Artifact | null>(null);  // NC-0.8.0.12: Revert confirmation
+  const [deleteConfirm, setDeleteConfirm] = useState<{path: string; isFolder: boolean} | null>(null);
+  const [copyModal, setCopyModal] = useState<{srcPath: string} | null>(null);
+  const [copyDest, setCopyDest] = useState('');
+  const [newFolderDialog, setNewFolderDialog] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const fullscreenIframeRef = useRef<HTMLIFrameElement>(null);
   const mermaidRef = useRef<HTMLDivElement>(null);
@@ -604,6 +609,99 @@ export default function ArtifactsPanel({
     onSelect(null);
   };
   
+  // NC-0.8.0.27: File management handlers
+  const chatId = useChatStore(state => state.currentChat?.id);
+  
+  const handleDeleteFile = async (path: string) => {
+    if (!chatId) return;
+    try {
+      await api.delete(`/api/chats/${chatId}/artifact-file?path=${encodeURIComponent(path)}`);
+      setDeleteConfirm(null);
+      // Force refresh artifacts
+      useChatStore.getState().fetchUploadedData(chatId);
+    } catch (err) {
+      console.error('[ArtifactsPanel] Delete failed:', err);
+    }
+  };
+  
+  const handleCopyFile = async () => {
+    if (!chatId || !copyModal || !copyDest.trim()) return;
+    try {
+      await api.post(`/api/chats/${chatId}/artifact-copy`, { src: copyModal.srcPath, dst: copyDest.trim() });
+      setCopyModal(null);
+      setCopyDest('');
+      useChatStore.getState().fetchUploadedData(chatId);
+    } catch (err) {
+      console.error('[ArtifactsPanel] Copy failed:', err);
+    }
+  };
+  
+  const handleNewFolder = async () => {
+    if (!chatId || !newFolderName.trim()) return;
+    const folderPath = currentPath.length > 0 
+      ? currentPath.join('/') + '/' + newFolderName.trim()
+      : newFolderName.trim();
+    try {
+      await api.post(`/api/chats/${chatId}/artifact-mkdir`, { path: folderPath });
+      setNewFolderDialog(false);
+      setNewFolderName('');
+      useChatStore.getState().fetchUploadedData(chatId);
+    } catch (err) {
+      console.error('[ArtifactsPanel] Mkdir failed:', err);
+    }
+  };
+  
+  // SVG icon components for action buttons
+  const DeleteIcon = () => (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+    </svg>
+  );
+  const CopyIcon = () => (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+    </svg>
+  );
+  const RevertIcon = () => (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a5 5 0 015 5v2M3 10l4-4M3 10l4 4" />
+    </svg>
+  );
+  const NewFolderIcon = () => (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+    </svg>
+  );
+  
+  // Action buttons row for items
+  const ItemActions = ({ path, isFolder, group }: { path: string; isFolder: boolean; group?: ArtifactGroup }) => (
+    <div className="flex items-center gap-1 ml-1" onClick={e => e.stopPropagation()}>
+      <button
+        onClick={() => setCopyModal({ srcPath: path })}
+        className="p-1 rounded hover:bg-[var(--color-primary)]/10 text-[var(--color-text-secondary)] hover:text-[var(--color-primary)]"
+        title="Copy"
+      >
+        <CopyIcon />
+      </button>
+      {group && group.versions.length > 1 && (
+        <button
+          onClick={() => setRevertConfirm(group.versions[1])}
+          className="p-1 rounded hover:bg-[var(--color-warning)]/10 text-[var(--color-text-secondary)] hover:text-[var(--color-warning)]"
+          title="Revert to previous version"
+        >
+          <RevertIcon />
+        </button>
+      )}
+      <button
+        onClick={() => setDeleteConfirm({ path, isFolder })}
+        className="p-1 rounded hover:bg-[var(--color-error)]/10 text-[var(--color-text-secondary)] hover:text-[var(--color-error)]"
+        title="Delete"
+      >
+        <DeleteIcon />
+      </button>
+    </div>
+  );
+  
   // Breadcrumb component - NC-0.8.0.7: Enhanced with folder navigation
   const Breadcrumbs = () => {
     // Show breadcrumbs when in folder, versions, or detail view
@@ -725,11 +823,13 @@ export default function ArtifactsPanel({
           ) : (
             <div className="space-y-2">
               {/* Folders first */}
-              {folders.map((folderName) => (
+              {folders.map((folderName) => {
+                const folderPath = currentPath.length > 0 ? currentPath.join('/') + '/' + folderName : folderName;
+                return (
                 <button
                   key={`folder-${folderName}`}
                   onClick={() => handleFolderClick(folderName)}
-                  className="w-full p-3 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)] text-left transition-colors"
+                  className="w-full p-3 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)] text-left transition-colors group"
                 >
                   <div className="flex items-center gap-2">
                     <FolderIcon />
@@ -739,12 +839,16 @@ export default function ArtifactsPanel({
                         <span>Folder</span>
                       </div>
                     </div>
-                    <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <div className="hidden group-hover:flex">
+                      <ItemActions path={folderPath} isFolder={true} />
+                    </div>
+                    <svg className="w-4 h-4 text-[var(--color-text-secondary)] group-hover:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
                   </div>
                 </button>
-              ))}
+                );
+              })}
               
               {/* Files */}
               {files.map((group) => {
@@ -755,7 +859,7 @@ export default function ArtifactsPanel({
                   <button
                     key={group.filename}
                     onClick={() => handleFileClick(group)}
-                    className="w-full p-3 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)] text-left transition-colors"
+                    className="w-full p-3 rounded-lg border border-[var(--color-border)] hover:border-[var(--color-primary)] text-left transition-colors group"
                   >
                     <div className="flex items-center gap-2">
                       <TypeIcon type={group.type} />
@@ -779,7 +883,10 @@ export default function ArtifactsPanel({
                           )}
                         </div>
                       </div>
-                      <svg className="w-4 h-4 text-[var(--color-text-secondary)]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <div className="hidden group-hover:flex">
+                        <ItemActions path={group.filename} isFolder={false} group={group} />
+                      </div>
+                      <svg className="w-4 h-4 text-[var(--color-text-secondary)] group-hover:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                       </svg>
                     </div>
@@ -789,6 +896,100 @@ export default function ArtifactsPanel({
             </div>
           )}
         </div>
+        
+        {/* New Folder button */}
+        <div className="p-3 border-t border-[var(--color-border)]">
+          <button
+            onClick={() => setNewFolderDialog(true)}
+            className="w-full flex items-center justify-center gap-2 p-2 rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] text-sm transition-colors"
+          >
+            <NewFolderIcon />
+            New Folder
+          </button>
+        </div>
+        
+        {/* Delete confirmation modal */}
+        {deleteConfirm && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setDeleteConfirm(null)}>
+            <div className="bg-[var(--color-surface)] rounded-lg p-6 max-w-md mx-4 shadow-xl border border-[var(--color-border)]" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-[var(--color-text)] mb-2">Delete {deleteConfirm.isFolder ? 'Folder' : 'File'}?</h3>
+              <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                Are you sure you want to delete <strong className="text-[var(--color-text)]">{deleteConfirm.path}</strong>?
+                {deleteConfirm.isFolder && ' This will delete all contents inside.'}
+              </p>
+              <div className="flex gap-3 justify-end">
+                <button onClick={() => setDeleteConfirm(null)} className="px-4 py-2 text-sm rounded-lg border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-hover)]">Cancel</button>
+                <button onClick={() => handleDeleteFile(deleteConfirm.path)} className="px-4 py-2 text-sm rounded-lg bg-[var(--color-error)] text-white hover:opacity-90">Delete</button>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* Copy destination modal */}
+        {copyModal && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setCopyModal(null)}>
+            <div className="bg-[var(--color-surface)] rounded-lg p-6 max-w-md mx-4 shadow-xl border border-[var(--color-border)]" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-[var(--color-text)] mb-2">Copy File</h3>
+              <p className="text-sm text-[var(--color-text-secondary)] mb-1">
+                Source: <strong className="text-[var(--color-text)]">{copyModal.srcPath}</strong>
+              </p>
+              <p className="text-sm text-[var(--color-text-secondary)] mb-3">Destination path:</p>
+              <input
+                type="text"
+                value={copyDest}
+                onChange={e => setCopyDest(e.target.value)}
+                placeholder={copyModal.srcPath.replace(/([^/]+)$/, 'copy_$1')}
+                className="w-full p-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-text)] text-sm font-mono focus:border-[var(--color-primary)] outline-none mb-4"
+                autoFocus
+                onKeyDown={e => { if (e.key === 'Enter') handleCopyFile(); if (e.key === 'Escape') setCopyModal(null); }}
+              />
+              {folders.length > 0 && (
+                <div className="mb-4">
+                  <p className="text-xs text-[var(--color-text-secondary)] mb-1">Quick destinations:</p>
+                  <div className="flex flex-wrap gap-1">
+                    {folders.map(f => {
+                      const destPath = (currentPath.length > 0 ? currentPath.join('/') + '/' : '') + f + '/' + copyModal.srcPath.split('/').pop();
+                      return (
+                        <button key={f} onClick={() => setCopyDest(destPath)} className="px-2 py-1 text-xs rounded bg-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text)]">
+                          {f}/
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <div className="flex gap-3 justify-end">
+                <button onClick={() => { setCopyModal(null); setCopyDest(''); }} className="px-4 py-2 text-sm rounded-lg border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-hover)]">Cancel</button>
+                <button onClick={handleCopyFile} disabled={!copyDest.trim()} className="px-4 py-2 text-sm rounded-lg bg-[var(--color-primary)] text-white hover:opacity-90 disabled:opacity-40">OK</button>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* New folder modal */}
+        {newFolderDialog && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setNewFolderDialog(false)}>
+            <div className="bg-[var(--color-surface)] rounded-lg p-6 max-w-md mx-4 shadow-xl border border-[var(--color-border)]" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-[var(--color-text)] mb-2">New Folder</h3>
+              <p className="text-sm text-[var(--color-text-secondary)] mb-3">
+                {currentPath.length > 0 ? `Create in /${currentPath.join('/')}/` : 'Create in root:'}
+              </p>
+              <input
+                type="text"
+                value={newFolderName}
+                onChange={e => setNewFolderName(e.target.value)}
+                placeholder="folder name"
+                className="w-full p-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-text)] text-sm font-mono focus:border-[var(--color-primary)] outline-none mb-4"
+                autoFocus
+                onKeyDown={e => { if (e.key === 'Enter') handleNewFolder(); if (e.key === 'Escape') setNewFolderDialog(false); }}
+              />
+              <div className="flex gap-3 justify-end">
+                <button onClick={() => { setNewFolderDialog(false); setNewFolderName(''); }} className="px-4 py-2 text-sm rounded-lg border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-hover)]">Cancel</button>
+                <button onClick={handleNewFolder} disabled={!newFolderName.trim()} className="px-4 py-2 text-sm rounded-lg bg-[var(--color-primary)] text-white hover:opacity-90 disabled:opacity-40">Create</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

@@ -3,7 +3,7 @@ Admin routes for system settings management
 
 NC-0.8.0.9: Now uses centralized SK keys and SETTING_DEFAULTS from settings_keys.py
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -2137,3 +2137,41 @@ async def set_gpu_assignments_batch(
         raise HTTPException(status_code=500, detail="gpu_manager not available")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# NC-0.8.0.27: Branding file uploads
+
+@router.post("/branding/favicon")
+async def upload_favicon(
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+):
+    """Upload a custom favicon, saved to /app/data/favicon.png"""
+    import os
+    content = await file.read()
+    os.makedirs("/app/data", exist_ok=True)
+    with open("/app/data/favicon.png", "wb") as f:
+        f.write(content)
+    # Also update the DB setting so the branding config picks it up
+    return {"ok": True, "path": "/api/branding/favicon.png"}
+
+
+@router.post("/branding/image")
+async def upload_branding_image(
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a branding/logo image, saved to /app/data/branding_image.png"""
+    import os
+    content = await file.read()
+    ext = file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else "png"
+    filename = f"branding_image.{ext}"
+    os.makedirs("/app/data", exist_ok=True)
+    with open(f"/app/data/{filename}", "wb") as f:
+        f.write(content)
+    # Store the URL in settings
+    url = f"/api/branding/image/{filename}"
+    await set_setting(db, "branding_image_url", url)
+    await db.commit()
+    return {"ok": True, "url": url}

@@ -1152,7 +1152,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           genGroupId = Object.keys(genGroups).length;
           (window as any).__activeToolGroup = genGroupId;
           genGroups[genGroupId] = [];
-          streamingBufferRef.current?.append(`\n<!--tools:${genGroupId}-->\n`);
         }
         
         genGroups[genGroupId].push(genEvent);
@@ -1188,11 +1187,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         let groupId = activeGroup;
         
         if (activeGroup === -1) {
-          // Start a new group — inject marker into streamed content
+          // Start a new group
           groupId = Object.keys(groups).length;
           (window as any).__activeToolGroup = groupId;
           groups[groupId] = [];
-          streamingBufferRef.current?.append(`\n<!--tools:${groupId}-->\n`);
         }
         
         // Check if tool_generating already added this tool — update it instead of duplicating

@@ -688,7 +688,7 @@ function MessageBubbleInner({
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
-  const [editContent, setEditContent] = useState(message.content);
+  const [editContent, setEditContent] = useState(message.content || "");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   
   // Get mermaid rendering setting from branding store
@@ -715,7 +715,7 @@ function MessageBubbleInner({
   };
 
   const copyMessage = async () => {
-    await navigator.clipboard.writeText(message.content);
+    await navigator.clipboard.writeText(message.content || "");
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -837,10 +837,11 @@ function MessageBubbleInner({
   }
   
   // Check if content has artifact references
-  const hasArtifactRefs = /\[📦 Artifact: [^\]]+\]/.test(message.content);
+  const rawContent = message.content || '';
+  const hasArtifactRefs = /\[📦 Artifact: [^\]]+\]/.test(rawContent);
   const contentWithoutArtifacts = hasArtifactRefs 
-    ? message.content.replace(/\[📦 Artifact: [^\]]+\]/g, '') 
-    : message.content;
+    ? rawContent.replace(/\[📦 Artifact: [^\]]+\]/g, '') 
+    : rawContent;
   
   // Preprocess content: fix nested code fences and extract filenames
   const processedContent = preprocessContent(contentWithoutArtifacts);
@@ -1294,7 +1295,7 @@ function MessageBubbleInner({
               {/* Read Aloud button (assistant only) */}
               {isAssistant && onReadAloud && (
                 <button
-                  onClick={() => onReadAloud(message.content)}
+                  onClick={() => onReadAloud(message.content || "")}
                   className={`p-2 md:p-1.5 rounded transition-colors touch-manipulation ${
                     isReadingAloud 
                       ? 'text-[var(--color-primary)] bg-[var(--color-primary)]/10' 
